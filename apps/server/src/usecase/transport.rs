@@ -1,6 +1,6 @@
 //! [`Transport`]: one network's nodes, built from the rows the database
-//! stores, and the selection that picks a node for every call; [`Node`],
-//! one of them with its state; [`Clients`], the nodes in stored order.
+//! stores, and the selection that picks a node for every call. Each node,
+//! its stack and its state are `nodes`' ([`Node`], [`Nodes`]).
 //!
 //! Selection, on every call:
 //! - a routed method goes to its route's nodes, rotated one per call, then
@@ -16,56 +16,49 @@
 //!   (`rpc::Failure::is_unserved`; it is not demoted), moves on to the next
 //!   node; any other error object is the answer; once-only work reaches the
 //!   first node only;
-//! - a broadcast goes to every node.
+//! - a broadcast goes to every node;
+//! - a disabled node is not loaded, and routes skip it; a node whose
+//!   switch turns off since it was loaded is left out at once (and a call
+//!   it had moves on);
+//! - every call runs in a `network` span, each node's call in a `node`
+//!   span (`network`, `node`: its stored id), each made per call under the
+//!   caller's (a job's); every request of a node is logged (`rpc.http`);
+//!   each move to the next node is logged (`rpc.failover`).
+//!
+//! A node's tip and failure streak live here, in memory; whether a stored
+//! node is enabled, and its counts, live in the database: its `Guard` and
+//! wrong-chain probe turn it off there (its [`NodeSwitch`]), its `Counter`
+//! counts there.
 
-use std::{
-    cmp::Reverse,
-    ops::Deref,
-    sync::{
-        Arc, Mutex, PoisonError, RwLock,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::{Duration, Instant},
+use std::sync::{
+    Arc, PoisonError, RwLock,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::ensure;
-use base::{CachedInfo, InfoClient, NetworkConfig, NodeInfo};
+use base::{InfoClient, NetworkConfig, NodeInfo};
 use futures_util::future::join_all;
 use rpc::{Answer, Batch, BoxFuture, Error, ErrorKind, RawJson, Repetition, Request, Retry};
 
-use crate::models::{Endpoint, NodeState, Route};
+use super::nodes::{Node, NodeFactory, Nodes, reader};
+use crate::{
+    db::Db,
+    models::{Endpoint, Endpoints, Route},
+};
 
-/// Retryable failures in a row that demote a node.
-const DEMOTION: u32 = 3;
-
-/// The least a demoted node waits before it is tried in order again.
-const RECOVERY: Duration = Duration::from_secs(30);
-
-/// The longest a node's tip may take: a slower node is not one to pick.
-const PROBE: Duration = Duration::from_secs(3);
-
-/// A chain's reader of one node.
-type Reader = fn(Arc<dyn rpc::Client>) -> Arc<dyn InfoClient>;
-
-/// `node` read by `I`.
-fn reader<I: InfoClient + 'static>(node: Arc<dyn rpc::Client>) -> Arc<dyn InfoClient> {
-    Arc::new(I::new(node))
-}
+/// Why a call reached no node, an index job idles and a payment waits.
+pub(crate) const NO_ENABLED_ENDPOINT: &str = "the network has no enabled RPC endpoint";
 
 /// A network's nodes, built from stored rows, and the selection over them.
 /// It is a client itself: each call picks its node.
 #[derive(Clone)]
-pub(crate) struct Transport(Arc<Nodes>);
+pub(crate) struct Transport(Arc<Shared>);
 
-/// What a transport holds: its nodes and routes, and how it builds and
-/// judges a node.
-struct Nodes {
+/// What a transport holds: its nodes and routes, and how it builds a node.
+struct Shared {
     table: RwLock<Table>,
-    reader: Reader,
-    /// What every node must serve: the network's chain ID, or its name.
-    chain_id: String,
-    /// How long a tip is kept.
-    block_time: Duration,
+    /// Builds each node.
+    factory: NodeFactory,
     /// How far a node may trail the highest tip and stay in sync.
     lag: u64,
 }
@@ -88,58 +81,80 @@ struct Rotation {
 impl Transport {
     /// No nodes yet. `I` is used only to make each node's reader. `config`
     /// gives the chain ID every node must serve and the block time the tips
-    /// are cached for.
-    pub(crate) fn new<I: InfoClient + 'static>(config: &NetworkConfig) -> Self {
+    /// are cached for; each stored node is turned off and counted in `db`.
+    pub(crate) fn new<I: InfoClient + 'static>(config: &NetworkConfig, db: Db) -> Self {
+        Self::with::<I>(config, Some(db))
+    }
+
+    /// [`Self::new`], its stored nodes neither turned off nor counted when
+    /// `db` is `None`.
+    fn with<I: InfoClient + 'static>(config: &NetworkConfig, db: Option<Db>) -> Self {
         let network = &config.network;
-        Self(Arc::new(Nodes {
+        Self(Arc::new(Shared {
             table: RwLock::default(),
-            reader: reader::<I>,
-            chain_id: config
-                .chain_id
-                .clone()
-                .unwrap_or_else(|| network.name.clone()),
-            block_time: config.block_time,
+            factory: NodeFactory {
+                reader: reader::<I>,
+                chain_id: config
+                    .chain_id
+                    .clone()
+                    .unwrap_or_else(|| network.name.clone()),
+                block_time: config.block_time,
+                db,
+                label: super::network_label(network),
+            },
             lag: config.confirmations,
         }))
     }
 
-    /// Ready clients in place of endpoints (tests), each counted and still
-    /// read by `I`.
+    /// Test clients in place of endpoints, each built into a node as a
+    /// stored node's HTTP client is, not stored (neither guarded nor
+    /// counted), read by `I`; stored nodes loaded later are, in `db`.
     #[cfg(test)]
     pub(crate) fn from_clients<I: InfoClient + 'static>(
         config: &NetworkConfig,
         clients: Vec<Arc<dyn rpc::Client>>,
+        db: Option<Db>,
     ) -> Self {
-        let transport = Self::new::<I>(config);
+        let transport = Self::with::<I>(config, db);
+        let url = rpc::Endpoint::new("http://test.invalid/").parse();
+        let url = url.expect("a test URL");
         let nodes = clients.into_iter().map(|client| {
-            let counted = rpc::Counted::new(client);
-            let statistics = counted.statistics();
-            Arc::new(transport.0.node(Arc::new(counted), statistics))
+            let node = transport.0.factory.build(client, &url, None);
+            Arc::new(node.expect("a test node"))
         });
         write(&transport.0.table).nodes = nodes.collect();
         transport
     }
 
-    /// The stored nodes and routes: a node whose URL stays keeps its state;
-    /// a new one starts empty; a missing one goes. The same call at boot and
-    /// on every edit. Asks no node.
+    /// The stored enabled nodes and routes: a node whose URL stays keeps
+    /// its state; a new one starts afresh; a missing or disabled one goes,
+    /// and routes skip it. The same call at boot and on every edit. Asks no
+    /// node.
     ///
     /// # Errors
     ///
     /// A stored URL that does not build: that node is left out, the others
     /// load.
-    pub(crate) fn load(&self, endpoints: &[Endpoint], routes: &[Route]) -> anyhow::Result<()> {
+    pub(crate) fn load(&self, endpoints: &Endpoints, routes: &[Route]) -> anyhow::Result<()> {
         let old = self.clients();
         let mut nodes = Vec::new();
         let mut ids = Vec::new();
         let mut failed = Vec::new();
-        for endpoint in endpoints {
+        let open = |endpoint: &Endpoint| -> anyhow::Result<Node> {
+            let url = endpoint.url.parse()?;
+            let http = Arc::new(rpc::Http::new(&url, endpoint.url.clone())?);
+            self.0.factory.build(http, &url, Some(endpoint.id))
+        };
+        for endpoint in endpoints
+            .iter()
+            .filter(|endpoint| endpoint.disabled.is_none())
+        {
             let kept = old
                 .iter()
                 .find(|node| node.endpoint() == Some(&endpoint.url));
             let node = match kept {
                 Some(node) => node.clone(),
-                None => match self.0.open(&endpoint.url) {
+                None => match open(endpoint) {
                     Ok(node) => Arc::new(node),
                     Err(error) => {
                         failed.push(format!("node {}: {error}", endpoint.id));
@@ -181,7 +196,9 @@ impl Transport {
         allow(dead_code, reason = "082: no route swaps one node yet")
     )]
     pub(crate) fn replace(&self, node: &Node, endpoint: &rpc::Endpoint) -> anyhow::Result<()> {
-        let fresh = Arc::new(self.0.open(endpoint)?);
+        let url = endpoint.parse()?;
+        let http = Arc::new(rpc::Http::new(&url, endpoint.clone())?);
+        let fresh = Arc::new(self.0.factory.build(http, &url, node.endpoint_id)?);
         let mut table = write(&self.0.table);
         let slot = table
             .nodes
@@ -201,8 +218,10 @@ impl Transport {
     ///
     /// An invalid endpoint, a node failure, or a node of another chain.
     pub(crate) async fn verify(&self, endpoint: &rpc::Endpoint) -> anyhow::Result<NodeInfo> {
-        let info = self.0.open(endpoint)?.info().await?;
-        let expected = &self.0.chain_id;
+        let url = endpoint.parse()?;
+        let http = Arc::new(rpc::Http::new(&url, endpoint.clone())?);
+        let info = self.0.factory.build(http, &url, None)?.info().await?;
+        let expected = &self.0.factory.chain_id;
         ensure!(
             info.chain_id == *expected,
             "the node serves {}, not this network's {expected}",
@@ -211,9 +230,16 @@ impl Transport {
         Ok(info)
     }
 
-    /// The current nodes, in stored order.
-    pub(crate) fn clients(&self) -> Clients {
-        Clients(read(&self.0.table).nodes.clone())
+    /// Whether it has no node to call: every stored one disabled or off.
+    pub(crate) fn has_no_node(&self) -> bool {
+        self.clients().is_empty()
+    }
+
+    /// The current nodes, in stored order, without those turned off since
+    /// they were loaded.
+    pub(crate) fn clients(&self) -> Nodes {
+        let nodes = read(&self.0.table).nodes.clone();
+        Nodes(nodes.into_iter().filter(|node| !node.is_off()).collect())
     }
 
     /// The nodes to try for `method`, in order: see the module.
@@ -223,9 +249,10 @@ impl Transport {
             let route = method
                 .and_then(|method| table.routes.iter().find(|route| route.method == method))
                 .map(Rotation::turn);
-            (Clients(table.nodes.clone()), route)
+            (Nodes(table.nodes.clone()), route)
         };
         let Some(route) = route else {
+            let clients = self.clients();
             let ranked = clients.ranked(self.0.lag).await;
             return ranked.into_iter().cloned().collect();
         };
@@ -236,29 +263,50 @@ impl Transport {
             .chain(rest)
             .map(|position| clients[position].clone())
             .collect();
+        candidates.retain(|node| !node.is_off());
         candidates.sort_by_key(|node| !node.healthy());
         candidates
     }
 
     /// `send` to each candidate for `method` until one answers or fails for
-    /// good; once-only work to the first only.
+    /// good; once-only work to the first it reaches only.
     async fn walk<T>(
         &self,
         method: Option<&str>,
         repetition: Repetition,
         send: impl for<'c> Fn(&'c dyn rpc::Client) -> BoxFuture<'c, Result<T, Error>>,
     ) -> Result<T, Error> {
+        let candidates = self.candidates(method).await;
+        let method = method.unwrap_or("batch");
         let mut outcome = Err(no_node());
-        for node in self.candidates(method).await {
-            outcome = send(&*node.client).await;
+        let mut from: Option<&Arc<Node>> = None;
+        for node in &candidates {
+            if let (Some(from), Err(error)) = (from, &outcome) {
+                self.failover(method, from, node, error);
+            }
+            outcome = send(node.client()).await;
             node.observe(outcome.as_ref().err());
             let retryable = matches!(&outcome, Err(error) if error.is_retryable());
             let unserved = matches!(&outcome, Err(Error::Remote(failure)) if failure.is_unserved());
-            if !(retryable || unserved) || repetition == Repetition::Forbidden {
+            let gone = outcome.is_err() && node.is_off();
+            let walks = repetition == Repetition::Permitted && (retryable || unserved || gone);
+            if !walks {
                 return outcome;
             }
+            from = Some(node);
         }
         outcome
+    }
+
+    /// Logs a call of `method` moving on from node `from`, failed with
+    /// `error`, to node `to`: `rpc.failover`, info.
+    fn failover(&self, method: &str, from: &Node, to: &Node, error: &Error) {
+        let (from, to, kind) = (from.label(), to.label(), error.label());
+        tracing::info!(
+            target: "rpc.failover",
+            method, from, to, kind,
+            "RPC call moved on to the next node"
+        );
     }
 
     /// Every node once, concurrently, waiting for all; the first success
@@ -269,7 +317,7 @@ impl Transport {
         let clients = self.clients();
         let sends = clients
             .iter()
-            .map(|node| node.client.broadcast(request.clone()));
+            .map(|node| node.client().broadcast(request.clone()));
         let mut failed = None;
         for outcome in join_all(sends).await {
             match outcome {
@@ -282,11 +330,28 @@ impl Transport {
     }
 }
 
+/// What a container of server transports answers about a network's nodes.
+pub(crate) trait Served {
+    /// Whether `network` has a node to call: registered, with at least one
+    /// enabled node not turned off since it was loaded.
+    fn has_node(&self, network: &base::Network) -> bool;
+}
+
+impl Served for base::Container<Transport> {
+    fn has_node(&self, network: &base::Network) -> bool {
+        self.transport(network)
+            .is_ok_and(|transport| !transport.has_no_node())
+    }
+}
+
 impl base::Transport for Transport {
-    /// Retry over the selection: the same nodes for the transport's whole
-    /// life, a node chosen on every call.
+    /// Retry over the selection, in the network's span: the same nodes for
+    /// the transport's whole life, a node chosen on every call.
     fn client(&self) -> Arc<dyn rpc::Client> {
-        Arc::new(Retry::new(self.clone()))
+        let retry = Retry::new(self.clone());
+        let label = self.0.factory.label.clone();
+        let span = Arc::new(move || tracing::info_span!("network", network = %label));
+        Arc::new(rpc::Spanned::new(retry, span))
     }
 }
 
@@ -312,27 +377,6 @@ impl rpc::Client for Transport {
     }
 }
 
-impl Nodes {
-    /// The node at `endpoint`; asks it nothing.
-    fn open(&self, endpoint: &rpc::Endpoint) -> anyhow::Result<Node> {
-        // No sink yet: nothing reads RPC failure events.
-        let node = rpc::node(endpoint, Default::default())?;
-        let statistics = node.statistics();
-        Ok(self.node(Arc::new(node), statistics))
-    }
-
-    /// `client` as a node of this network, `statistics` its counters.
-    fn node(&self, client: Arc<dyn rpc::Client>, statistics: rpc::Statistics) -> Node {
-        Node {
-            info: CachedInfo::new((self.reader)(client.clone()), self.block_time),
-            client,
-            statistics,
-            health: Mutex::default(),
-            recovery: self.block_time.saturating_mul(10).max(RECOVERY),
-        }
-    }
-}
-
 impl Rotation {
     /// Its nodes, starting one further than the last call did.
     fn turn(&self) -> Vec<usize> {
@@ -344,173 +388,11 @@ impl Rotation {
     }
 }
 
-/// One node: its client, its cached reader, its state.
-pub(crate) struct Node {
-    /// `rpc::node(url)`: Http, Throttle, Split, Logged, Counted.
-    client: Arc<dyn rpc::Client>,
-    /// The chain's reader over `client`, its tip kept for a block time.
-    info: CachedInfo,
-    /// `client`'s counters.
-    statistics: rpc::Statistics,
-    health: Mutex<Health>,
-    /// How long a demoted node waits before it is tried in order again.
-    recovery: Duration,
-}
-
-/// A node's failure streak, and since when it is demoted.
-#[derive(Default)]
-struct Health {
-    failures: u32,
-    demoted: Option<Instant>,
-}
-
-impl Node {
-    /// The URL it was built from; `None` for a ready client (tests).
-    pub(crate) fn endpoint(&self) -> Option<&rpc::Endpoint> {
-        self.client.endpoint()
-    }
-
-    /// Its identity, [`rpc::Endpoint::id`].
-    pub(crate) fn id(&self) -> Option<String> {
-        self.endpoint().map(rpc::Endpoint::id)
-    }
-
-    /// What we know about it: last tip, failures, statistics; asks nothing.
-    pub(crate) async fn state(&self) -> NodeState {
-        let snapshot = self.statistics.snapshot();
-        NodeState {
-            tip: self.info.last().await,
-            failures: lock(&self.health).failures,
-            calls: snapshot.attempts,
-            failed_calls: snapshot.failures,
-            last_failure: snapshot.last_failure,
-        }
-    }
-
-    /// Asks it now: its chain ID and tip.
-    ///
-    /// # Errors
-    ///
-    /// A node failure.
-    pub(crate) async fn info(&self) -> anyhow::Result<NodeInfo> {
-        self.info.info().await
-    }
-
-    /// Whether selection takes it in order: not demoted, or demoted long
-    /// enough ago.
-    fn healthy(&self) -> bool {
-        let health = lock(&self.health);
-        let Some(since) = health.demoted else {
-            return true;
-        };
-        since.elapsed() >= self.recovery
-    }
-
-    /// Its tip for selection: asked at most once per block time and at most
-    /// [`PROBE`] long while healthy, a failed ask counting as a failure; a
-    /// demoted node's last one.
-    async fn tip(&self) -> Option<u64> {
-        if !self.healthy() {
-            return self.info.last().await;
-        }
-        let Ok(Ok(tip)) = tokio::time::timeout(PROBE, self.info.tip()).await else {
-            self.failed(false);
-            return None;
-        };
-        Some(tip)
-    }
-
-    /// Counts a call's outcome: a success ends the streak; a retryable
-    /// failure extends it, a rate limit to a demotion at once; any other
-    /// error is the node answering.
-    fn observe(&self, error: Option<&Error>) {
-        match error {
-            None => *lock(&self.health) = Health::default(),
-            Some(error) if error.is_retryable() => self.failed(error.is_rate_limited()),
-            Some(_) => {}
-        }
-    }
-
-    fn failed(&self, limited: bool) {
-        let mut health = lock(&self.health);
-        health.failures = health.failures.saturating_add(1);
-        if limited {
-            health.failures = health.failures.max(DEMOTION);
-        }
-        if health.failures >= DEMOTION {
-            health.demoted = Some(Instant::now());
-        }
-    }
-}
-
-/// The current nodes, in stored order: a list, plus the questions selection
-/// asks of it.
-pub(crate) struct Clients(Vec<Arc<Node>>);
-
-impl Deref for Clients {
-    type Target = [Arc<Node>];
-
-    fn deref(&self) -> &[Arc<Node>] {
-        &self.0
-    }
-}
-
-impl Clients {
-    /// The healthy node with the highest tip; ties and unknown tips: stored
-    /// order.
-    #[cfg_attr(
-        not(test),
-        allow(dead_code, reason = "082: selection ranks every node; tests ask")
-    )]
-    pub(crate) async fn highest(&self) -> Option<&Arc<Node>> {
-        let ranked = self.ranked(u64::MAX).await;
-        ranked.into_iter().next().filter(|node| node.healthy())
-    }
-
-    /// The node whose id is `id`.
-    pub(crate) fn find(&self, id: &str) -> Option<&Arc<Node>> {
-        self.iter().find(|node| node.id().as_deref() == Some(id))
-    }
-
-    /// Each of `endpoints` with the state of its node; none for one that
-    /// did not load.
-    pub(crate) async fn states(&self, endpoints: &mut [Endpoint]) {
-        for endpoint in endpoints {
-            let Some(node) = self.find(&endpoint.url.id()) else {
-                continue;
-            };
-            endpoint.state = Some(node.state().await);
-        }
-    }
-
-    /// Every node in selection order: the healthy one with the highest tip
-    /// (ties and unknown tips: stored order), then the other healthy ones
-    /// within `lag` of that tip, then those further behind or with no known
-    /// tip, then the demoted ones; each group in stored order.
-    async fn ranked(&self, lag: u64) -> Vec<&Arc<Node>> {
-        let tips = join_all(self.iter().map(|node| node.tip())).await;
-        let healthy: Vec<bool> = self.iter().map(|node| node.healthy()).collect();
-        let highest = (0..self.len())
-            .filter(|&position| healthy[position])
-            .min_by_key(|&position| Reverse(tips[position]));
-        let top = highest.and_then(|position| tips[position]);
-        let group = |position: usize| match (top, tips[position]) {
-            _ if Some(position) == highest => 0,
-            _ if !healthy[position] => 3,
-            (Some(top), Some(tip)) if top.saturating_sub(tip) <= lag => 1,
-            _ => 2,
-        };
-        let mut order: Vec<usize> = (0..self.len()).collect();
-        order.sort_by_key(|&position| group(position));
-        order.into_iter().map(|position| &self[position]).collect()
-    }
-}
-
 /// Why a call reached no node.
 fn no_node() -> Error {
     Error::Transport {
         kind: ErrorKind::InvalidConfiguration,
-        message: "the network has no RPC node".to_owned(),
+        message: NO_ENABLED_ENDPOINT.to_owned(),
     }
 }
 
@@ -522,10 +404,6 @@ fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
 
 fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
     lock.write().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn lock<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -542,7 +420,9 @@ mod tests {
     };
     use serde_json::json;
 
-    use super::{Clients, Transport};
+    use super::{Nodes, Transport};
+    use crate::models::{Endpoint, EndpointFailure, Endpoints};
+    use crate::usecase::nodes::lock;
 
     /// A network whose tips are kept a minute and whose nodes may trail
     /// the highest tip by 2.
@@ -573,7 +453,7 @@ mod tests {
             })
             .unzip();
         (
-            Transport::from_clients::<TipInfo>(&config(), clients),
+            Transport::from_clients::<TipInfo>(&config(), clients, None),
             nodes,
         )
     }
@@ -592,7 +472,7 @@ mod tests {
         raw.deserialize()
     }
 
-    fn position(clients: &Clients, node: Option<&Arc<super::Node>>) -> Option<usize> {
+    fn position(clients: &Nodes, node: Option<&Arc<super::Node>>) -> Option<usize> {
         let node = node?;
         clients.iter().position(|held| Arc::ptr_eq(held, node))
     }
@@ -604,7 +484,7 @@ mod tests {
         assert_eq!(ask(&highest, "m").await.unwrap(), 1);
         let clients = highest.clients();
         assert_eq!(position(&clients, clients.highest().await), Some(1));
-        assert_eq!(clients[1].state().await.tip, Some(9));
+        assert_eq!(clients[1].info.last().await, Some(9));
 
         let (tie, ties) = transport(&[9, 9]);
         ties[0].0.push([Reply::ok("m", json!(0))]);
@@ -653,7 +533,7 @@ mod tests {
         nodes[1].0.push([Reply::ok("m", json!(1))]);
         assert_eq!(ask(&transport, "m").await.unwrap(), 1);
         let clients = transport.clients();
-        assert_eq!(clients[0].state().await.failures, 0, "not demoted");
+        assert_eq!(lock(&clients[0].health).failures, 0, "not demoted");
         assert_eq!(position(&clients, clients.highest().await), Some(0));
         for (script, _) in &nodes {
             script.exhausted();
@@ -675,13 +555,13 @@ mod tests {
         assert_eq!(ask(&transport, "m").await.unwrap(), 1);
         assert_eq!(first.1.requests(), asked, "a demoted node goes last");
         let clients = transport.clients();
-        assert_eq!(clients[0].state().await.failures, 3);
+        assert_eq!(lock(&clients[0].health).failures, 3);
         assert_eq!(position(&clients, clients.highest().await), Some(1));
 
         let since = Instant::now().checked_sub(clients[0].recovery).unwrap();
-        super::lock(&clients[0].health).demoted = Some(since);
+        lock(&clients[0].health).demoted = Some(since);
         assert!(clients[0].healthy(), "back in order after the recovery");
-        super::lock(&clients[0].health).demoted = Some(Instant::now());
+        lock(&clients[0].health).demoted = Some(Instant::now());
 
         first.1.down(false);
         second.1.down(true);
@@ -692,7 +572,7 @@ mod tests {
             "the demoted node, last"
         );
         assert_eq!(
-            clients[0].state().await.failures,
+            lock(&clients[0].health).failures,
             0,
             "its answer ends the streak"
         );
@@ -712,7 +592,7 @@ mod tests {
         assert_eq!(ask(&transport, "m").await.unwrap(), 1);
         assert_eq!(ask(&transport, "m").await.unwrap(), 1);
         let clients = transport.clients();
-        assert_eq!(clients[0].state().await.failures, 3);
+        assert_eq!(lock(&clients[0].health).failures, 3);
         for (script, _) in &nodes {
             script.exhausted();
         }
@@ -780,37 +660,90 @@ mod tests {
 
     #[tokio::test]
     async fn load_keeps_a_node_whose_url_stays_and_replace_starts_one_empty() {
-        let transport = Transport::new::<TipInfo>(&config());
-        let endpoint = |id: i64| crate::models::Endpoint {
-            id,
-            url: rpc::Endpoint::new(format!("http://node-{id}.invalid/")),
-            state: None,
-        };
-        transport.load(&[endpoint(1), endpoint(2)], &[]).unwrap();
+        let transport = Transport::from_clients::<TipInfo>(&config(), Vec::new(), None);
+        transport
+            .load(&nodes([endpoint(1), endpoint(2)]), &[])
+            .unwrap();
         let before = transport.clients();
-        super::lock(&before[0].health).failures = 2;
-        transport.load(&[endpoint(2), endpoint(1)], &[]).unwrap();
+        lock(&before[0].health).failures = 2;
+        transport
+            .load(&nodes([endpoint(2), endpoint(1)]), &[])
+            .unwrap();
         let after = transport.clients();
         assert!(Arc::ptr_eq(&before[0], &after[1]), "kept, now second");
-        assert_eq!(after[1].state().await.failures, 2);
+        assert_eq!(lock(&after[1].health).failures, 2);
         assert!(after.find("node-2.invalid/").is_some());
 
         let fresh = rpc::Endpoint::new("http://node-3.invalid/");
         transport.replace(&after[1], &fresh).unwrap();
         let replaced = transport.clients();
         assert_eq!(replaced[1].endpoint(), Some(&fresh));
-        assert_eq!(replaced[1].state().await.failures, 0);
+        assert_eq!(lock(&replaced[1].health).failures, 0);
         assert!(
             transport.replace(&after[1], &fresh).is_err(),
             "already gone"
         );
 
-        let bad = crate::models::Endpoint {
-            id: 4,
+        let bad = Endpoint {
             url: rpc::Endpoint::new("ftp://node.invalid/"),
-            state: None,
+            ..endpoint(4)
         };
-        assert!(transport.load(&[endpoint(1), bad], &[]).is_err());
+        assert!(transport.load(&nodes([endpoint(1), bad]), &[]).is_err());
         assert_eq!(transport.clients().len(), 1, "the rest load");
+    }
+
+    /// Stored node `id` at `http://node-{id}.invalid/`, enabled.
+    fn endpoint(id: i64) -> Endpoint {
+        Endpoint {
+            id,
+            url: rpc::Endpoint::new(format!("http://node-{id}.invalid/")),
+            position: id,
+            stats: crate::models::EndpointStats {
+                endpoint_id: id,
+                calls: 0,
+                failed_calls: 0,
+                updated_at: 0,
+            },
+            disabled: None,
+        }
+    }
+
+    /// `endpoints`, as a network's.
+    fn nodes<const N: usize>(endpoints: [Endpoint; N]) -> Endpoints {
+        Endpoints::from(Vec::from(endpoints))
+    }
+
+    #[tokio::test]
+    async fn a_disabled_node_is_left_out_and_its_routes_skip_it() {
+        let transport = Transport::from_clients::<TipInfo>(&config(), Vec::new(), None);
+        let disabled = Endpoint {
+            disabled: Some(EndpointFailure::manual(2, 0, "flaky".to_owned())),
+            ..endpoint(2)
+        };
+        let route = |ids: Vec<i64>| crate::models::Route {
+            method: "m".to_owned(),
+            endpoint_ids: ids,
+        };
+        let endpoints = nodes([endpoint(1), disabled.clone()]);
+        transport.load(&endpoints, &[route(vec![2])]).unwrap();
+        let clients = transport.clients();
+        assert_eq!(clients.len(), 1);
+        assert!(clients.find("node-1.invalid/").is_some());
+        assert!(
+            clients.find("node-2.invalid/").is_none(),
+            "disabled: left out"
+        );
+        assert!(
+            super::read(&transport.0.table).routes.is_empty(),
+            "a route over disabled nodes only is skipped"
+        );
+
+        transport.load(&nodes([disabled]), &[]).unwrap();
+        assert!(transport.clients().is_empty());
+        let error = ask(&transport, "m").await.unwrap_err();
+        assert!(
+            error.to_string().contains(super::NO_ENABLED_ENDPOINT),
+            "{error}"
+        );
     }
 }

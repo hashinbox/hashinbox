@@ -1,3 +1,4 @@
+import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Chip from '@mui/material/Chip';
@@ -8,34 +9,32 @@ import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableRow from '@mui/material/TableRow';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
+import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { AddNode } from './add';
 import { Routes } from './routes';
 
-/** A stored node URL, parsed by the browser, and what the server knows of it; `index` is its position. */
+/** A stored node as the server lists it, its URL parsed by the browser; `index` is its position. */
 interface Node {
   index: number;
-  id: number;
   text: string;
   url: URL;
-  state: Schemas['RpcNodeState'] | null;
+  enabled: boolean;
+  stored: Schemas['RpcNode'];
 }
 
 const HEADER = 'header.';
 const SETTING = 'rpc.';
-/** Failures in a row from which a node is tried after every other one. */
-const DEMOTED = 3;
 
-/** One line of what the server knows of a node, or that it is not running. */
-function summary(state: Node['state']): string {
-  if (!state) return 'not running';
-  const tip = state.tip === null ? 'tip unknown' : `tip ${state.tip}`;
-  return `${tip} · ${state.calls} calls · ${state.failed_calls} failed`;
+/** One line of a node's calls. */
+function summary(node: Schemas['RpcNode']): string {
+  return `${node.stats.calls} calls · ${node.stats.failed_calls} failed`;
 }
 
 /** A network's nodes in failover order, and the one picked, parsed. */
@@ -51,12 +50,12 @@ export function Nodes({
   const [picked, setPicked] = useState(0);
   const [adding, setAdding] = useState(false);
   const [removing, setRemoving] = useState<Node | null>(null);
-  const nodes = network.endpoints.map(({ id, url, state }, index): Node => ({
+  const nodes = network.endpoints.map((stored, index): Node => ({
     index,
-    id,
-    text: url,
-    url: new URL(url),
-    state,
+    text: stored.url,
+    url: new URL(stored.url),
+    enabled: stored.disabled === null,
+    stored,
   }));
   const node = nodes[picked] ?? nodes[0] ?? null;
   const name = `${network.chain}/${network.network}`;
@@ -64,12 +63,27 @@ export function Nodes({
   const remove = (target: Node) => {
     setRemoving(null);
     const params = {
-      path: { chain: network.chain, network: network.network, id: target.id },
+      path: { chain: network.chain, network: network.network, id: target.stored.id },
     };
     call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{id}', { params }))
       .then(() => {
         shell.notify(`${target.url.origin} removed from ${name}.`);
         setPicked(0);
+        onChanged();
+      })
+      .catch(shell.fail);
+  };
+
+  const toggle = (target: Node, reason: string) => {
+    const params = {
+      path: { chain: network.chain, network: network.network, id: target.stored.id },
+    };
+    const body = target.enabled
+      ? { state: 'disabled' as const, reason: reason || null }
+      : { state: 'enabled' as const };
+    call(client.PUT('/v1/networks/{chain}/{network}/endpoints/{id}/state', { params, body }))
+      .then(() => {
+        shell.notify(`${target.url.origin} ${target.enabled ? 'disabled' : 'enabled'}.`);
         onChanged();
       })
       .catch(shell.fail);
@@ -88,8 +102,14 @@ export function Nodes({
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 720 }}>
         Calls go to the healthy node with the highest tip, then to the others in order; a node
         failing 3 times in a row, or rate-limited, goes last. A change is stored and used at once.
-        {network.index_job_reason && ` Index job's last run failed: ${network.index_job_reason}`}
+        {network.index?.job_reason && ` Index job's last run failed: ${network.index.job_reason}`}
       </Typography>
+      {nodes.every((n) => !n.enabled) && (
+        <Alert severity="error" sx={{ mb: 3 }}>
+          No enabled RPC endpoint: no call goes out, indexing idles and payments wait. Enable a
+          node.
+        </Alert>
+      )}
       <Box
         sx={{
           display: 'grid',
@@ -119,15 +139,18 @@ export function Nodes({
                 {[...n.url.searchParams.keys()].some((k) => k.startsWith(HEADER)) && (
                   <Chip size="small" label="header key" />
                 )}
-                {n.state && n.state.failures >= DEMOTED && (
-                  <Chip size="small" color="warning" label="demoted" />
-                )}
+                {!n.enabled && <Chip size="small" color="error" label="Disabled" />}
               </Stack>
+              {n.stored.disabled && (
+                <Typography noWrap sx={{ fontSize: 11.5, color: 'error.main' }}>
+                  {n.stored.disabled.message}
+                </Typography>
+              )}
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}>
                 {n.text}
               </Typography>
               <Typography noWrap sx={{ fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}>
-                {summary(n.state)}
+                {summary(n.stored)}
               </Typography>
             </ListItemButton>
           ))}
@@ -138,7 +161,14 @@ export function Nodes({
           )}
         </List>
         {node && (
-          <Detail node={node} onRemove={() => setRemoving(node)} last={nodes.length === 1} />
+          <Detail
+            key={node.stored.id}
+            node={node}
+            network={network}
+            onRemove={() => setRemoving(node)}
+            onToggle={(reason) => toggle(node, reason)}
+            last={nodes.length === 1}
+          />
         )}
       </Box>
       <Routes shell={shell} network={network} onChanged={onChanged} />
@@ -169,8 +199,21 @@ export function Nodes({
   );
 }
 
-/** One node's URL, parsed: an unwritten port or `rpc.` setting is the default. */
-function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; last: boolean }) {
+/** One node's URL, parsed: an unwritten port or `rpc.` setting is the default; its state, and its recent failures. */
+function Detail({
+  node,
+  network,
+  onRemove,
+  onToggle,
+  last,
+}: {
+  node: Node;
+  network: ConfiguredNetwork;
+  onRemove: () => void;
+  onToggle: (reason: string) => void;
+  last: boolean;
+}) {
+  const [reason, setReason] = useState('');
   const row = (label: string, value: string) => (
     <TableRow>
       <TableCell sx={{ color: 'text.secondary', width: 150 }}>{label}</TableCell>
@@ -179,7 +222,7 @@ function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; la
       </TableCell>
     </TableRow>
   );
-  const { url, state } = node;
+  const { url, stored } = node;
   const params = [...url.searchParams];
   const query = params.filter(([k]) => !k.startsWith(HEADER) && !k.startsWith(SETTING));
   const headers = params.filter(([k]) => k.startsWith(HEADER));
@@ -213,15 +256,78 @@ function Detail({ node, onRemove, last }: { node: Node; onRemove: () => void; la
           {row('Request limit', setting('max_request_bytes', ' bytes'))}
           {row('Response limit', setting('max_response_bytes', ' bytes'))}
           {row('Max batch', setting('max_batch', ' calls'))}
-          {row('Tip', state?.tip?.toString() ?? 'unknown')}
-          {row('Failures in a row', state ? state.failures.toString() : 'not running')}
-          {row('Calls', state ? `${state.calls} (${state.failed_calls} failed)` : 'not running')}
-          {row('Last failure', state?.last_failure ?? 'none')}
+          {row('Calls', `${stored.stats.calls} (${stored.stats.failed_calls} failed)`)}
+          {row(
+            'State',
+            stored.disabled
+              ? `disabled (${stored.disabled.kind}): ${stored.disabled.message}`
+              : 'enabled',
+          )}
         </TableBody>
       </Table>
-      <Button color="error" sx={{ mt: 1.5 }} disabled={last} onClick={onRemove}>
-        {last ? 'The last node stays' : 'Remove node'}
-      </Button>
+      <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: 'center' }}>
+        {node.enabled && (
+          <TextField
+            size="small"
+            label="Why disable it"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+        )}
+        <Button variant="outlined" onClick={() => onToggle(reason)}>
+          {node.enabled ? 'Disable' : 'Enable'}
+        </Button>
+        <Box sx={{ flexGrow: 1 }} />
+        <Button color="error" disabled={last} onClick={onRemove}>
+          {last ? 'The last node stays' : 'Remove node'}
+        </Button>
+      </Stack>
+      <Failures network={network} id={stored.id} />
+    </Box>
+  );
+}
+
+/** What last disabled or enabled a node, and why, newest first. */
+function Failures({ network, id }: { network: ConfiguredNetwork; id: number }) {
+  const [failures, setFailures] = useState<Schemas['RpcNodeFailure'][] | null>(null);
+  useEffect(() => {
+    let live = true;
+    const params = {
+      path: { chain: network.chain, network: network.network, id },
+      query: { limit: 20 },
+    };
+    call(client.GET('/v1/networks/{chain}/{network}/endpoints/{id}/failures', { params }))
+      .then((page) => {
+        if (live) setFailures(page.failures);
+      })
+      .catch(() => {
+        if (live) setFailures([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [network.chain, network.network, id]);
+  return (
+    <Box sx={{ mt: 2 }}>
+      <Typography variant="subtitle2">Disables and enables</Typography>
+      {failures?.length === 0 && (
+        <Typography color="text.secondary" sx={{ fontSize: 13 }}>
+          None yet.
+        </Typography>
+      )}
+      <Table size="small">
+        <TableBody>
+          {failures?.map((f) => (
+            <TableRow key={f.id}>
+              <TableCell sx={{ fontSize: 12 }}>
+                <When at={f.at} />
+              </TableCell>
+              <TableCell sx={{ fontFamily: mono, fontSize: 12 }}>{f.kind}</TableCell>
+              <TableCell sx={{ fontSize: 12, overflowWrap: 'anywhere' }}>{f.message}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </Box>
   );
 }

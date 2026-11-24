@@ -110,6 +110,7 @@ async fn wallets_balance_legs_and_sends() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -280,10 +281,10 @@ async fn wallets_balance_legs_and_sends() {
     let network = &networks["networks"][0];
     assert_eq!(network["endpoints"], json!([]));
     assert_eq!(
-        (&network["index"]["tip"], &network["tip_live"]),
+        (&network["index"]["tip"], &network["tip"]["live"]),
         (&Value::Null, &Value::Null)
     );
-    assert!(network["tip_error"].is_string(), "{network}");
+    assert!(network["tip"]["error"].is_string(), "{network}");
     let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
     let (status, listed) = call(&router, Method::GET, endpoints, None).await;
     assert_eq!((status, &listed["endpoints"]), (StatusCode::OK, &json!([])));
@@ -322,7 +323,25 @@ async fn wallets_balance_legs_and_sends() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, health) = call(&router, Method::GET, "/health", None).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "no index yet: {health}"
+    );
+    db.write(|connection| {
+        use diesel::connection::SimpleConnection as _;
+        Ok(connection.batch_execute(
+            "INSERT INTO network_index (chain, network, tip, confirmed)
+             VALUES ('bitcoin', 'regtest', 5, 4);
+             INSERT INTO network_endpoint (chain, network, url, position)
+             VALUES ('bitcoin', 'regtest', 'http://ready.invalid/', 0)",
+        )?)
+    })
+    .await
+    .unwrap();
+    let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!((status, &health["ready"]), (StatusCode::OK, &json!(true)));
+    assert_eq!(health["networks"][0]["indexing"]["tip"], 5, "{health}");
 
     let stored = json!([
         "http://a.invalid/",
@@ -374,6 +393,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -411,7 +431,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         .map(|n| n["id"].as_i64().unwrap())
         .collect();
     assert_eq!(put["endpoints"][1]["url"], json!(nodes[1]));
-    assert!(put["endpoints"][1]["state"].is_object(), "{put}");
+    assert_eq!(put["endpoints"][1]["disabled"], Value::Null, "{put}");
     assert_eq!(
         ask("m").await,
         0,
@@ -482,12 +502,12 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
     );
     assert_eq!(ask("m").await, 0);
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
-    let state = &networks["networks"][0]["endpoints"][0]["state"];
+    let state = &networks["networks"][0]["endpoints"][0];
     assert!(
-        state["calls"].as_u64() > Some(1),
+        state["stats"]["calls"].as_u64() > Some(1),
         "kept across edits: {state}"
     );
-    assert_eq!(state["failures"], 0, "{state}");
+    assert_eq!(state["stats"]["failed_calls"], 0, "{state}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -499,6 +519,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -544,7 +565,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
     .unwrap();
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(networks["networks"][0]["max_depth"], 30);
-    assert_eq!(networks["networks"][0]["tip_live"], 100);
+    assert_eq!(networks["networks"][0]["tip"]["live"], 100);
     // Block p is 100 - p days old: 50.5 days ago is after block 49.
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -606,6 +627,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -829,6 +851,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         db: db.clone(),
         queue,
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -840,11 +863,16 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
     assert_eq!(health["ready"], json!(false));
-    // Failed before its first tip: no row written yet.
-    assert_eq!(health["networks"][0]["indexing"], Value::Null);
+    // Failed before its first tip: no row written yet, only why.
+    let indexing = &health["networks"][0]["indexing"];
+    assert_eq!(indexing["tip"], Value::Null, "{health}");
+    assert_eq!(indexing["job_reason"], json!(reason), "{health}");
     let (status, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(networks["networks"][0]["index_job_reason"], json!(reason));
+    assert_eq!(
+        networks["networks"][0]["index"]["job_reason"],
+        json!(reason)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -876,6 +904,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -911,6 +940,7 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1003,6 +1033,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1125,6 +1156,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         db: db.clone(),
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1163,4 +1195,756 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
             leg(800, 0, json!(900)),
         ]
     );
+}
+
+/// The routes over `container` and `db`, sends queued in `queue`.
+fn app(
+    container: &Arc<base::Container<crate::usecase::Transport>>,
+    db: &crate::db::Db,
+    queue: &crate::usecase::tasks::Queue,
+) -> Router {
+    let state = Arc::new(AppState {
+        container: container.clone(),
+        db: db.clone(),
+        queue: queue.clone(),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    api::router(state, &config).expect("a router")
+}
+
+/// `worker`'s job of `input` enqueued, claimed, run once and settled: the
+/// job as stored after.
+async fn run_once<W: tasks::Worker + 'static>(
+    queue: &crate::usecase::tasks::Queue,
+    worker: W,
+    input: &W::Input,
+) -> tasks::Job {
+    use tasks::{Admission, Store as _, Task, testing::claim};
+
+    // Queued now, or already (an enabled node queues its network's index job).
+    let (Admission::Queued(id) | Admission::Duplicate(id)) =
+        W::enqueue(queue, input).await.expect("queued");
+    let job = claim(queue, W::KIND, 1, tasks::now()).await.remove(0);
+    let mut task = Task::new(Arc::new(worker), job, Arc::new(queue.clone()));
+    task.run().await;
+    task.update().await.expect("settled");
+    queue.get(id).await.expect("a read").expect("the job")
+}
+
+/// Stores `urls` as the scripted network's nodes, loaded into its
+/// transport; their ids, in order.
+async fn stored(
+    container: &Arc<base::Container<crate::usecase::Transport>>,
+    db: &crate::db::Db,
+    urls: Vec<String>,
+) -> Vec<i64> {
+    let nodes = urls.into_iter().map(rpc::Endpoint::new).collect();
+    let nodes = crate::models::RpcEndpoints::new(nodes).unwrap();
+    db.write(move |connection| {
+        crate::models::endpoint::db::replace(connection, &network(), &nodes)
+    })
+    .await
+    .unwrap();
+    let networks = crate::usecase::Networks::new(db.clone()).await.unwrap();
+    networks.load(&network(), container).unwrap();
+    let stored = db.read(|connection| crate::models::network::db::find(connection, &network()));
+    stored.await.unwrap().expect("the network").endpoints.ids()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_is_disabled_and_enabled_and_a_network_with_none_idles() {
+    use tasks::{Admission, Worker as _};
+
+    use crate::usecase::workers::index::{Index, Target};
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let ask = |method: &'static str| {
+        let container = container.clone();
+        async move {
+            let client = base::Transport::client(&*container.transport(&network()).unwrap());
+            let raw = client.request(rpc::Request::new(method, json!([])));
+            raw.await.unwrap().deserialize::<u64>().unwrap()
+        }
+    };
+    let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
+    let nodes = [answering(0).await, answering(1).await];
+    let put = json!({ "endpoints": nodes });
+    let (status, put) = call(&router, Method::PUT, endpoints, Some(put)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let ids: Vec<i64> = (0..2)
+        .map(|i| put["endpoints"][i]["id"].as_i64().unwrap())
+        .collect();
+    assert_eq!(put["endpoints"][0]["disabled"], Value::Null);
+    assert_eq!(ask("m").await, 0);
+
+    let state = |id: i64| format!("{endpoints}/{id}/state");
+    let disable = json!({ "state": "disabled", "reason": "flaky" });
+    let (status, put) = call(&router, Method::PUT, &state(ids[0]), Some(disable)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let first = &put["endpoints"][0];
+    assert_eq!(first["disabled"]["kind"], "manual", "the view: its record");
+    assert_eq!(first["disabled"]["message"], "flaky", "the view: why");
+    let failures = |id: i64| format!("{endpoints}/{id}/failures");
+    let (_, listed) = call(&router, Method::GET, &failures(ids[0]), None).await;
+    assert_eq!(listed["failures"][0]["kind"], "manual", "{listed}");
+    assert_eq!(listed["failures"][0]["message"], "flaky");
+    assert_eq!(ask("m").await, 1, "a disabled node gets no call");
+    let route = json!({ "routes": [{ "method": "m", "endpoint_ids": [ids[0]] }] });
+    let routes = "/v1/networks/bitcoin/regtest/routes";
+    let (status, _) = call(&router, Method::PUT, routes, Some(route)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ask("m").await, 1, "its route skips it");
+
+    let enable = json!({ "state": "enabled", "reason": "ignored" });
+    let (status, put) = call(&router, Method::PUT, &state(ids[0]), Some(enable)).await;
+    assert_eq!(status, StatusCode::OK, "{put}");
+    let first = &put["endpoints"][0];
+    assert_eq!(first["disabled"], Value::Null, "the view: none, enabled");
+    let (_, listed) = call(&router, Method::GET, &failures(ids[0]), None).await;
+    let kinds: Vec<&Value> = listed["failures"].as_array().unwrap().iter().collect();
+    assert_eq!(kinds.len(), 2, "the enable recorded: {listed}");
+    assert_eq!(listed["failures"][0]["message"], "ignored");
+    assert_eq!(ask("m").await, 0, "routed to it again");
+    let bad = json!({ "state": "off" });
+    let (status, _) = call(&router, Method::PUT, &state(ids[0]), Some(bad)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let off = json!({ "state": "disabled" });
+    let (status, _) = call(&router, Method::PUT, &state(999), Some(off.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    for id in &ids {
+        let (status, _) = call(&router, Method::PUT, &state(*id), Some(off.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(enabled(&networks["networks"][0]), 0, "{networks}");
+    let (_, health) = call(&router, Method::GET, "/health", None).await;
+    assert_eq!(health["networks"][0]["enabled_endpoints"], 0, "{health}");
+
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let worker = Index::new(container.clone(), db.clone(), queue.clone());
+    let job = run_once(&queue, worker, &target).await;
+    assert_eq!(job.status, tasks::Status::Idle, "stopped: {job:?}");
+    assert_eq!(job.reason, None, "{job:?}");
+    let (status, health) = call(&router, Method::GET, "/health", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
+
+    // Enabling a node queues the network's index job again.
+    let enable = json!({ "state": "enabled" });
+    let (status, _) = call(&router, Method::PUT, &state(ids[0]), Some(enable)).await;
+    assert_eq!(status, StatusCode::OK);
+    let Admission::Duplicate(again) = Index::enqueue(&queue, &target).await.unwrap() else {
+        panic!("the enable queued no index job");
+    };
+    assert_ne!(again, job.id, "a new job");
+}
+
+/// A node on loopback answering every request with `reply` of its body:
+/// an HTTP status and a JSON body.
+async fn replying(reply: fn(&Value) -> (u16, Value)) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    let reply = move |axum::Json(body): axum::Json<Value>| async move {
+        let (status, answer) = reply(&body);
+        (StatusCode::from_u16(status).unwrap(), axum::Json(answer))
+    };
+    let node = Router::new().route("/", axum::routing::post(reply));
+    tokio::spawn(async move { axum::serve(listener, node).await });
+    url
+}
+
+/// Each call of a JSON-RPC batch answered with an error object 429.
+fn limited_batch(body: &Value) -> Value {
+    let answers = body.as_array().unwrap().iter().map(|call| {
+        let error = json!({"code": 429, "message": "Too many requests"});
+        json!({"jsonrpc": "2.0", "id": call["id"], "error": error})
+    });
+    Value::Array(answers.collect())
+}
+
+/// The scripted network's stored nodes, as the API lists them.
+async fn listed(router: &Router) -> Vec<Value> {
+    let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
+    let (_, listed) = call(router, Method::GET, endpoints, None).await;
+    listed["endpoints"].as_array().unwrap().clone()
+}
+
+/// Node `id`'s records, newest first, as the API lists them.
+async fn records(router: &Router, id: i64) -> Vec<Value> {
+    let at = format!("/v1/networks/bitcoin/regtest/endpoints/{id}/failures");
+    let (_, listed) = call(router, Method::GET, &at, None).await;
+    listed["failures"].as_array().unwrap().clone()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_401_disables_the_node_in_the_store_and_its_calls_move_on() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let refusing = replying(|_| (401, json!({"error": "unauthorized"}))).await;
+    let ids = stored(&container, &db, vec![refusing, answering(7).await]).await;
+    let transport = container.transport(&network()).unwrap();
+    let answer = transport.request(rpc::Request::new("m", json!([]))).await;
+    assert_eq!(answer.unwrap().deserialize::<u64>().unwrap(), 7, "moved on");
+
+    let nodes = listed(&router).await;
+    let disabled = &nodes[0]["disabled"];
+    assert_eq!(disabled["kind"], "http_401", "stored at once: {nodes:?}");
+    assert_eq!(disabled["message"], "the node answered HTTP 401");
+    let history = records(&router, ids[0]).await;
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0]["kind"], "http_401");
+    let running = transport.clients();
+    assert_eq!(running.len(), 1, "refused at once, before any load");
+    let answer = transport.request(rpc::Request::new("m", json!([]))).await;
+    assert_eq!(answer.unwrap().deserialize::<u64>().unwrap(), 7);
+    assert_eq!(records(&router, ids[0]).await.len(), 1, "disabled once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_of_another_chain_is_disabled_by_the_probe() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let ids = stored(&container, &db, vec![answering(1).await]).await;
+    let networks = db.read(crate::models::network::db::find_all).await.unwrap();
+    let stored = networks.iter().find(|n| n.key() == network()).unwrap();
+    let mut config = base::NetworkConfig::from(stored);
+    config.chain_id = Some("elsewhere".to_owned());
+    let transport = crate::usecase::Transport::new::<base::testing::Unasked>(&config, db.clone());
+    transport.load(&stored.endpoints, &[]).unwrap();
+    let failed = transport.request(rpc::Request::new("m", json!([]))).await;
+    assert!(failed.is_err(), "its only node, off");
+    assert!(transport.has_no_node());
+
+    let nodes = listed(&router).await;
+    assert_eq!(nodes[0]["disabled"]["kind"], "wrong_chain", "{nodes:?}");
+    let history = records(&router, ids[0]).await;
+    assert_eq!(history.len(), 1, "{history:?}");
+    assert_eq!(history[0]["kind"], "wrong_chain");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_429_passes_through_and_is_no_record() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let limiting = replying(|body| {
+        if body.is_array() {
+            return (200, limited_batch(body));
+        }
+        (429, json!({}))
+    })
+    .await;
+    let ids = stored(&container, &db, vec![limiting]).await;
+    let transport = container.transport(&network()).unwrap();
+    let failed = transport.request(rpc::Request::new("m", json!([]))).await;
+    let kind = failed.unwrap_err().kind();
+    assert_eq!(kind, Some(rpc::ErrorKind::HttpStatus(429)), "untouched");
+    let calls = vec![
+        rpc::Call::new("a", json!([])),
+        rpc::Call::new("a", json!([])),
+    ];
+    let answers = transport.batch(rpc::Batch::new(calls).unwrap()).await;
+    assert!(answers.unwrap().iter().all(Result::is_err), "answered: 200");
+
+    assert_eq!(listed(&router).await[0]["disabled"], Value::Null);
+    assert!(records(&router, ids[0]).await.is_empty(), "no record");
+    assert_eq!(transport.clients().len(), 1, "still in use");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_nodes_counter_writes_its_calls_and_the_view_shows_them() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let node = replying(|body| {
+        if body["method"] == "busy" {
+            return (429, json!({}));
+        }
+        (
+            200,
+            json!({"jsonrpc": "2.0", "id": body["id"], "result": 1}),
+        )
+    })
+    .await;
+    stored(&container, &db, vec![node]).await;
+    let transport = container.transport(&network()).unwrap();
+    for method in ["a", "b", "busy"] {
+        let _answer = transport
+            .request(rpc::Request::new(method, json!([])))
+            .await;
+    }
+    // Each count lands on its own task, after its call answered.
+    let node = super::support::until("the three calls counted", || async {
+        let node = listed(&router).await[0].clone();
+        if node["stats"]["calls"] == 3 {
+            Ok(node)
+        } else {
+            Err(node.to_string())
+        }
+    })
+    .await;
+    assert_eq!(node["stats"]["failed_calls"], 1, "{node}");
+    assert_eq!(
+        node["disabled"],
+        Value::Null,
+        "a 429 disables nothing: {node}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_node_disabled_by_its_guard_idles_the_index_job() {
+    use crate::usecase::workers::index::{Index, Target};
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let refusing = replying(|_| (403, json!({"error": "forbidden"}))).await;
+    stored(&container, &db, vec![refusing]).await;
+    let transport = container.transport(&network()).unwrap();
+    let failed = transport.request(rpc::Request::new("m", json!([]))).await;
+    assert!(failed.is_err());
+    assert!(transport.has_no_node(), "refused at once");
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let worker = Index::new(container.clone(), db.clone(), queue.clone());
+    let job = run_once(&queue, worker, &target).await;
+    assert_eq!(job.status, tasks::Status::Idle, "stopped: {job:?}");
+    assert_eq!(job.reason, None, "{job:?}");
+    let (status, health) = call(&router, Method::GET, "/health", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
+
+    let networks = crate::usecase::Networks::new(db.clone()).await.unwrap();
+    networks.load(&network(), &container).unwrap();
+    assert!(transport.has_no_node(), "the next load leaves it out");
+    let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(enabled(&networks["networks"][0]), 0, "{networks}");
+}
+
+/// How many of `network`'s nodes, as the API lists it, are enabled.
+fn enabled(network: &Value) -> usize {
+    let nodes = network["endpoints"].as_array().unwrap().iter();
+    nodes.filter(|node| node["disabled"].is_null()).count()
+}
+
+/// A subscriber keeping every event from debug, with its spans' fields, in
+/// `db`'s `log` table, published to `feed`.
+fn subscriber(db: &crate::db::Db, feed: crate::usecase::logs::Feed) -> tracing::Dispatch {
+    use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
+
+    // With one dispatcher alive, `tracing` judges a callsite first hit on
+    // another test's thread by that thread's (none) and caches `never`; a
+    // second one kept alive makes it ask every dispatcher.
+    static SECOND: std::sync::LazyLock<tracing::Dispatch> = std::sync::LazyLock::new(|| {
+        tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default())
+    });
+    std::sync::LazyLock::force(&SECOND);
+    let debug = tracing::level_filters::LevelFilter::DEBUG;
+    let layer = crate::usecase::logs::DbLayer::new(db.clone(), feed).with_filter(debug);
+    tracing::Dispatch::new(tracing_subscriber::registry().with(layer))
+}
+
+/// The entries at `at` once `count` are kept, newest first.
+async fn kept(router: &Router, at: &str, count: usize) -> Vec<Value> {
+    super::support::until("the entries stored", || async {
+        let (_, listed) = call(router, Method::GET, at, None).await;
+        let logs = listed["logs"].as_array().cloned().unwrap_or_default();
+        (logs.len() >= count)
+            .then_some(logs)
+            .ok_or(listed.to_string())
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
+    use tracing::instrument::WithSubscriber as _;
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let node = replying(|body| {
+        if body.is_array() {
+            return (200, limited_batch(body));
+        }
+        if body["method"] == "busy" {
+            return (429, json!({}));
+        }
+        (
+            200,
+            json!({"jsonrpc": "2.0", "id": body["id"], "result": 7}),
+        )
+    })
+    .await;
+    let ids = stored(&container, &db, vec![node]).await;
+    let transport = container.transport(&network()).unwrap();
+    async {
+        let fine = transport.request(rpc::Request::new("fine", json!(["secret"])));
+        fine.await.unwrap();
+        let busy = transport.request(rpc::Request::new("busy", json!([])));
+        busy.await.unwrap_err();
+        let calls = vec![
+            rpc::Call::new("a", json!([])),
+            rpc::Call::new("a", json!([])),
+        ];
+        let batch = transport.batch(rpc::Batch::new(calls).unwrap());
+        batch.await.unwrap();
+    }
+    .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
+    .await;
+
+    let at = "/v1/networks/bitcoin/regtest/logs?target=rpc.http";
+    let mut http = kept(&router, at, 3).await;
+    http.reverse();
+    assert_eq!(http.len(), 3, "{http:?}");
+    let node = ids[0].to_string();
+    for entry in &http {
+        assert_eq!(
+            entry["fields"]["network"], "bitcoin/regtest",
+            "the node span"
+        );
+        assert_eq!(entry["fields"]["node"], json!(node));
+        assert!(
+            entry["fields"]["ms"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .is_ok()
+        );
+        assert!(!entry.to_string().contains("secret"), "no params: {entry}");
+    }
+    let keys = ["method", "batch", "status", "rpc_errors", "error"];
+    let shown = |at: usize| keys.map(|key| http[at]["fields"][key].as_str().unwrap().to_owned());
+    assert_eq!(
+        (&http[0]["level"], &http[0]["message"]),
+        (&json!("debug"), &json!("RPC request answered"))
+    );
+    assert_eq!(shown(0), ["fine", "-", "200", "-", "-"].map(str::to_owned));
+    assert_eq!(
+        (&http[1]["level"], &http[1]["message"]),
+        (&json!("warn"), &json!("RPC request failed"))
+    );
+    assert_eq!(
+        shown(1),
+        ["busy", "-", "429", "-", "http_429"].map(str::to_owned)
+    );
+    assert_eq!(http[2]["level"], "warn");
+    assert_eq!(
+        shown(2),
+        ["a", "2", "200", "429,429", "-"].map(str::to_owned)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_run_logs_one_step_in_its_job_and_network() {
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::usecase::workers::index::{Index, Target};
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    stored(&container, &db, vec!["http://a.invalid/".to_owned()]).await;
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let worker = Index::new(container.clone(), db.clone(), queue.clone());
+    let job = run_once(&queue, worker, &target)
+        .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
+        .await;
+
+    let at = format!("/v1/jobs/{}/logs", job.id);
+    let entries = super::support::until("the job's entries stored", || async {
+        let (_, listed) = call(&router, Method::GET, &at, None).await;
+        let logs = listed["logs"].as_array().cloned().unwrap_or_default();
+        let has = |target: &str| logs.iter().any(|e| e["target"] == target);
+        (has("index.step") && has("job.run"))
+            .then_some(logs.clone())
+            .ok_or(listed.to_string())
+    })
+    .await;
+    let id = i64::try_from(job.id.0).unwrap();
+    let step = entries.iter().find(|e| e["target"] == "index.step");
+    let step = step.unwrap_or_else(|| panic!("an index.step: {entries:?}"));
+    assert_eq!(step["job_id"], id);
+    assert_eq!(
+        (&step["chain"], &step["network"]),
+        (&json!("bitcoin"), &json!("regtest"))
+    );
+    assert_eq!(step["fields"]["kind"], "index");
+    assert!(step["fields"]["outcome"].is_string() && step["fields"]["ms"].is_string());
+    let run = entries.iter().find(|e| e["target"] == "job.run");
+    let run = run.unwrap_or_else(|| panic!("a job.run: {entries:?}"));
+    assert_eq!(run["fields"]["ack"], "again");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_logs_go_to_the_table_list_newest_first_and_prune() {
+    use diesel::{connection::SimpleConnection as _, prelude::*};
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::{
+        models::schema::log,
+        usecase::workers::prune::{LOGS_MOST, Prune},
+    };
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    stored(&container, &db, vec!["http://a.invalid/".to_owned()]).await;
+    let dispatch = subscriber(&db, crate::usecase::logs::feed());
+    async {
+        let span = crate::usecase::network_span(&network());
+        span.in_scope(|| {
+            tracing::info!(target: "index.step", outcome = "first", "Index step finished");
+            tracing::warn!(target: "index.reorg", from = 3, "Kept blocks reorged");
+        });
+        tracing::info!(target: "api", "No network's");
+    }
+    .with_subscriber(dispatch)
+    .await;
+    let all = super::support::until("the entries stored", || async {
+        let (_, listed) = call(&router, Method::GET, "/v1/logs", None).await;
+        let found = listed["logs"].as_array().is_some_and(|l| l.len() == 3);
+        found.then(|| listed.clone()).ok_or(listed.to_string())
+    })
+    .await;
+    assert_eq!(all["logs"][0]["target"], "api", "newest first");
+    assert_eq!(all["logs"][0]["network"], Value::Null);
+    let at = "/v1/networks/bitcoin/regtest/logs";
+    let (_, page) = call(&router, Method::GET, &format!("{at}?limit=1"), None).await;
+    let newest = &page["logs"][0];
+    assert_eq!(newest["target"], "index.reorg", "{page}");
+    assert_eq!(newest["level"], "warn");
+    assert_eq!(
+        (&newest["chain"], &newest["network"]),
+        (&json!("bitcoin"), &json!("regtest"))
+    );
+    assert_eq!(newest["fields"]["from"], "3");
+    assert_eq!(newest["fields"]["network"], "bitcoin/regtest");
+    let cursor = page["next_cursor"].as_str().expect("a cursor").to_owned();
+    let older = format!("{at}?limit=1&cursor={cursor}");
+    let (_, page) = call(&router, Method::GET, &older, None).await;
+    assert_eq!(page["logs"][0]["target"], "index.step", "older");
+    let (_, warned) = call(&router, Method::GET, &format!("{at}?level=warn"), None).await;
+    assert_eq!(warned["logs"].as_array().map(Vec::len), Some(1));
+    let (_, targeted) = call(&router, Method::GET, "/v1/logs?target=api", None).await;
+    assert_eq!(targeted["logs"].as_array().map(Vec::len), Some(1));
+    let (status, _) = call(&router, Method::GET, "/v1/logs?level=loud", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // An old entry of no network, and more than the most of the network.
+    let now = i64::try_from(tasks::now()).unwrap();
+    db.write(move |connection| {
+        connection.batch_execute(
+            "INSERT INTO log (at, level, target, message, fields) \
+             VALUES (1, 'info', 'api', 'old', '{}');
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
+             INSERT INTO log (at, level, target, message, fields, chain, network)
+             SELECT strftime('%s', 'now') * 1000, 'info', 't', 'm', '{}', 'bitcoin', 'regtest'
+             FROM n;",
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let job = run_once(&queue, Prune::new(db.clone(), container.clone()), &()).await;
+    assert_eq!(job.reason, None, "{job:?}");
+    let (network_rows, oldest) = db
+        .read(move |connection| {
+            let rows: i64 = log::table
+                .filter(log::network.eq("regtest"))
+                .count()
+                .get_result(connection)?;
+            let oldest = log::table
+                .select(diesel::dsl::min(log::at))
+                .first::<Option<i64>>(connection)?;
+            Ok((rows, oldest))
+        })
+        .await
+        .unwrap();
+    assert_eq!(network_rows, LOGS_MOST, "at most so many a network");
+    assert!(oldest > Some(now - 60_000), "a week old goes");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
+    use base::Addressed as _;
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::usecase::workers::broadcast::{Broadcast, SendIntent};
+
+    let (stores, db, _directory) = seeded().await;
+    let script = Arc::new(Script {
+        relay: true,
+        ..Script::default()
+    });
+    let sender = script.keys.keyed("sender");
+    base::WalletStore::insert(&stores, &sender)
+        .await
+        .expect("the wallet kept");
+    super::storage::watch(&stores, sender.address(), 0).await;
+    let container = container(&db, script);
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let node = replying(|body| {
+        (
+            200,
+            json!({"jsonrpc": "2.0", "id": body["id"], "result": "id"}),
+        )
+    });
+    stored(&container, &db, vec![node.await]).await;
+    let dispatch = subscriber(&db, crate::usecase::logs::feed());
+    let intent = SendIntent {
+        chain: network().chain.to_string(),
+        network: network().name,
+        address: "sender".to_owned(),
+        asset: "native".to_owned(),
+        to: "recipient".into(),
+        amount: "1".into(),
+        fee: base::FeeLevel::Normal,
+    };
+    let worker = Broadcast::new(container.clone(), db.clone());
+    let job = run_once(&queue, worker, &intent)
+        .with_subscriber(dispatch)
+        .await;
+
+    let at = format!("/v1/jobs/{}/logs", job.id);
+    let listed = super::support::until("the job's entries stored", || async {
+        let (_, listed) = call(&router, Method::GET, &at, None).await;
+        let targets: Vec<String> = listed["logs"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| entry["target"].as_str().map(str::to_owned))
+            .collect();
+        let found = targets.iter().any(|t| t == "rpc.http")
+            && targets.iter().any(|t| t == "send.broadcast");
+        found.then(|| listed.clone()).ok_or(listed.to_string())
+    })
+    .await;
+    let id = i64::try_from(job.id.0).unwrap();
+    for entry in listed["logs"].as_array().unwrap() {
+        assert_eq!(entry["job_id"], id, "{entry}");
+        // `job.run` is the executor's, outside the run's network span.
+        if entry["target"] != "job.run" {
+            assert_eq!(entry["network"], "regtest", "{entry}");
+        }
+    }
+    let http = listed["logs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["target"] == "rpc.http")
+        .unwrap();
+    assert_eq!(http["fields"]["method"], "sendrawtransaction");
+    let (status, _) = call(&router, Method::GET, "/v1/jobs/999999/logs", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_stream_sends_each_new_entry_its_filters_read() {
+    let (_, db, _directory) = seeded().await;
+    let feed = crate::usecase::logs::feed();
+    let state = Arc::new(AppState {
+        container: container(&db, Arc::new(Script::default())),
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: feed.clone(),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let (status, _) = text(&router, "/v1/logs/stream?network=regtest").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let uri = "/v1/logs/stream?level=warn&target=index.reorg&network=bitcoin/regtest";
+    let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let response = router.oneshot(request).await.expect("a response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    tracing::dispatcher::with_default(&subscriber(&db, feed), || {
+        let span = crate::usecase::network_span(&network());
+        span.in_scope(|| {
+            tracing::info!(target: "index.reorg", "Too mild");
+            tracing::warn!(target: "index.step", "Another event");
+        });
+        tracing::warn!(target: "index.reorg", "No network's");
+        span.in_scope(|| tracing::warn!(target: "index.reorg", from = 3, "Kept blocks reorged"));
+    });
+    let mut body = response.into_body();
+    let wait = std::time::Duration::from_secs(5);
+    let frame = tokio::time::timeout(wait, body.frame()).await;
+    let frame = frame
+        .expect("an event")
+        .expect("a frame")
+        .expect("its bytes");
+    let event = String::from_utf8_lossy(frame.data_ref().expect("data")).into_owned();
+    let data = event.strip_prefix("data: ");
+    let data = data.unwrap_or_else(|| panic!("a data line: {event}"));
+    let entry: Value = serde_json::from_str(data.trim_end()).expect("an entry");
+    assert_eq!(
+        entry["message"], "Kept blocks reorged",
+        "the first it reads"
+    );
+    assert_eq!((&entry["id"], &entry["level"]), (&json!(0), &json!("warn")));
+    assert_eq!(
+        (&entry["chain"], &entry["network"]),
+        (&json!("bitcoin"), &json!("regtest"))
+    );
+    assert_eq!(entry["fields"]["from"], "3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_step_that_never_answers_times_out_and_retries() {
+    use crate::usecase::workers::index::{Index, Target};
+
+    let (_, db, _directory) = seeded().await;
+    let script = Script {
+        hung: true,
+        ..Script::default()
+    };
+    let container = container(&db, Arc::new(script));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let worker = Index::new(container, db.clone(), queue.clone())
+        .with_step(std::time::Duration::from_millis(50));
+    let job = run_once(&queue, worker, &target).await;
+    let reason = job.reason.clone().unwrap_or_default();
+    assert_eq!(reason, "an index step timed out after 0.05 s", "{job:?}");
+    assert_eq!(job.status, tasks::Status::Pending, "{job:?}");
+    assert_eq!(job.attempts, 1, "retried: {job:?}");
 }

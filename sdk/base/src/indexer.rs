@@ -3,7 +3,7 @@
 
 use std::{
     sync::{Arc, Mutex, PoisonError},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{BlockHeader, BlockStore, Chained, Future, Network, Networked, NotServed, Skipped};
@@ -102,7 +102,9 @@ pub trait Indexes: Send + Sync {
 /// Indexes one network: fetches blocks up to the produced tip and keeps them,
 /// deleting kept blocks the chain took back, and has each of its
 /// parts close the gaps of its items below the chain's line. The caller
-/// steps it ([`Indexer::next`]), about every [`Indexer::interval`].
+/// steps it ([`Indexer::next`]), about every [`Indexer::interval`]. Each
+/// step is logged as `index.step` (`start end blocks ms outcome`), each
+/// reorg as `index.reorg` (`from`); the caller's span names the network.
 pub struct Indexer {
     chain: Arc<dyn Chained>,
     /// Keeping blocks advances the items of every part, in the same write
@@ -176,19 +178,41 @@ impl Indexer {
     /// (retry), or the node no longer serves a block a started item or the
     /// network needs ([`NotServed`]); counted in [`Stats::failures`].
     pub async fn next(&self) -> anyhow::Result<Next> {
-        let next = self.step().await;
+        let (started, kept) = (Instant::now(), self.stats.get().blocks);
+        let mut range = None;
+        let next = self.step(&mut range).await;
         if let Err(error) = &next {
             self.stats.get().fail(error);
+        }
+        let shown = |position: Option<u64>| position.map_or("-".to_owned(), |p| p.to_string());
+        let (start, end) = (shown(range.map(|r| r.0)), shown(range.map(|r| r.1)));
+        let blocks = self.stats.get().blocks - kept;
+        let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let message = "Index step finished";
+        match &next {
+            Ok(Next::Indexed(_)) => {
+                tracing::info!(target: "index.step", start, end, blocks, ms, outcome = "indexed", "{message}");
+            }
+            Ok(Next::Reorged(_)) => {
+                tracing::info!(target: "index.step", start, end, blocks, ms, outcome = "reorged", "{message}");
+            }
+            Ok(Next::Idle) => {
+                tracing::debug!(target: "index.step", start, end, blocks, ms, outcome = "idle", "{message}");
+            }
+            Err(_) => {
+                tracing::warn!(target: "index.step", start, end, blocks, ms, outcome = "failed", "{message}");
+            }
         }
         next
     }
 
     /// [`Self::fetch`]; when the node no longer serves a block an item
     /// needs, [`Self::skip`] and, when every such item moved, fetch again.
-    async fn step(&self) -> anyhow::Result<Next> {
-        match self.fetch().await {
+    /// `range`: the positions last asked for.
+    async fn step(&self, range: &mut Option<(u64, u64)>) -> anyhow::Result<Next> {
+        match self.fetch(range).await {
             Err(error) => match NotServed::find(&error) {
-                Some(gap) if self.skip(gap).await? => self.fetch().await,
+                Some(gap) if self.skip(gap).await? => self.fetch(range).await,
                 _ => Err(error),
             },
             next => next,
@@ -226,7 +250,7 @@ impl Indexer {
         Ok(skipped.moved && !skipped.stopped)
     }
 
-    async fn fetch(&self) -> anyhow::Result<Next> {
+    async fn fetch(&self, range: &mut Option<(u64, u64)>) -> anyhow::Result<Next> {
         let network = self.network();
         let last = self.blocks.find_last(network).await?;
         // The tip first: a network with nothing to index still shows it.
@@ -266,6 +290,7 @@ impl Indexer {
         };
         let start = start.max(line);
         let end = tip.min(start.saturating_add(self.batch - 1));
+        *range = Some((start, end));
         let run = self.chain.blocks(start, end).await?;
         // The run may end early (the node has no more yet): only the
         // positions it reached can tell whether the last kept block is gone.
@@ -322,6 +347,7 @@ impl Indexer {
     async fn reorg(&self, last: &BlockHeader) -> anyhow::Result<Next> {
         self.blocks.delete(self.network(), last.position).await?;
         self.stats.get().reorgs += 1;
+        tracing::warn!(target: "index.reorg", from = last.position, "Kept blocks reorged");
         Ok(Next::Reorged(last.position))
     }
 }

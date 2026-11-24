@@ -1,6 +1,5 @@
-//! [`Logged`]: a node's failure streaks and recovery, to an injected logger.
+//! [`Logged`]: a node's failure streaks and recovery, as events.
 
-use logging::{Level, Logger};
 use std::{
     future::Future,
     sync::{Arc, Mutex},
@@ -14,8 +13,8 @@ use crate::{
 
 /// `C`, its failures logged: the first of a streak warns, a repeat warns at
 /// most every 30 seconds with a count, and the next success says it
-/// recovered. Clones share the streak. Scope `logger` to the node by index;
-/// no URL, parameter or provider prose reaches it.
+/// recovered (`rpc.failed`, `rpc.recovered`: `kind count`). Clones share the
+/// streak. No URL, parameter or provider prose reaches them.
 #[derive(Clone)]
 pub struct Logged<C> {
     inner: C,
@@ -23,18 +22,18 @@ pub struct Logged<C> {
 }
 
 impl<C> Logged<C> {
-    /// `inner`, logged to `logger`.
+    /// `inner`, logged.
     #[must_use]
-    pub fn new(inner: C, logger: Logger) -> Self {
+    pub fn new(inner: C) -> Self {
         Self {
             inner,
-            events: Arc::new(Events::new(logger)),
+            events: Arc::new(Events::default()),
         }
     }
 
     async fn log<T: Outcome>(&self, sent: impl Future<Output = T>) -> T {
         let outcome = sent.await;
-        let failure = outcome.failure();
+        let failure = outcome.errors().into_iter().next();
         if !failure.as_ref().is_some_and(Error::is_local) {
             self.events.outcome(failure.as_ref().map(Error::summary));
         }
@@ -61,8 +60,8 @@ impl<C: Client> Client for Logged<C> {
 }
 
 /// One node's current failure streak. Different nodes never share a streak.
+#[derive(Default)]
 struct Events {
-    logger: Logger,
     failure: Mutex<Option<Streak>>,
 }
 
@@ -73,29 +72,16 @@ struct Streak {
 }
 
 impl Events {
-    fn new(logger: Logger) -> Self {
-        Self {
-            logger,
-            failure: Mutex::new(None),
-        }
-    }
-
     fn outcome(&self, failure: Option<String>) {
         let notice = self.changed(failure, Instant::now());
         let Some((event, kind, count)) = notice else {
             return;
         };
-        let (level, message) = if event == "rpc.recovered" {
-            (Level::Info, "RPC node recovered")
+        if event == "rpc.recovered" {
+            tracing::info!(target: "rpc.recovered", kind, count, "RPC node recovered");
         } else {
-            (Level::Warn, "RPC node request failed")
-        };
-        self.logger.event(
-            level,
-            event,
-            message,
-            &[("kind", &kind), ("count", &count.to_string())],
-        );
+            tracing::warn!(target: "rpc.failed", kind, count, "RPC node request failed");
+        }
     }
 
     fn changed(
@@ -131,13 +117,9 @@ impl Events {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        sync::Arc,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use futures_executor::block_on;
-    use logging::{Filter, Logger, Memory};
     use serde_json::json;
 
     use super::{Events, Logged};
@@ -148,32 +130,28 @@ mod tests {
 
     #[test]
     fn a_streak_warns_once_then_recovers() {
-        let memory = Arc::new(Memory::new(100, 1 << 20));
         let script = Script::new([Reply::ok("m", json!(1))]);
         let faults = Faults::new(script);
         let switch = faults.switch();
-        let logged = Logged::new(faults, Logger::new(memory.clone()).with("node", "0"));
+        let logged = Logged::new(faults);
         for _ in 0..2 {
             switch.fail_next(None, Fault::Transport(ErrorKind::Unavailable));
             block_on(logged.request(Request::new("m", json!(["secret"])))).unwrap_err();
         }
+        let streak = logged.events.failure.lock().unwrap();
+        let (kind, count) = streak.as_ref().map(|s| (s.kind.clone(), s.count)).unwrap();
+        assert_eq!(
+            (kind.as_str(), count),
+            ("JSON-RPC transport is unavailable", 2)
+        );
+        drop(streak);
         block_on(logged.request(Request::new("m", json!([])))).unwrap();
-        let entries = memory.page(0, 10, &Filter::default()).entries;
-        let events: Vec<(&str, &str)> = entries
-            .iter()
-            .map(|entry| (entry.event.as_str(), entry.fields["count"].as_str()))
-            .collect();
-        assert_eq!(events, [("rpc.failed", "1"), ("rpc.recovered", "2")]);
-        for entry in &entries {
-            assert_eq!(entry.fields["kind"], "JSON-RPC transport is unavailable");
-            assert_eq!(entry.fields["node"], "0");
-            assert!(!format!("{:?}", entry.fields).contains("secret"));
-        }
+        assert!(logged.events.failure.lock().unwrap().is_none(), "recovered");
     }
 
     #[test]
     fn a_long_streak_reports_its_count_every_30_seconds() {
-        let events = Events::new(Logger::default());
+        let events = Events::default();
         let start = Instant::now();
         let failed = || Some("down".to_owned());
         assert!(events.changed(failed(), start).is_some());

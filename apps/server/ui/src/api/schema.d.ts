@@ -13,7 +13,7 @@ export interface paths {
         };
         /**
          * Read readiness and every indexed network's indexing
-         * @description Public readiness: ready when at least one network is indexed and no index job is failing (failed, or going again with a `reason`). Reads the `network_index` rows and the job queue; no RPC.
+         * @description Public readiness: ready when at least one network has an index, every indexed network has an enabled RPC node, and no network's index job has a reason (`job_reason`: it failed, or goes again because of it). Reads the stored networks; no RPC.
          */
         get: operations["read_health"];
         put?: never;
@@ -101,6 +101,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/jobs/{id}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a job's kept log entries
+         * @description Every kept entry of the job's runs (its steps, its nodes' calls), newest first, a page at a time; deleted with the job.
+         */
+        get: operations["list_job_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the kept log entries
+         * @description Every kept entry, newest first, a page at a time: its level, event (`target`), message and fields, and its network and job when it has them. Kept 7 days, at most 100 000 per network and as many of no network.
+         */
+        get: operations["list_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/logs/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Stream new log entries
+         * @description `text/event-stream` of every entry kept from now on that the filters read: one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
+         */
+        get: operations["stream_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/logs/targets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the logged events
+         * @description Every event (`target`) a kept entry has, each once, in order: the values the `target` filter of the log lists and the stream takes.
+         */
+        get: operations["list_log_targets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/networks": {
         parameters: {
             query?: never;
@@ -110,7 +190,7 @@ export interface paths {
         };
         /**
          * List every network, its assets, its RPC nodes, its indexing and its live tip
-         * @description Every stored network: its row, its assets, its nodes (each URL with what the running server knows of it: last tip, failure streak, calls) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.
+         * @description Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `index.tip` and says why in `tip.error`.
          */
         get: operations["list_networks"];
         put?: never;
@@ -204,7 +284,7 @@ export interface paths {
         };
         /**
          * List a network's RPC nodes
-         * @description Its stored nodes in stored order: each one's id and URL, as `PUT` takes them, and what the running server knows of it (`state`: last tip, failure streak, calls).
+         * @description Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) and position, its calls (`stats`, each written as it finishes) and, while disabled, the record that disabled it (`disabled`: its kind and why; null: enabled).
          */
         get: operations["list_network_endpoints"];
         /**
@@ -238,6 +318,66 @@ export interface paths {
          * @description Removes the node `id` and its routes, stores the rest and uses them from now on. A network's last node cannot be removed.
          */
         delete: operations["remove_network_endpoint"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/endpoints/{id}/failures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List what disabled or enabled one RPC node
+         * @description Every failure of the node it cannot recover from (which disabled it: `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).
+         */
+        get: operations["list_network_endpoint_failures"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/endpoints/{id}/state": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Enable or disable one RPC node of a network
+         * @description Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call of the network to its enabled nodes only; a route skips a disabled node. Disabling the last enabled node is allowed: the network's index job idles and its payments wait until one is enabled again. Asks no node.
+         */
+        put: operations["set_network_endpoint_state"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a network's kept log entries
+         * @description The network's kept entries (those naming it: its nodes' calls, its index steps, its payments), newest first, a page at a time.
+         */
+        get: operations["list_network_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -679,78 +819,9 @@ export interface components {
              */
             transactions: number;
         };
-        /**
-         * @description One network as stored: its `network` row, its `network_asset` rows, its
-         *     `network_endpoint` nodes and their routes, and its `network_index` row (`None`: no
-         *     tip known yet); and the node's tip asked now (`tip_live`, the stored `tip`
-         *     until a caller that asked sets it; `tip_error`, why asking failed).
-         */
-        ConfiguredNetwork: {
-            /** @description Its native currency and tokens. */
-            assets: components["schemas"]["NetworkAsset"][];
-            /**
-             * Format: int64
-             * @description The chain's block (slot) time, in milliseconds.
-             */
-            block_time_ms: number;
-            /** @description Chain name. */
-            chain: string;
-            /**
-             * @description The chain's own id of the network (Ethereum chain id, Solana genesis
-             *     hash); always present, null where the name is enough.
-             */
-            chain_id: string | null;
-            /**
-             * Format: int64
-             * @description Positions below the tip before a block counts as confirmed.
-             */
-            confirmations: number;
-            /** @description Whether the server starts indexing it. */
-            enabled: boolean;
-            /** @description Its nodes as stored, in failover order. */
-            endpoints: components["schemas"]["RpcNode"][];
-            /**
-             * @description An address's explorer page, `{address}` filled in; always present,
-             *     null: none.
-             */
-            explorer_address: string | null;
-            /**
-             * @description A transaction's explorer page, `{tx}` filled in; always present,
-             *     null: none.
-             */
-            explorer_transaction: string | null;
-            index: null | components["schemas"]["NetworkIndex"];
-            /**
-             * @description Why its index job's last run failed (the job's `reason`), cleared by
-             *     the next run that does not; always present, null: none.
-             */
-            index_job_reason: string | null;
-            /**
-             * Format: int64
-             * @description How many positions below the tip a wallet's start may be; at least
-             *     `confirmations`. Always present, null: no limit. Null on a chain that
-             *     reads balances (Solana, Ethereum): its line is the chain's final block.
-             */
-            max_depth: number | null;
-            /** @description Network name. */
-            network: string;
-            /**
-             * @description Its routed methods, each over its own nodes; every other method goes
-             *     to all of them.
-             */
-            routes: components["schemas"]["RpcRoute"][];
-            /** @description The chain's own knobs; an absent key is the chain's default. */
-            settings: Record<string, never>;
-            /** @description Whether its coins are test coins. */
-            testnet: boolean;
-            /** @description Why asking the node failed; always present, null when it answered. */
-            tip_error: string | null;
-            /**
-             * Format: int64
-             * @description The node's newest block, asked now; the stored `tip` when that
-             *     failed. Always present.
-             */
-            tip_live: number | null;
+        /** @description One stored network, and its node's tip asked now. */
+        ConfiguredNetwork: components["schemas"]["StoredNetwork"] & {
+            tip: components["schemas"]["LiveTip"];
         };
         /**
          * @description `POST /v1/wallets` body: a wallet in one network, created without
@@ -989,6 +1060,67 @@ export interface components {
             /** @description The chain and network this asset's wallets live on. */
             network: components["schemas"]["Network"];
         };
+        /** @description The node's tip, asked now. */
+        LiveTip: {
+            /** @description Why asking the node failed; always present, null when it answered. */
+            error: string | null;
+            /**
+             * Format: int64
+             * @description The node's newest block; the stored `index.tip` when asking failed.
+             *     Always present.
+             */
+            live: number | null;
+        };
+        /** @description One kept event. */
+        LogEntry: {
+            /**
+             * Format: int64
+             * @description When it happened, Unix ms.
+             */
+            at: number;
+            /** @description Its network's chain; always present, null: no network's. */
+            chain: string | null;
+            /** @description Its fields and its spans' (`network`, `node`, …), as text. */
+            fields: {
+                [key: string]: string;
+            };
+            /**
+             * Format: int64
+             * @description Its id, newest highest; 0 until stored, so 0 on the live stream
+             *     (`/v1/logs/stream`).
+             */
+            id: number;
+            /**
+             * Format: int64
+             * @description The job it ran in; always present, null: none.
+             */
+            job_id: number | null;
+            /** @description `error`, `warn`, `info`, `debug` or `trace`. */
+            level: string;
+            message: string;
+            /** @description Its network's name; always present, null: no network's. */
+            network: string | null;
+            /** @description The event: `rpc.http`, `index.step`, `send.broadcast`, … */
+            target: string;
+        };
+        /** @description A page of log entries. */
+        LogList: {
+            /** @description The entries, newest first. */
+            logs: components["schemas"]["LogEntry"][];
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+        };
+        /** @description The events log entries are kept of. */
+        LogTargets: {
+            /**
+             * @description Each event (`target`) once, in order: what a log list's `target`
+             *     filter takes.
+             */
+            targets: string[];
+        };
         /**
          * @description A mined leg with its transaction's txid and state (null for a reward or
          *     an adjustment) and its block's time: a row of [`db::find_page`].
@@ -1057,16 +1189,20 @@ export interface components {
         };
         /** @description One network's indexing. */
         NetworkHealth: {
-            indexing: null | components["schemas"]["NetworkIndex"];
+            /**
+             * @description How many of its RPC nodes are enabled; 0: no call can go out, its
+             *     index job idles (its reason says so) and its payments wait.
+             */
+            enabled_endpoints: number;
+            indexing: null | components["schemas"]["NetworkIndexing"];
             /** @description The indexed chain and network. */
             network: components["schemas"]["Network"];
         };
         /**
-         * @description One network's indexing as its indexer last wrote it; the counters since
-         *     the row was made, across restarts. Written the first time the tip is
-         *     known: no row, no tip yet.
+         * @description One network's indexing: what its indexer last wrote (its `network_index`
+         *     row) and why its index job last failed.
          */
-        NetworkIndex: {
+        NetworkIndexing: {
             /**
              * Format: int64
              * @description Blocks kept.
@@ -1079,12 +1215,13 @@ export interface components {
             checked_at: number | null;
             /**
              * Format: int64
-             * @description `tip - confirmations` (saturating), written with it.
+             * @description `tip - confirmations` (saturating), written with it; always present,
+             *     null with it.
              */
-            confirmed: number;
+            confirmed: number | null;
             /**
              * Format: int64
-             * @description Failed steps; why the last failed is the index job's `reason`.
+             * @description Failed steps.
              */
             failures: number;
             /**
@@ -1093,15 +1230,21 @@ export interface components {
              */
             indexed: number | null;
             /**
+             * @description Why its index job's last run failed or idles (the job's `reason`),
+             *     cleared by the next run that does not; always present, null: none.
+             */
+            job_reason: string | null;
+            /**
              * Format: int64
              * @description Kept blocks reorged because the chain took them back.
              */
             reorgs: number;
             /**
              * Format: int64
-             * @description The node's newest block at the indexer's last read.
+             * @description The node's newest block at the indexer's last read; always present,
+             *     null: no tip known yet (the job failed before its first).
              */
-            tip: number;
+            tip: number | null;
         };
         /** @description Every stored network. */
         NetworkList: {
@@ -1135,7 +1278,7 @@ export interface components {
         Report: {
             /** @description Every indexed network. */
             networks: components["schemas"]["NetworkHealth"][];
-            /** @description At least one network, and no index job failing. */
+            /** @description At least one network has an index, and no index job has a reason. */
             ready: boolean;
         };
         /** @description `POST /v1/networks/endpoints` body. */
@@ -1143,50 +1286,91 @@ export interface components {
             /** @description Nodes to append, each after its network's current ones, in order. */
             nodes: components["schemas"]["NetworkNode"][];
         };
-        /** @description One stored node of a network. */
+        /** @description One stored node of a network, with its counts and state. */
         RpcNode: {
+            disabled: null | components["schemas"]["RpcNodeFailure"];
             /**
              * Format: int64
              * @description Its id: what a route and removal name.
              */
             id: number;
-            state: null | components["schemas"]["RpcNodeState"];
+            /**
+             * Format: int64
+             * @description Its failover position, lowest first.
+             */
+            position: number;
+            /** @description Its calls. */
+            stats: components["schemas"]["RpcNodeStats"];
             /** @description Its URL as stored. */
             url: string;
         };
-        /**
-         * @description What the running server knows of one node: its last tip, its failure
-         *     streak, and its calls since it was loaded. Nothing asks the node.
-         */
-        RpcNodeState: {
+        /** @description One record of one node. */
+        RpcNodeFailure: {
             /**
              * Format: int64
-             * @description Calls that reached it and finished.
+             * @description When, Unix ms.
+             */
+            at: number;
+            /**
+             * Format: int64
+             * @description The node's id.
+             */
+            endpoint_id: number;
+            /**
+             * Format: int64
+             * @description Its id, newest highest; 0 until stored.
+             */
+            id: number;
+            /**
+             * @description What: `http_401`, `http_403`, `http_404`, `rpc_{code}` (an error
+             *     object of such a code), `wrong_chain` (the node serves another
+             *     chain) or `manual` (a disable by hand), each disabling it; or
+             *     `enabled` (an enable by hand).
+             */
+            kind: string;
+            /** @description Why, as shown; never a URL. */
+            message: string;
+        };
+        /**
+         * @description `GET /v1/networks/{chain}/{network}/endpoints/{id}/failures`: a page of
+         *     what disabled or enabled a node.
+         */
+        RpcNodeFailureList: {
+            /** @description The node's records, newest first. */
+            failures: components["schemas"]["RpcNodeFailure"][];
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+        };
+        /**
+         * @description Whether the transport uses a node.
+         * @enum {string}
+         */
+        RpcNodeState: "enabled" | "disabled";
+        /** @description One node's counts. */
+        RpcNodeStats: {
+            /**
+             * Format: int64
+             * @description HTTP requests that reached it and finished.
              */
             calls: number;
+            /**
+             * Format: int64
+             * @description The node's id.
+             */
+            endpoint_id: number;
             /**
              * Format: int64
              * @description Of those, the ones that failed.
              */
             failed_calls: number;
             /**
-             * Format: int32
-             * @description Retryable failures in a row (a rate limit counts as 3); from 3 it is
-             *     tried after every other node until it answers, or 10 block times (at
-             *     least 30 s) pass.
-             */
-            failures: number;
-            /**
-             * @description The last failure's kind or code, never a message of the node's;
-             *     always present, null: none.
-             */
-            last_failure: string | null;
-            /**
              * Format: int64
-             * @description Its newest block (slot) when last asked, kept for the network's block
-             *     time; always present, null before it told one.
+             * @description Unix ms of the last; when the node was stored if none.
              */
-            tip: number | null;
+            updated_at: number;
         };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
@@ -1275,6 +1459,17 @@ export interface components {
              */
             succeeded: number;
         };
+        /** @description `PUT /v1/networks/{chain}/{network}/endpoints/{id}/state` body. */
+        SetRpcNodeState: {
+            /** @description Why, kept in its records (`failures`); none: `by hand`. */
+            reason?: string | null;
+            /**
+             * @description `disabled`: no call goes to it, its routes skip it (a `manual`
+             *     record); `enabled`: used again, its reason cleared (an `enabled`
+             *     record).
+             */
+            state: components["schemas"]["RpcNodeState"];
+        };
         /** @description `GET /v1/stats`. */
         Stats: {
             /**
@@ -1336,6 +1531,68 @@ export interface components {
              * @description Wallets whose key is kept.
              */
             wallets: number;
+        };
+        /**
+         * @description One network as stored: its `network` row, its `network_asset` rows, its
+         *     routes, its index and its `network_endpoint` nodes with their counts and
+         *     state.
+         */
+        StoredNetwork: {
+            /** @description Its native currency and tokens. */
+            assets: components["schemas"]["NetworkAsset"][];
+            /**
+             * Format: int64
+             * @description The chain's block (slot) time, in milliseconds.
+             */
+            block_time_ms: number;
+            /** @description Chain name. */
+            chain: string;
+            /**
+             * @description The chain's own id of the network (Ethereum chain id, Solana genesis
+             *     hash); always present, null where the name is enough.
+             */
+            chain_id: string | null;
+            /**
+             * Format: int64
+             * @description Positions below the tip before a block counts as confirmed.
+             */
+            confirmations: number;
+            /** @description Whether the server starts indexing it. */
+            enabled: boolean;
+            /**
+             * @description Its nodes as stored, in failover order; none enabled: no call can go
+             *     out, its index job idles and its payments wait.
+             */
+            endpoints: components["schemas"]["RpcNode"][];
+            /**
+             * @description An address's explorer page, `{address}` filled in; always present,
+             *     null: none.
+             */
+            explorer_address: string | null;
+            /**
+             * @description A transaction's explorer page, `{tx}` filled in; always present,
+             *     null: none.
+             */
+            explorer_transaction: string | null;
+            index: null | components["schemas"]["NetworkIndexing"];
+            /**
+             * Format: int64
+             * @description How many positions below the tip a wallet's start may be; at least
+             *     `confirmations`. Always present, null: no limit. Null on a chain that
+             *     reads balances (Solana, Ethereum): its line is the chain's final block.
+             */
+            max_depth: number | null;
+            /** @description Network name. */
+            network: string;
+            /**
+             * @description Its routed methods, each over its own nodes; every other method goes
+             *     to all of them.
+             */
+            routes: components["schemas"]["RpcRoute"][];
+            /** @description The chain's own knobs; an absent key is the chain's default. */
+            settings: Record<string, never>;
+            /** @description Whether its coins are test coins. */
+            testnet: boolean;
         };
         /** @description `GET /v1/wallets/tags`: a page of tags. */
         TagList: {
@@ -1832,6 +2089,217 @@ export interface operations {
                 };
             };
             /** @description The queue is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_job_logs: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description The job's id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The job's entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogList"];
+                };
+            };
+            /** @description Malformed query, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Job is unknown */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_logs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only entries at this level or more severe: `error`, `warn`, `info`,
+                 *     `debug` or `trace`.
+                 */
+                level?: string;
+                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
+                target?: string;
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogList"];
+                };
+            };
+            /** @description Malformed query, level, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    stream_logs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only entries at this level or more severe: `error`, `warn`, `info`,
+                 *     `debug` or `trace`.
+                 */
+                level?: string;
+                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
+                target?: string;
+                /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
+                network?: string;
+                /** @description Only entries of this job, its `job_id`. */
+                job_id?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The entries, as they are kept */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Malformed query, level, or network */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_log_targets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The events */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogTargets"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;
@@ -2361,6 +2829,210 @@ export interface operations {
                 };
             };
             /** @description The nodes could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_network_endpoint_failures: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                chain: string;
+                network: string;
+                /** @description The node's `id`, as `endpoints` lists it. */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The node's records */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RpcNodeFailureList"];
+                };
+            };
+            /** @description Malformed query, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such node, or network not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_network_endpoint_state: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                chain: string;
+                network: string;
+                /** @description The node's `id`, as `endpoints` lists it. */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetRpcNodeState"];
+            };
+        };
+        responses: {
+            /** @description Stored and in use */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkEndpoints"];
+                };
+            };
+            /** @description Malformed body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such node, or network not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The state could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_network_logs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Only entries at this level or more severe: `error`, `warn`, `info`,
+                 *     `debug` or `trace`.
+                 */
+                level?: string;
+                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
+                target?: string;
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The network's entries */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogList"];
+                };
+            };
+            /** @description Malformed query, level, cursor, or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The network is not configured */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

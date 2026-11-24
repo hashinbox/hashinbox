@@ -18,7 +18,7 @@ use rpc::Endpoint;
 
 async fn ethereum(storage: Storage) -> anyhow::Result<()> {
     let config = Config::new(Network::new(1, "mainnet"));
-    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("https://node.invalid/v3/KEY"), Default::default())?);
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("https://node.invalid/v3/KEY"))?);
     let rpc = Client::new(node.clone(), config.native());
     let ether = Asset::native((&config.native()).into());
     let factory = Factory::from(config);

@@ -154,10 +154,7 @@ async fn reaches(app: &App, wallet: &Wallet, asset: &str, field: &str, value: &s
             return Ok(index);
         }
         let network = app.api.network().await;
-        Err(format!(
-            "{index} {} {}",
-            network["index_job_reason"], network["index"]
-        ))
+        Err(format!("{index} {}", network["index"]))
     })
     .await
 }

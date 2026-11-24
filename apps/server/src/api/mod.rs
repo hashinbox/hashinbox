@@ -8,6 +8,7 @@
 mod assets;
 mod health;
 mod jobs;
+mod logs;
 mod network_block_transactions;
 mod network_blocks;
 mod network_endpoint_routes;
@@ -65,6 +66,7 @@ pub(crate) use state::AppState;
         (name = "networks", description = "Configured networks, their indexing and RPC nodes"),
         (name = "triggers", description = "Triggers, their runs, and the tags they select by"),
         (name = "jobs", description = "The job queue: indexing, trigger rounds, broadcasts, pruning"),
+        (name = "logs", description = "The kept log entries: every one, a network's, a job's"),
         (name = "stats", description = "What the store holds and its last day"),
         (name = "health", description = "Readiness and indexing state"),
         (name = "openapi", description = "This document")
@@ -118,6 +120,7 @@ fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
         .merge(wallet_index_legs::routes())
         .merge(wallet_transactions::routes())
         .merge(jobs::routes())
+        .merge(logs::routes())
         .merge(networks::routes())
         .merge(network_blocks::routes())
         .merge(network_endpoints::routes())

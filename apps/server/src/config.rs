@@ -10,8 +10,17 @@ use std::{
 };
 
 use anyhow::{Context as _, ensure};
+use tracing::{Level, Metadata, Subscriber, level_filters::LevelFilter};
+use tracing_subscriber::{
+    EnvFilter, Layer as _,
+    filter::{FilterExt as _, filter_fn},
+    layer::SubscriberExt as _,
+};
 
-use crate::db::Db;
+use crate::{
+    db::Db,
+    usecase::logs::{DbLayer, Feed},
+};
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
@@ -63,6 +72,42 @@ pub(crate) struct Serve {
     /// The name in the page's top bar; the page has its own default.
     #[arg(long, env = "PAYMENT_UI_BRAND")]
     pub(crate) brand: Option<String>,
+    /// The least severe event logged: off, error, warn, info, debug or
+    /// trace.
+    #[arg(long, env = "PAYMENT_LOG_LEVEL", default_value = "info")]
+    log_level: LevelFilter,
+    /// One event's own level, `TARGET=LEVEL` (`rpc.http=debug`); repeatable.
+    #[arg(long = "log", value_parser = target_level)]
+    log: Vec<(String, LevelFilter)>,
+    /// One event's level in the `log` table, `TARGET=LEVEL`; repeatable.
+    /// The rest are kept from `info`; a failed `rpc.http` always is.
+    #[arg(long = "log-db", value_parser = target_level)]
+    log_db: Vec<(String, LevelFilter)>,
+}
+
+/// Parses `TARGET=LEVEL` the way `--log` and `--log-db` take it.
+fn target_level(text: &str) -> Result<(String, LevelFilter), String> {
+    let (target, level) = text
+        .split_once('=')
+        .ok_or_else(|| format!("`{text}` is not TARGET=LEVEL"))?;
+    let level = level
+        .parse()
+        .map_err(|_| format!("`{level}` is not a log level"))?;
+    Ok((target.to_owned(), level))
+}
+
+/// An `EnvFilter` at `level`, each of `targets` at its own, every span
+/// let through so each event keeps its context.
+fn filter<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
+    level: LevelFilter,
+    targets: &[(String, LevelFilter)],
+) -> Result<impl tracing_subscriber::layer::Filter<S> + use<S>, AnyError> {
+    let mut directives = level.to_string();
+    for (target, level) in targets {
+        directives.push_str(&format!(",{target}={level}"));
+    }
+    let env = EnvFilter::builder().parse(directives)?;
+    Ok(env.or(filter_fn(|metadata: &Metadata<'_>| metadata.is_span())))
 }
 
 impl Storage {
@@ -97,6 +142,31 @@ impl Serve {
             );
         }
         Ok(base.to_owned())
+    }
+
+    /// The one subscriber, two layers, each with its own filter: every
+    /// event at `--log-level` (or its `--log` level) as a line on stdout;
+    /// and every event from `info` (or its `--log-db` level), and every
+    /// failed `rpc.http`, to the `log` table of `db` and to `feed`
+    /// ([`DbLayer`]).
+    ///
+    /// # Errors
+    ///
+    /// A level that does not parse.
+    pub(crate) fn subscriber(
+        &self,
+        db: &Db,
+        feed: Feed,
+    ) -> Result<impl Subscriber + use<>, AnyError> {
+        let stdout = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stdout)
+            .with_filter(filter(self.log_level, &self.log)?);
+        let failed_http = filter_fn(|metadata| {
+            metadata.target() == "rpc.http" && *metadata.level() <= Level::WARN
+        });
+        let kept = filter(LevelFilter::INFO, &self.log_db)?.or(failed_http);
+        let database = DbLayer::new(db.clone(), feed).with_filter(kept);
+        Ok(tracing_subscriber::registry().with(stdout).with(database))
     }
 
     pub(crate) fn server(&self) -> Result<http_server::Config, AnyError> {

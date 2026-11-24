@@ -93,7 +93,7 @@ pub async fn record(url: &str, directory: &Path) -> anyhow::Result<()> {
         .map(|url| url.node.host_str().unwrap_or_default().to_owned())
         .unwrap_or_default();
     let recorder = Recorder {
-        node: ::rpc::node(&endpoint, Default::default())?,
+        node: ::rpc::node(&endpoint)?,
         provider,
         date: today(),
         directory: directory.to_owned(),

@@ -19,6 +19,8 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { version = "=1.49.0", default-features = false, features = ["rt", "sync"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# Each run in a `job` span, so every event of a job names it.
+tracing.workspace = true
 
 [dev-dependencies]
 tokio = { version = "=1.49.0", default-features = false, features = ["macros", "rt", "time"] }

@@ -19,7 +19,7 @@ use rpc::Endpoint;
 async fn solana(storage: Storage) -> anyhow::Result<()> {
     let genesis = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d".parse()?;
     let config = Config::new(Network::new(genesis, "mainnet-beta"));
-    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("http://127.0.0.1:8899"), Default::default())?);
+    let node: Arc<dyn rpc::Client> = Arc::new(rpc::node(&Endpoint::new("http://127.0.0.1:8899"))?);
     let rpc = Client::new(node.clone(), config.native());
     let sol = Asset::native((&config.native()).into());
     let factory = Factory::from(config);

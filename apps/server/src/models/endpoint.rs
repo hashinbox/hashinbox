@@ -1,17 +1,13 @@
 //! Every network's RPC nodes, one `network_endpoint` row each, in failover
-//! order (seeded by `seed.sql`).
+//! order (seeded by `seed.sql`), changed by verified edits. A node with its
+//! counts and state is read with its network (`network::db`).
 
-use std::collections::BTreeMap;
-
-use super::schema::network_endpoint;
-use base::{Chain, Network};
-use diesel::{prelude::*, sqlite::Sqlite, upsert::excluded};
+use super::{EndpointFailure, EndpointStats, schema::network_endpoint};
+use base::Network;
+use diesel::{prelude::*, upsert::excluded};
 use serde::Serialize;
 
-/// The most endpoints one network may list.
-const MOST: usize = 16;
-
-/// One stored node of a network.
+/// One stored node of a network, with its counts and state.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = RpcNode)]
 pub(crate) struct Endpoint {
@@ -20,42 +16,41 @@ pub(crate) struct Endpoint {
     /// Its URL as stored.
     #[schema(value_type = String)]
     pub(crate) url: rpc::Endpoint,
-    /// What the running server knows of it; always present, null where it
-    /// is not running (its network is not, or its URL did not build).
+    /// Its failover position, lowest first.
+    pub(crate) position: i64,
+    /// Its calls.
+    pub(crate) stats: EndpointStats,
+    /// Its newest record while that is not an enable: what disabled it, its
+    /// `message` why. Always present, null: enabled, the transport uses it.
     #[schema(required)]
-    pub(crate) state: Option<NodeState>,
+    pub(crate) disabled: Option<EndpointFailure>,
 }
 
-/// What the running server knows of one node: its last tip, its failure
-/// streak, and its calls since it was loaded. Nothing asks the node.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, utoipa::ToSchema)]
-#[schema(as = RpcNodeState)]
-pub(crate) struct NodeState {
-    /// Its newest block (slot) when last asked, kept for the network's block
-    /// time; always present, null before it told one.
-    #[schema(required)]
-    pub(crate) tip: Option<u64>,
-    /// Retryable failures in a row (a rate limit counts as 3); from 3 it is
-    /// tried after every other node until it answers, or 10 block times (at
-    /// least 30 s) pass.
-    pub(crate) failures: u32,
-    /// Calls that reached it and finished.
-    pub(crate) calls: u64,
-    /// Of those, the ones that failed.
-    pub(crate) failed_calls: u64,
-    /// The last failure's kind or code, never a message of the node's;
-    /// always present, null: none.
-    #[schema(required)]
-    pub(crate) last_failure: Option<String>,
+collection! {
+    /// A network's nodes, in failover order.
+    #[derive(Clone, Debug, Default, Serialize)]
+    Endpoints(Endpoint)
 }
 
-/// The URLs of `endpoints`, in their order.
-pub(crate) fn urls(endpoints: &[Endpoint]) -> Vec<rpc::Endpoint> {
-    endpoints
-        .iter()
-        .map(|endpoint| endpoint.url.clone())
-        .collect()
+impl Endpoints {
+    /// How many are enabled; 0: no call can go out.
+    pub(crate) fn enabled(&self) -> usize {
+        self.iter().filter(|node| node.disabled.is_none()).count()
+    }
+
+    /// Their ids, in order.
+    pub(crate) fn ids(&self) -> Vec<i64> {
+        self.iter().map(|node| node.id).collect()
+    }
+
+    /// Their URLs, in order.
+    pub(crate) fn urls(&self) -> Vec<rpc::Endpoint> {
+        self.iter().map(|node| node.url.clone()).collect()
+    }
 }
+
+/// The most endpoints one network may list.
+const MOST: usize = 16;
 
 /// A network's node URLs in failover order: one to [`MOST`], each once.
 #[derive(Clone, Debug)]
@@ -89,30 +84,10 @@ impl RpcEndpoints {
     }
 }
 
-/// Every network's stored endpoints.
-pub(crate) struct NetworkEndpoints(BTreeMap<Network, Vec<Endpoint>>);
-
-impl NetworkEndpoints {
-    /// `network`'s endpoints, in failover order; none when it has no row.
-    pub(crate) fn nodes(&self, network: &Network) -> Vec<Endpoint> {
-        self.0.get(network).cloned().unwrap_or_default()
-    }
-}
-
 /// The `network_endpoint` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
-
-    /// One `network_endpoint` row as the file holds it.
-    #[derive(Queryable, Selectable)]
-    #[diesel(table_name = network_endpoint, check_for_backend(Sqlite))]
-    struct Row {
-        id: i64,
-        chain: String,
-        network: String,
-        url: String,
-    }
 
     /// Makes `endpoints` the stored ones of `network`, in their order: a
     /// URL already stored keeps its id (and routes), one no longer listed is
@@ -152,32 +127,5 @@ pub(crate) mod db {
                 .execute(connection)?;
         }
         Ok(())
-    }
-
-    /// The stored endpoints of every network, in failover order.
-    ///
-    /// # Errors
-    ///
-    /// The read.
-    pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<NetworkEndpoints> {
-        let rows = network_endpoint::table
-            .select(Row::as_select())
-            .order((
-                network_endpoint::chain,
-                network_endpoint::network,
-                network_endpoint::position,
-                network_endpoint::id,
-            ))
-            .load(connection)?;
-        let mut networks: BTreeMap<Network, Vec<Endpoint>> = BTreeMap::new();
-        for row in rows {
-            let network = Network::new(Chain::new(&row.chain), row.network);
-            networks.entry(network).or_default().push(Endpoint {
-                id: row.id,
-                url: rpc::Endpoint::new(row.url),
-                state: None,
-            });
-        }
-        Ok(NetworkEndpoints(networks))
     }
 }

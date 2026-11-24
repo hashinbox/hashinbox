@@ -1,20 +1,14 @@
 //! What the store holds across every network (wallets, blocks,
 //! transactions, triggers, jobs) and the last day hour by hour, whatever the
 //! configuration names: counts and hourly series over ten models, in one
-//! snapshot. And readiness: every indexed network's indexing.
+//! snapshot.
 
-use std::{
-    collections::BTreeMap,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{Error, workers::index};
+use super::Error;
 use crate::{
     db::Db,
-    models::{
-        NetworkIndex, block, leg, network, network_index, task, transaction, trigger, trigger_run,
-        wallet, wallet_index,
-    },
+    models::{block, leg, task, transaction, trigger, trigger_run, wallet, wallet_index},
 };
 
 /// How many hours a series covers, the current one last.
@@ -196,40 +190,6 @@ pub(crate) async fn read(db: &Db) -> Result<Stats, Error> {
         })
     });
     Ok(stats.await?)
-}
-
-/// Readiness and every indexed network's indexing.
-pub(crate) struct Health {
-    /// At least one network is indexed, and no index job is failing.
-    pub(crate) ready: bool,
-    /// Every indexed (`enabled`) network's `network_index` row; `None`:
-    /// no tip known yet.
-    pub(crate) networks: BTreeMap<base::Network, Option<NetworkIndex>>,
-}
-
-/// Whether the server is ready: at least one network indexed and no index
-/// job failing (failed, or going again with a `reason`). A failed read is
-/// not ready. No RPC.
-pub(crate) async fn health(db: &Db) -> Health {
-    let read = db
-        .read(|connection| {
-            let mut rows = network_index::db::find_all(connection)?;
-            let networks = network::db::find_enabled(connection)?
-                .into_iter()
-                .map(|network| {
-                    let row = rows.remove(&network);
-                    (network, row)
-                })
-                .collect::<BTreeMap<_, _>>();
-            let failing = task::db::count_failing(connection, index::KIND)?;
-            Ok((networks, failing))
-        })
-        .await;
-    let (networks, failing) = read.unwrap_or_default();
-    Health {
-        ready: !networks.is_empty() && failing == 0,
-        networks,
-    }
 }
 
 #[cfg(test)]

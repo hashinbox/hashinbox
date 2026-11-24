@@ -20,12 +20,11 @@ mod usecase;
 #[path = "../tests/mod.rs"]
 mod tests;
 
-use std::{fmt::Write as _, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use api::AppState;
 use base::Container;
 use config::{AnyError, Cli, Command};
-use logging::{Level, Logger, kv};
 use tasks::Executor;
 use usecase::workers;
 
@@ -55,24 +54,31 @@ async fn main() -> Result<(), AnyError> {
         api_base: config::Serve::api_base()?,
     });
 
-    // Every `enabled` network, each over its stored nodes and built by its
-    // chain. A network that does not build, or whose nodes do not answer,
-    // only fails its own jobs, with why.
+    // The one subscriber: stdout, and the `log` table and its live feed.
     let db = config.storage.open()?;
-    let container = Container::<usecase::Transport>::new(usecase::sdk::Stores::storage(db.clone()));
-    usecase::Networks::read(&db)
+    let logs = usecase::logs::feed();
+    tracing::subscriber::set_global_default(config.subscriber(&db, logs.clone())?)?;
+
+    // Every `enabled` network, each over its stored nodes and built by its
+    // chain; a node that cannot recover disabled in the database, every
+    // node's calls counted there. A network that does not build, or whose
+    // nodes do not answer, only fails its own jobs, with why.
+    let container = Arc::new(Container::<usecase::Transport>::new(
+        usecase::sdk::Stores::storage(db.clone()),
+    ));
+    usecase::Networks::new(db.clone())
         .await?
         .register::<chain_bitcoin::Info, chain_bitcoin::Factory>(&container)
         .register::<chain_ethereum::Info, chain_ethereum::Factory>(&container)
         .register::<chain_solana::Info, chain_solana::Factory>(&container);
     let state = Arc::new(AppState {
-        container: Arc::new(container),
+        container,
         queue: usecase::tasks::queue(db.clone()),
         actions: Arc::new(usecase::workers::trigger::actions::registry()),
         db,
+        logs,
     });
 
-    let logger = Logger::new(Arc::new(Stderr));
     let (container, db, queue, actions) =
         (&state.container, &state.db, &state.queue, &state.actions);
     // Each recurring worker seeds its own jobs when the queue starts: the index job per
@@ -94,7 +100,6 @@ async fn main() -> Result<(), AnyError> {
             db.clone(),
             queue.clone(),
             actions.clone(),
-            logger,
         ))
         .run();
     let router = api::router(state, &server)?.merge(face.routes()?);
@@ -108,35 +113,4 @@ async fn main() -> Result<(), AnyError> {
         .await;
     jobs.stop().await;
     Ok(served?)
-}
-
-/// Events at `info` and above, one line each on stderr: level, event,
-/// message, then each field as `key=value`.
-struct Stderr;
-
-impl logging::Log for Stderr {
-    fn enabled(&self, metadata: &logging::Metadata<'_>) -> bool {
-        metadata.level() <= Level::Info
-    }
-
-    fn log(&self, record: &logging::Record<'_>) {
-        if !self.enabled(record.metadata()) {
-            return;
-        }
-        let mut line = format!("{} {} {}", record.level(), record.target(), record.args());
-        let _ = record.key_values().visit(&mut Fields(&mut line));
-        eprintln!("{line}");
-    }
-
-    fn flush(&self) {}
-}
-
-/// Appends each field to a line.
-struct Fields<'a>(&'a mut String);
-
-impl<'kvs> kv::VisitSource<'kvs> for Fields<'_> {
-    fn visit_pair(&mut self, key: kv::Key<'kvs>, value: kv::Value<'kvs>) -> Result<(), kv::Error> {
-        let _ = write!(self.0, " {key}={value}");
-        Ok(())
-    }
 }

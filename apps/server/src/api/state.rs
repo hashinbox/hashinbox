@@ -15,4 +15,6 @@ pub(crate) struct AppState {
     pub(crate) queue: crate::usecase::tasks::Queue,
     /// Every action a trigger may call: a trigger is checked against them.
     pub(crate) actions: Arc<trigger::actions::Registry<tasks::Job>>,
+    /// The live feed of kept log entries, streamed.
+    pub(crate) logs: crate::usecase::logs::Feed,
 }

@@ -6,7 +6,9 @@
 //! what tells why something did not happen. Then, per network, it deletes
 //! the blocks below its line that nothing needs (`block::db::prune`), one
 //! write per network: on a chain that reads balances, its indexer's last
-//! final block; else its stored tip less its `max_depth`.
+//! final block; else its stored tip less its `max_depth`. With the jobs, it
+//! deletes the kept log entries older than [`HISTORY_KEPT`], and each
+//! network's (and no network's) beyond its newest [`LOGS_MOST`].
 //!
 //! Its `before` enqueues it when its queue starts; it is unique. Its topic (`prune`)
 //! conflicts with nothing else.
@@ -18,7 +20,7 @@ use tasks::{Ack, Context, Policy, Store, StoreError, Topic, Worker, millis};
 use super::{FOREVER, TIMEOUT, trigger};
 use crate::{
     db::Db,
-    models::{Network, block, int, network, task},
+    models::{Network, block, int, log, network, task},
     usecase::Transport,
 };
 
@@ -35,6 +37,12 @@ const PERIOD: Duration = Duration::from_secs(60 * 60);
 
 /// How long a succeeded job is kept after it last changed.
 const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How long a log entry is kept.
+const HISTORY_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The most log entries kept per network, and of no network.
+pub(crate) const LOGS_MOST: i64 = 100_000;
 
 /// Deletes the jobs that succeeded long enough ago, and the blocks nothing
 /// needs.
@@ -76,7 +84,7 @@ impl Prune {
         {
             return service.indexer.stats().confirmed;
         }
-        let tip = network.index.as_ref()?.tip;
+        let tip = network.index.as_ref()?.tip?;
         Some(tip.saturating_sub(network.max_depth?))
     }
 }
@@ -98,18 +106,23 @@ impl Worker for Prune {
         Topic::new([KIND])
     }
 
-    /// Deletes what succeeded before [`KEEP`] ago, then prunes blocks
-    /// ([`Self::blocks`]); a failed read or write retries.
+    /// Deletes what succeeded before [`KEEP`] ago and the log entries
+    /// before [`HISTORY_KEPT`] ago or beyond [`LOGS_MOST`], then prunes
+    /// blocks ([`Self::blocks`]); a failed read or write retries.
     async fn run(&self, _cx: Context<'_, (), ()>) -> Ack {
-        let Ok(before) = i64::try_from(tasks::now().saturating_sub(millis(KEEP))) else {
+        let now = tasks::now();
+        let (Ok(before), Ok(history_before)) = (
+            i64::try_from(now.saturating_sub(millis(KEEP))),
+            i64::try_from(now.saturating_sub(millis(HISTORY_KEPT))),
+        ) else {
             return Ack::Fail("now is above range".into());
         };
         let pruned = async {
             self.db
                 .write(move |connection| {
-                    Ok(task::db::delete_done_before(
-                        connection, &RECURRING, before,
-                    )?)
+                    task::db::delete_done_before(connection, &RECURRING, before)?;
+                    log::db::prune(connection, history_before, LOGS_MOST)?;
+                    Ok(())
                 })
                 .await?;
             self.blocks().await

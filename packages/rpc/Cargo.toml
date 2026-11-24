@@ -13,7 +13,7 @@ default = []
 testing = []
 
 [dependencies]
-logging = { path = "../logging" }
+tracing.workspace = true
 http = "1"
 jsonrpsee.workspace = true
 serde = { workspace = true, features = ["derive"] }

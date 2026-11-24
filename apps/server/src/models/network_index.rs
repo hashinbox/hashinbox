@@ -1,8 +1,6 @@
 //! What each network's indexer last wrote: the `network_index` table. The
 //! server indexes exactly the networks that have a row.
 
-use std::collections::BTreeMap;
-
 use serde::Serialize;
 
 /// One network's indexing as its indexer last wrote it; the counters since
@@ -60,43 +58,9 @@ pub(crate) mod db {
     use diesel::{
         prelude::*,
         sql_types::{BigInt, Nullable, Text},
-        sqlite::Sqlite,
     };
 
-    use crate::models::{int, schema::network_index, uint};
-
-    /// One `network_index` row as the file holds it.
-    #[derive(Queryable, Selectable)]
-    #[diesel(table_name = network_index, check_for_backend(Sqlite))]
-    struct Row {
-        chain: String,
-        network: String,
-        tip: i64,
-        confirmed: i64,
-        indexed: Option<i64>,
-        checked_at: Option<i64>,
-        blocks: i64,
-        reorgs: i64,
-        failures: i64,
-    }
-
-    impl TryFrom<Row> for (base::Network, NetworkIndex) {
-        type Error = anyhow::Error;
-
-        fn try_from(row: Row) -> anyhow::Result<Self> {
-            let key = base::Network::new(base::Chain::new(&row.chain), &row.network);
-            let index = NetworkIndex {
-                tip: uint(row.tip)?,
-                confirmed: uint(row.confirmed)?,
-                indexed: row.indexed.map(uint).transpose()?,
-                checked_at: row.checked_at.map(uint).transpose()?,
-                blocks: uint(row.blocks)?,
-                reorgs: uint(row.reorgs)?,
-                failures: uint(row.failures)?,
-            };
-            Ok((key, index))
-        }
-    }
+    use crate::models::{int, schema::network_index};
 
     /// Writes one step ([`NetworkIndex::step`]) to `network`'s row, the
     /// row made by the first. `tip` and `confirmed` only move forward,
@@ -158,19 +122,5 @@ pub(crate) mod db {
             .select(network_index::confirmed)
             .first::<i64>(connection)
             .optional()
-    }
-
-    /// Every row: each network whose tip is known.
-    ///
-    /// # Errors
-    ///
-    /// The read, or a row out of range.
-    pub(crate) fn find_all(
-        connection: &mut SqliteConnection,
-    ) -> anyhow::Result<BTreeMap<base::Network, NetworkIndex>> {
-        let rows = network_index::table
-            .select(Row::as_select())
-            .load(connection)?;
-        rows.into_iter().map(TryInto::try_into).collect()
     }
 }

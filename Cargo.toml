@@ -10,7 +10,6 @@ members = [
     "packages/crypto",
     "packages/rpc",
     "packages/http-server",
-    "packages/logging",
     "packages/tasks",
 ]
 exclude = ["old", "reference"]
@@ -47,6 +46,9 @@ sha2 = "=0.10.9"
 diesel = { version = "=2.3.14", default-features = false, features = ["sqlite", "r2d2", "returning_clauses_for_sqlite_3_35", "32-column-tables"] }
 # Diesel links SQLite through this; bundled, so no system library is needed.
 libsqlite3-sys = { version = "0.30", features = ["bundled"] }
+# Libraries emit events and spans; only the server installs a subscriber.
+tracing = { version = "0.1.41", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.20", default-features = false, features = ["std", "registry", "env-filter", "fmt"] }
 tokio = { version = "=1.49.0", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "=1.18.1", features = ["v7"] }
 zeroize = "=1.8.2"

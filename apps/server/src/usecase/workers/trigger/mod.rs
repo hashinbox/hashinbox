@@ -16,8 +16,8 @@ use std::{num::NonZeroUsize, sync::Arc};
 
 use ::trigger::{Decision, actions::Registry};
 use diesel::SqliteConnection;
-use logging::{Level, Logger};
 use tasks::{Ack, Job, OnLock, Policy, Topic, Worker};
+use tracing::Instrument as _;
 
 use super::{TIMEOUT, index::Target};
 use crate::{
@@ -35,7 +35,6 @@ pub(crate) struct Round {
     db: Db,
     queue: Queue,
     actions: Arc<Registry<Job>>,
-    logger: Logger,
 }
 
 impl Round {
@@ -44,14 +43,12 @@ impl Round {
         db: Db,
         queue: Queue,
         actions: Arc<Registry<Job>>,
-        logger: Logger,
     ) -> Self {
         Self {
             container,
             db,
             queue,
             actions,
-            logger,
         }
     }
 }
@@ -81,6 +78,7 @@ impl Worker for Round {
     /// write.
     async fn run(&self, cx: tasks::Context<'_, Target, ()>) -> Ack {
         let network = cx.input().network();
+        let span = crate::usecase::network_span(&network);
         let round = async {
             let service = self.container.service(&network)?;
             let (actions, fees, assets) = (
@@ -118,15 +116,7 @@ impl Worker for Round {
                 let Some(why) = &one.last.refused else {
                     continue;
                 };
-                self.logger.event(
-                    Level::Warn,
-                    "trigger.refused",
-                    &format!("{}: {why}", one.trigger),
-                    &[
-                        ("chain", network.chain.as_str()),
-                        ("network", &network.name),
-                    ],
-                );
+                tracing::warn!(target: "trigger.refused", "{}: {why}", one.trigger);
             }
             if decided.is_empty() {
                 return anyhow::Ok(Ack::Idle);
@@ -145,6 +135,7 @@ impl Worker for Round {
             anyhow::Ok(Ack::Done)
         };
         round
+            .instrument(span)
             .await
             .unwrap_or_else(|error| Ack::Retry(format!("{error:#}")))
     }

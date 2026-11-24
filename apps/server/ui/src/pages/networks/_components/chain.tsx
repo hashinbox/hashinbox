@@ -137,8 +137,8 @@ export function Chain({
       <Typography variant="body2" color="text.secondary" sx={{ fontFamily: mono, mb: 1 }}>
         indexed #{network.index?.indexed ?? '—'}
         {network.index?.indexed != null &&
-          network.tip_live != null &&
-          ` · ${String(Math.max(network.tip_live - network.index.indexed, 0))} behind`}
+          network.tip.live != null &&
+          ` · ${String(Math.max(network.tip.live - network.index.indexed, 0))} behind`}
         {' · '}confirmed #{network.index?.confirmed ?? '—'}
       </Typography>
       <Box

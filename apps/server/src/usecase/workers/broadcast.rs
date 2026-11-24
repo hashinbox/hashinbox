@@ -46,6 +46,9 @@
 //!   - its index given up or gone (a jump read past it unseen) →
 //!     *forgotten*.
 //!
+//! A network whose every node is disabled: any run waits a check and goes
+//! again, [`NO_ENABLED_ENDPOINT`] its reason; it never fails for it.
+//!
 //! Terminal: *final* (done), *reverted*, *expired*, *refused*, *cancelled*,
 //! *forgotten* (failed). Every other state is checked again. Bumps off
 //! (`max_bumps` 0), or a job queued before its builder's state was kept:
@@ -71,6 +74,7 @@ use diesel::SqliteConnection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tasks::{Ack, Context, Job, Policy, Topic, Worker, millis};
+use tracing::Instrument as _;
 
 use super::TIMEOUT;
 use crate::{
@@ -80,7 +84,7 @@ use crate::{
         transaction::{Transaction, TransactionId},
         transaction_index,
     },
-    usecase::indexes::transaction as transaction_indexes,
+    usecase::{NO_ENABLED_ENDPOINT, Served as _, indexes::transaction as transaction_indexes},
 };
 
 /// The job kind.
@@ -722,9 +726,19 @@ impl Broadcast {
             },
             ..progress
         };
+        let txid = ended.txid.clone();
         let written = self.record(task, ended, move |connection| delete(connection, &ids));
         match written.await {
-            Ok(Ok(())) => ack,
+            Ok(Ok(())) => {
+                let name = serde_json::to_value(outcome).unwrap_or_default();
+                let outcome = name.as_str().unwrap_or("-");
+                if outcome == "final" {
+                    tracing::info!(target: "send.end", txid, outcome, "Payment ended");
+                } else {
+                    tracing::warn!(target: "send.end", txid, outcome, "Payment ended");
+                }
+                ack
+            }
             Ok(Err(refused)) => Ack::Retry(refused.to_string()),
             Err(error) => Ack::Retry(format!("{error:#}")),
         }
@@ -750,25 +764,65 @@ impl Worker for Broadcast {
         ])
     }
 
-    async fn run(&self, mut task: Context<'_, SendIntent, Progress>) -> Ack {
+    /// One run, in its network's span (inside the executor's job span):
+    /// see the module.
+    async fn run(&self, task: Context<'_, SendIntent, Progress>) -> Ack {
+        let span = crate::usecase::network_span(&task.input().sender().network);
+        self.payment(task).instrument(span).await
+    }
+}
+
+impl Broadcast {
+    /// [`Worker::run`]'s work.
+    async fn payment(&self, mut task: Context<'_, SendIntent, Progress>) -> Ack {
         let network = task.input().sender().network;
         let tracking = self.tracking(&network);
         let retry = |error: anyhow::Error| Ack::Retry(format!("{error:#}"));
         let again = |why: Option<String>| Ack::Again(next_check(tracking.check), why);
 
+        // No node to call: waits, never fails for it.
+        if !self.container.has_node(&network) {
+            return again(Some(NO_ENABLED_ENDPOINT.to_owned()));
+        }
+
         // 1. Build: sign, record and watch.
         let mut progress = match task.state().cloned() {
             Some(progress) => progress,
             None => match self.build(&mut task).await {
-                Ok(progress) => progress,
-                Err(Stop::Retry(why)) => return Ack::Retry(why),
-                Err(Stop::Fail(why)) => return Ack::Fail(why),
+                Ok(progress) => {
+                    let txid = &progress.txid;
+                    tracing::info!(target: "send.sign", txid, "Payment signed");
+                    progress
+                }
+                Err(Stop::Retry(why)) => {
+                    tracing::warn!(target: "send.sign", why, "Payment not signed; retried");
+                    return Ack::Retry(why);
+                }
+                Err(Stop::Fail(why)) => {
+                    tracing::warn!(target: "send.sign", why, "Payment not signed; failed");
+                    return Ack::Fail(why);
+                }
             },
         };
 
         // 2. Send, once.
         if !progress.sent {
-            let why = match self.send(&network, &progress.txid).await {
+            let sent = self.send(&network, &progress.txid).await;
+            let outcome = match &sent {
+                Ok(Sent::Accepted) => "accepted",
+                Ok(Sent::Unsure(_)) => "unsure",
+                Ok(Sent::Mined) => "mined",
+                Ok(Sent::Refused(_)) => "refused",
+                Ok(Sent::Forgotten) => "forgotten",
+                Err(_) => "retry",
+            };
+            let txid = &progress.txid;
+            if matches!(sent, Ok(Sent::Accepted | Sent::Mined)) {
+                tracing::info!(target: "send.broadcast", txid, outcome, "Payment broadcast");
+            } else {
+                tracing::warn!(target: "send.broadcast", txid, outcome, "Payment broadcast");
+            }
+            let why = match sent {
                 Ok(Sent::Accepted | Sent::Mined) => None,
                 Ok(Sent::Unsure(why)) => Some(why),
                 Ok(Sent::Refused(why)) => {
@@ -827,7 +881,31 @@ impl Worker for Broadcast {
             // 4. Bump: a replacement at a higher fee in its place, or a
             //    cancel; none (stuck): the same bytes again.
             Ok(Watched::BumpDue) => {
-                let why = match self.bump(&mut task, &network, &progress, tracking).await {
+                let bumped = self.bump(&mut task, &network, &progress, tracking).await;
+                let outcome = match &bumped {
+                    Ok(Bumped::Sent(_)) => "sent",
+                    Ok(Bumped::Refused(_)) => "refused",
+                    Ok(Bumped::Stuck(_)) => "stuck",
+                    Err(_) => "retry",
+                };
+                let now = task.state().unwrap_or(&progress);
+                let txid = now.txid.clone();
+                let cancel = now.cancels.contains(&txid);
+                match (cancel, matches!(bumped, Ok(Bumped::Sent(_)))) {
+                    (false, true) => {
+                        tracing::info!(target: "send.bump", txid, outcome, "Payment bumped")
+                    }
+                    (false, false) => {
+                        tracing::warn!(target: "send.bump", txid, outcome, "Payment bumped")
+                    }
+                    (true, true) => {
+                        tracing::info!(target: "send.cancel", txid, outcome, "Payment cancelled")
+                    }
+                    (true, false) => {
+                        tracing::warn!(target: "send.cancel", txid, outcome, "Payment cancelled")
+                    }
+                }
+                let why = match bumped {
                     Ok(Bumped::Sent(why)) => why,
                     Ok(Bumped::Refused(why)) => Some(why),
                     Ok(Bumped::Stuck(why)) => {

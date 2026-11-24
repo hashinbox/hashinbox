@@ -92,8 +92,6 @@ impl Task {
 
 /// The `q` table's statements.
 pub(crate) mod db {
-    use std::collections::BTreeMap;
-
     use diesel::{
         prelude::*,
         sql_types::{BigInt, Bool, Text},
@@ -266,25 +264,6 @@ pub(crate) mod db {
             .optional()
     }
 
-    /// Why the last job of `kind` on each topic failed, by topic: only the
-    /// topics whose last job has a `reason`.
-    pub(crate) fn find_last_reasons(
-        connection: &mut SqliteConnection,
-        kind: &str,
-    ) -> QueryResult<BTreeMap<String, String>> {
-        use diesel::dsl::sql;
-        let rows = q::table
-            .filter(
-                sql::<Bool>("id IN (SELECT MAX(id) FROM q WHERE kind = ")
-                    .bind::<Text, _>(kind)
-                    .sql(" GROUP BY topic)"),
-            )
-            .filter(q::reason.is_not_null())
-            .select((q::topic, q::reason.assume_not_null()))
-            .load::<(String, String)>(connection)?;
-        Ok(rows.into_iter().collect())
-    }
-
     /// Deletes every job of one of `kinds` that succeeded, was idle or was
     /// skipped and was last written before `before` (Unix ms); how many.
     pub(crate) fn delete_done_before(
@@ -299,17 +278,6 @@ pub(crate) mod db {
                 .filter(q::updated_at.lt(before)),
         )
         .execute(connection)
-    }
-
-    /// How many jobs of `kind` are failing: failed, or not succeeded with
-    /// a `reason` (their last run asked to go again because of it).
-    pub(crate) fn count_failing(connection: &mut SqliteConnection, kind: &str) -> QueryResult<i64> {
-        q::table
-            .filter(q::kind.eq(kind))
-            .filter(q::status.ne(2))
-            .filter(q::reason.is_not_null())
-            .count()
-            .get_result(connection)
     }
 
     /// How many jobs are in each status, as (status, count).

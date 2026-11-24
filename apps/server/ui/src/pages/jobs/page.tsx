@@ -1,8 +1,5 @@
-import FilterList from '@mui/icons-material/FilterList';
 import WorkHistory from '@mui/icons-material/WorkHistory';
-import Autocomplete from '@mui/material/Autocomplete';
 import Box from '@mui/material/Box';
-import Chip from '@mui/material/Chip';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -10,7 +7,6 @@ import TableCell from '@mui/material/TableCell';
 import TableContainer from '@mui/material/TableContainer';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
-import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { call, client, type Job } from '@/api/client';
@@ -21,6 +17,10 @@ import { shorten } from '@/_components/trim';
 import { When } from '@/_components/when';
 import { mono } from '@/theme';
 import { Split } from '@/_components/split';
+import { Logs } from '@/_components/logs';
+import { valueOf, type Tag } from '@/_components/tag';
+import { Tags } from '@/_components/tags';
+import { segments } from '@/route';
 
 const BEAT_MS = 4000;
 /** Every job kind there is, as the filter names them. */
@@ -37,11 +37,7 @@ function labelOf(kind: string): string {
 const STATES = ['pending', 'running', 'succeeded', 'failed', 'skipped', 'idle'] as const;
 
 /** One tag of the filter: a network, a kind or a state. */
-interface Filter {
-  group: 'network' | 'kind' | 'state';
-  value: string;
-  label: string;
-}
+type Filter = Tag<'network' | 'kind' | 'state'>;
 const TONE: Record<Job['state'], string> = {
   pending: 'text.disabled',
   running: 'info.main',
@@ -88,11 +84,11 @@ function next(job: Job): ReactNode {
 export function Jobs({ shell }: { shell: Shell }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [tags, setTags] = useState<Filter[]>([]);
-  const valueOf = (group: Filter['group']) => tags.find((t) => t.group === group)?.value ?? '';
-  const network = valueOf('network');
-  const kind = valueOf('kind');
-  const state = valueOf('state');
-  const [selected, setSelected] = useState<string | null>(null);
+  const network = valueOf(tags, 'network');
+  const kind = valueOf(tags, 'kind');
+  const state = valueOf(tags, 'state');
+  // A linked job, such as a log entry's: `/jobs/{id}`.
+  const [selected, setSelected] = useState<string | null>(() => segments()[1] ?? null);
 
   const refresh = useCallback(() => {
     const [chainName, networkName] = network.split('/');
@@ -131,62 +127,15 @@ export function Jobs({ shell }: { shell: Shell }) {
       onClose={() => setSelected(null)}
       list={
         <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
-          <Autocomplete
-            multiple
-            size="small"
+          <Tags
             options={options}
             value={tags}
-            groupBy={(o) => o.group}
-            getOptionLabel={(o) => o.label}
-            isOptionEqualToValue={(o, v) => o.group === v.group && o.value === v.value}
-            onChange={(_, next) => {
-              // One tag per group: a newer one replaces the older.
-              setTags(next.filter((t, i) => !next.slice(i + 1).some((u) => u.group === t.group)));
+            onChange={(next) => {
+              setTags(next);
               setSelected(null);
             }}
-            renderValue={(value, getItemProps) =>
-              value.map((t, index) => (
-                <Chip
-                  {...getItemProps({ index })}
-                  key={`${t.group}:${t.value}`}
-                  size="small"
-                  label={
-                    <>
-                      <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
-                        {t.group}
-                      </Box>
-                      {t.label}
-                    </>
-                  }
-                  sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
-                />
-              ))
-            }
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                placeholder={tags.length === 0 ? 'Filter by network, kind or state' : ''}
-                slotProps={{
-                  ...params.slotProps,
-                  input: {
-                    ...params.slotProps.input,
-                    startAdornment: (
-                      <>
-                        <FilterList
-                          fontSize="small"
-                          aria-hidden
-                          sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
-                        />
-                        {params.slotProps.input.startAdornment}
-                      </>
-                    ),
-                  },
-                  htmlInput: { ...params.slotProps.htmlInput, 'aria-label': 'Filter jobs' },
-                }}
-                sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
-              />
-            )}
-            sx={{ mb: 2, maxWidth: 720 }}
+            placeholder="Filter by network, kind or state"
+            label="Filter jobs"
           />
           {/* Wider than its column: it scrolls inside, never over the detail beside it. */}
           <TableContainer>
@@ -269,7 +218,7 @@ export function Jobs({ shell }: { shell: Shell }) {
             }}
           >
             {current ? (
-              <Detail job={current} />
+              <Detail key={current.id} shell={shell} job={current} />
             ) : (
               <Empty icon={<WorkHistory />} title="Jobs">
                 A job is a piece of background work, like indexing a network, checking triggers or
@@ -285,7 +234,16 @@ export function Jobs({ shell }: { shell: Shell }) {
 }
 
 /** One job whole: where it is, what it was given, what its worker did. */
-function Detail({ job }: { job: Job }) {
+function Detail({ shell, job }: { shell: Shell; job: Job }) {
+  const readLogs = useCallback(
+    (cursor: string | undefined) =>
+      call(
+        client.GET('/v1/jobs/{id}/logs', {
+          params: { path: { id: job.id }, query: cursor === undefined ? {} : { cursor } },
+        }),
+      ),
+    [job.id],
+  );
   const facts: [string, ReactNode][] = [
     ['id', job.id],
     ['kind', job.kind],
@@ -340,6 +298,9 @@ function Detail({ job }: { job: Job }) {
         ) : (
           <Json value={job.progress} />
         )}
+      </Section>
+      <Section title="Logs">
+        <Logs shell={shell} read={readLogs} />
       </Section>
     </Stack>
   );

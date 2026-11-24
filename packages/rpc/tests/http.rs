@@ -112,7 +112,7 @@ fn items(seen: &Seen) -> &Vec<Value> {
 }
 
 fn connect(url: &str) -> Node {
-    rpc::node(&Endpoint::new(url), Default::default()).unwrap()
+    rpc::node(&Endpoint::new(url)).unwrap()
 }
 
 async fn call(url: &str) -> Result<RawJson, Error> {

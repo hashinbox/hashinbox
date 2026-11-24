@@ -15,8 +15,6 @@ path = "src/main.rs"
 solana-node = []
 
 [dependencies]
-# The trigger loop reports refusals through an injected sink.
-logging = { path = "../../packages/logging" }
 anyhow.workspace = true
 clap = { workspace = true, features = ["env"] }
 axum = "0.8"
@@ -45,6 +43,9 @@ tokio = { workspace = true, features = ["fs", "net", "process", "rt", "signal", 
 # The trigger engine: its language's building blocks, the round, the stats
 # the API shows (`openapi`); the server adds storage and its actions.
 trigger = { path = "../../sdk/trigger", features = ["openapi"] }
+# Events and spans; the one subscriber (stdout, the `log` table).
+tracing.workspace = true
+tracing-subscriber.workspace = true
 # One UUIDv7 per trigger batch: its group id.
 uuid.workspace = true
 utoipa = { version = "=5.5.0", features = ["axum_extras"] }

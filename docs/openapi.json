@@ -21,7 +21,7 @@
           "health"
         ],
         "summary": "Read readiness and every indexed network's indexing",
-        "description": "Public readiness: ready when at least one network is indexed and no index job is failing (failed, or going again with a `reason`). Reads the `network_index` rows and the job queue; no RPC.",
+        "description": "Public readiness: ready when at least one network has an index, every indexed network has an enabled RPC node, and no network's index job has a reason (`job_reason`: it failed, or goes again because of it). Reads the stored networks; no RPC.",
         "operationId": "read_health",
         "responses": {
           "200": {
@@ -300,13 +300,345 @@
         ]
       }
     },
+    "/v1/jobs/{id}/logs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "summary": "List a job's kept log entries",
+        "description": "Every kept entry of the job's runs (its steps, its nodes' calls), newest first, a page at a time; deleted with the job.",
+        "operationId": "list_job_logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The job's id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job's entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job is unknown",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "List the kept log entries",
+        "description": "Every kept entry, newest first, a page at a time: its level, event (`target`), message and fields, and its network and job when it has them. Kept 7 days, at most 100 000 per network and as many of no network.",
+        "operationId": "list_logs",
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, level, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/logs/stream": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "Stream new log entries",
+        "description": "`text/event-stream` of every entry kept from now on that the filters read: one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the stream does not end.",
+        "operationId": "stream_logs",
+        "parameters": [
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "query",
+            "description": "Only entries of this network, `chain/name` (`bitcoin/regtest`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "query",
+            "description": "Only entries of this job, its `job_id`.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The entries, as they are kept",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, level, or network",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/logs/targets": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "List the logged events",
+        "description": "Every event (`target`) a kept entry has, each once, in order: the values the `target` filter of the log lists and the stream takes.",
+        "operationId": "list_log_targets",
+        "responses": {
+          "200": {
+            "description": "The events",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogTargets"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/networks": {
       "get": {
         "tags": [
           "networks"
         ],
         "summary": "List every network, its assets, its RPC nodes, its indexing and its live tip",
-        "description": "Every stored network: its row, its assets, its nodes (each URL with what the running server knows of it: last tip, failure streak, calls) and its `index` row (null: not indexed), and why its index job last failed (`index_job_reason`). `tip_live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `tip` and says why in `tip_error`.",
+        "description": "Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `index.tip` and says why in `tip.error`.",
         "operationId": "list_networks",
         "responses": {
           "200": {
@@ -745,7 +1077,7 @@
           "networks"
         ],
         "summary": "List a network's RPC nodes",
-        "description": "Its stored nodes in stored order: each one's id and URL, as `PUT` takes them, and what the running server knows of it (`state`: last tip, failure streak, calls).",
+        "description": "Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) and position, its calls (`stats`, each written as it finishes) and, while disabled, the record that disabled it (`disabled`: its kind and why; null: enabled).",
         "operationId": "list_network_endpoints",
         "parameters": [
           {
@@ -1085,6 +1417,355 @@
           },
           "503": {
             "description": "The nodes could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/endpoints/{id}/failures": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List what disabled or enabled one RPC node",
+        "description": "Every failure of the node it cannot recover from (which disabled it: `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).",
+        "operationId": "list_network_endpoint_failures",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The node's `id`, as `endpoints` lists it.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The node's records",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RpcNodeFailureList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such node, or network not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/endpoints/{id}/state": {
+      "put": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Enable or disable one RPC node of a network",
+        "description": "Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call of the network to its enabled nodes only; a route skips a disabled node. Disabling the last enabled node is allowed: the network's index job idles and its payments wait until one is enabled again. Asks no node.",
+        "operationId": "set_network_endpoint_state",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The node's `id`, as `endpoints` lists it.",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetRpcNodeState"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored and in use",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkEndpoints"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such node, or network not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The state could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/logs": {
+      "get": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "List a network's kept log entries",
+        "description": "The network's kept entries (those naming it: its nodes' calls, its index steps, its payments), newest first, a page at a time.",
+        "operationId": "list_network_logs",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The network's entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query, level, cursor, or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The network is not configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3255,147 +3936,23 @@
         }
       },
       "ConfiguredNetwork": {
-        "type": "object",
-        "description": "One network as stored: its `network` row, its `network_asset` rows, its\n`network_endpoint` nodes and their routes, and its `network_index` row (`None`: no\ntip known yet); and the node's tip asked now (`tip_live`, the stored `tip`\nuntil a caller that asked sets it; `tip_error`, why asking failed).",
-        "required": [
-          "chain",
-          "network",
-          "chain_id",
-          "testnet",
-          "enabled",
-          "block_time_ms",
-          "confirmations",
-          "max_depth",
-          "explorer_address",
-          "explorer_transaction",
-          "settings",
-          "assets",
-          "endpoints",
-          "routes",
-          "index",
-          "index_job_reason",
-          "tip_live",
-          "tip_error"
-        ],
-        "properties": {
-          "assets": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NetworkAsset"
-            },
-            "description": "Its native currency and tokens."
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StoredNetwork"
           },
-          "block_time_ms": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The chain's block (slot) time, in milliseconds.",
-            "minimum": 0
-          },
-          "chain": {
-            "type": "string",
-            "description": "Chain name."
-          },
-          "chain_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The chain's own id of the network (Ethereum chain id, Solana genesis\nhash); always present, null where the name is enough."
-          },
-          "confirmations": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Positions below the tip before a block counts as confirmed.",
-            "minimum": 0
-          },
-          "enabled": {
-            "type": "boolean",
-            "description": "Whether the server starts indexing it."
-          },
-          "endpoints": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RpcNode"
-            },
-            "description": "Its nodes as stored, in failover order."
-          },
-          "explorer_address": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "An address's explorer page, `{address}` filled in; always present,\nnull: none."
-          },
-          "explorer_transaction": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "A transaction's explorer page, `{tx}` filled in; always present,\nnull: none."
-          },
-          "index": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/NetworkIndex",
-                "description": "Its indexing; always present, null: no tip known yet (or never\nindexed: not `enabled`)."
-              }
-            ]
-          },
-          "index_job_reason": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why its index job's last run failed (the job's `reason`), cleared by\nthe next run that does not; always present, null: none."
-          },
-          "max_depth": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "How many positions below the tip a wallet's start may be; at least\n`confirmations`. Always present, null: no limit. Null on a chain that\nreads balances (Solana, Ethereum): its line is the chain's final block.",
-            "minimum": 0
-          },
-          "network": {
-            "type": "string",
-            "description": "Network name."
-          },
-          "routes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RpcRoute"
-            },
-            "description": "Its routed methods, each over its own nodes; every other method goes\nto all of them."
-          },
-          "settings": {
+          {
             "type": "object",
-            "description": "The chain's own knobs; an absent key is the chain's default."
-          },
-          "testnet": {
-            "type": "boolean",
-            "description": "Whether its coins are test coins."
-          },
-          "tip_error": {
-            "type": [
-              "string",
-              "null"
+            "required": [
+              "tip"
             ],
-            "description": "Why asking the node failed; always present, null when it answered."
-          },
-          "tip_live": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The node's newest block, asked now; the stored `tip` when that\nfailed. Always present.",
-            "minimum": 0
+            "properties": {
+              "tip": {
+                "$ref": "#/components/schemas/LiveTip"
+              }
+            }
           }
-        }
+        ],
+        "description": "One stored network, and its node's tip asked now."
       },
       "CreateWallet": {
         "type": "object",
@@ -3848,6 +4405,142 @@
           }
         }
       },
+      "LiveTip": {
+        "type": "object",
+        "description": "The node's tip, asked now.",
+        "required": [
+          "live",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why asking the node failed; always present, null when it answered."
+          },
+          "live": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The node's newest block; the stored `index.tip` when asking failed.\nAlways present.",
+            "minimum": 0
+          }
+        }
+      },
+      "LogEntry": {
+        "type": "object",
+        "description": "One kept event.",
+        "required": [
+          "id",
+          "at",
+          "level",
+          "target",
+          "message",
+          "fields",
+          "chain",
+          "network",
+          "job_id"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When it happened, Unix ms."
+          },
+          "chain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its network's chain; always present, null: no network's."
+          },
+          "fields": {
+            "type": "object",
+            "description": "Its fields and its spans' (`network`, `node`, …), as text.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id, newest highest; 0 until stored, so 0 on the live stream\n(`/v1/logs/stream`)."
+          },
+          "job_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "The job it ran in; always present, null: none."
+          },
+          "level": {
+            "type": "string",
+            "description": "`error`, `warn`, `info`, `debug` or `trace`."
+          },
+          "message": {
+            "type": "string"
+          },
+          "network": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its network's name; always present, null: no network's."
+          },
+          "target": {
+            "type": "string",
+            "description": "The event: `rpc.http`, `index.step`, `send.broadcast`, …"
+          }
+        }
+      },
+      "LogList": {
+        "type": "object",
+        "description": "A page of log entries.",
+        "required": [
+          "logs",
+          "next_cursor"
+        ],
+        "properties": {
+          "logs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogEntry"
+            },
+            "description": "The entries, newest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          }
+        }
+      },
+      "LogTargets": {
+        "type": "object",
+        "description": "The events log entries are kept of.",
+        "required": [
+          "targets"
+        ],
+        "properties": {
+          "targets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Each event (`target`) once, in order: what a log list's `target`\nfilter takes."
+          }
+        }
+      },
       "Movement": {
         "allOf": [
           {
@@ -4000,17 +4693,23 @@
         "description": "One network's indexing.",
         "required": [
           "network",
-          "indexing"
+          "indexing",
+          "enabled_endpoints"
         ],
         "properties": {
+          "enabled_endpoints": {
+            "type": "integer",
+            "description": "How many of its RPC nodes are enabled; 0: no call can go out, its\nindex job idles (its reason says so) and its payments wait.",
+            "minimum": 0
+          },
           "indexing": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/NetworkIndex",
-                "description": "What its indexer last wrote; always present, null: no tip known yet."
+                "$ref": "#/components/schemas/NetworkIndexing",
+                "description": "Its indexing; always present, null: no tip known and no index job\nreason yet."
               }
             ]
           },
@@ -4020,9 +4719,9 @@
           }
         }
       },
-      "NetworkIndex": {
+      "NetworkIndexing": {
         "type": "object",
-        "description": "One network's indexing as its indexer last wrote it; the counters since\nthe row was made, across restarts. Written the first time the tip is\nknown: no row, no tip yet.",
+        "description": "One network's indexing: what its indexer last wrote (its `network_index`\nrow) and why its index job last failed.",
         "required": [
           "tip",
           "confirmed",
@@ -4030,7 +4729,8 @@
           "checked_at",
           "blocks",
           "reorgs",
-          "failures"
+          "failures",
+          "job_reason"
         ],
         "properties": {
           "blocks": {
@@ -4049,15 +4749,18 @@
             "minimum": 0
           },
           "confirmed": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "`tip - confirmations` (saturating), written with it.",
+            "description": "`tip - confirmations` (saturating), written with it; always present,\nnull with it.",
             "minimum": 0
           },
           "failures": {
             "type": "integer",
             "format": "int64",
-            "description": "Failed steps; why the last failed is the index job's `reason`.",
+            "description": "Failed steps.",
             "minimum": 0
           },
           "indexed": {
@@ -4069,6 +4772,13 @@
             "description": "The last kept block; always present, null: none yet.",
             "minimum": 0
           },
+          "job_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why its index job's last run failed or idles (the job's `reason`),\ncleared by the next run that does not; always present, null: none."
+          },
           "reorgs": {
             "type": "integer",
             "format": "int64",
@@ -4076,9 +4786,12 @@
             "minimum": 0
           },
           "tip": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "The node's newest block at the indexer's last read.",
+            "description": "The node's newest block at the indexer's last read; always present,\nnull: no tip known yet (the job failed before its first).",
             "minimum": 0
           }
         }
@@ -4182,7 +4895,7 @@
           },
           "ready": {
             "type": "boolean",
-            "description": "At least one network, and no index job failing."
+            "description": "At least one network has an index, and no index job has a reason."
           }
         }
       },
@@ -4207,28 +4920,39 @@
       },
       "RpcNode": {
         "type": "object",
-        "description": "One stored node of a network.",
+        "description": "One stored node of a network, with its counts and state.",
         "required": [
           "id",
           "url",
-          "state"
+          "position",
+          "stats",
+          "disabled"
         ],
         "properties": {
-          "id": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Its id: what a route and removal name."
-          },
-          "state": {
+          "disabled": {
             "oneOf": [
               {
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/RpcNodeState",
-                "description": "What the running server knows of it; always present, null where it\nis not running (its network is not, or its URL did not build)."
+                "$ref": "#/components/schemas/RpcNodeFailure",
+                "description": "Its newest record while that is not an enable: what disabled it, its\n`message` why. Always present, null: enabled, the transport uses it."
               }
             ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id: what a route and removal name."
+          },
+          "position": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its failover position, lowest first."
+          },
+          "stats": {
+            "$ref": "#/components/schemas/RpcNodeStats",
+            "description": "Its calls."
           },
           "url": {
             "type": "string",
@@ -4236,50 +4960,103 @@
           }
         }
       },
-      "RpcNodeState": {
+      "RpcNodeFailure": {
         "type": "object",
-        "description": "What the running server knows of one node: its last tip, its failure\nstreak, and its calls since it was loaded. Nothing asks the node.",
+        "description": "One record of one node.",
         "required": [
-          "tip",
+          "id",
+          "endpoint_id",
+          "at",
+          "kind",
+          "message"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When, Unix ms."
+          },
+          "endpoint_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The node's id."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its id, newest highest; 0 until stored."
+          },
+          "kind": {
+            "type": "string",
+            "description": "What: `http_401`, `http_403`, `http_404`, `rpc_{code}` (an error\nobject of such a code), `wrong_chain` (the node serves another\nchain) or `manual` (a disable by hand), each disabling it; or\n`enabled` (an enable by hand)."
+          },
+          "message": {
+            "type": "string",
+            "description": "Why, as shown; never a URL."
+          }
+        }
+      },
+      "RpcNodeFailureList": {
+        "type": "object",
+        "description": "`GET /v1/networks/{chain}/{network}/endpoints/{id}/failures`: a page of\nwhat disabled or enabled a node.",
+        "required": [
           "failures",
+          "next_cursor"
+        ],
+        "properties": {
+          "failures": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcNodeFailure"
+            },
+            "description": "The node's records, newest first."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          }
+        }
+      },
+      "RpcNodeState": {
+        "type": "string",
+        "description": "Whether the transport uses a node.",
+        "enum": [
+          "enabled",
+          "disabled"
+        ]
+      },
+      "RpcNodeStats": {
+        "type": "object",
+        "description": "One node's counts.",
+        "required": [
+          "endpoint_id",
           "calls",
           "failed_calls",
-          "last_failure"
+          "updated_at"
         ],
         "properties": {
           "calls": {
             "type": "integer",
             "format": "int64",
-            "description": "Calls that reached it and finished.",
-            "minimum": 0
+            "description": "HTTP requests that reached it and finished."
+          },
+          "endpoint_id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The node's id."
           },
           "failed_calls": {
             "type": "integer",
             "format": "int64",
-            "description": "Of those, the ones that failed.",
-            "minimum": 0
+            "description": "Of those, the ones that failed."
           },
-          "failures": {
+          "updated_at": {
             "type": "integer",
-            "format": "int32",
-            "description": "Retryable failures in a row (a rate limit counts as 3); from 3 it is\ntried after every other node until it answers, or 10 block times (at\nleast 30 s) pass.",
-            "minimum": 0
-          },
-          "last_failure": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "The last failure's kind or code, never a message of the node's;\nalways present, null: none."
-          },
-          "tip": {
-            "type": [
-              "integer",
-              "null"
-            ],
             "format": "int64",
-            "description": "Its newest block (slot) when last asked, kept for the network's block\ntime; always present, null before it told one.",
-            "minimum": 0
+            "description": "Unix ms of the last; when the node was stored if none."
           }
         }
       },
@@ -4452,6 +5229,27 @@
           }
         }
       },
+      "SetRpcNodeState": {
+        "type": "object",
+        "description": "`PUT /v1/networks/{chain}/{network}/endpoints/{id}/state` body.",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, kept in its records (`failures`); none: `by hand`."
+          },
+          "state": {
+            "$ref": "#/components/schemas/RpcNodeState",
+            "description": "`disabled`: no call goes to it, its routes skip it (a `manual`\nrecord); `enabled`: used again, its reason cleared (an `enabled`\nrecord)."
+          }
+        },
+        "additionalProperties": false
+      },
       "Stats": {
         "type": "object",
         "description": "`GET /v1/stats`.",
@@ -4548,6 +5346,123 @@
             "format": "int64",
             "description": "Wallets whose key is kept.",
             "minimum": 0
+          }
+        }
+      },
+      "StoredNetwork": {
+        "type": "object",
+        "description": "One network as stored: its `network` row, its `network_asset` rows, its\nroutes, its index and its `network_endpoint` nodes with their counts and\nstate.",
+        "required": [
+          "chain",
+          "network",
+          "chain_id",
+          "testnet",
+          "enabled",
+          "block_time_ms",
+          "confirmations",
+          "max_depth",
+          "explorer_address",
+          "explorer_transaction",
+          "settings",
+          "assets",
+          "routes",
+          "index",
+          "endpoints"
+        ],
+        "properties": {
+          "assets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NetworkAsset"
+            },
+            "description": "Its native currency and tokens."
+          },
+          "block_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The chain's block (slot) time, in milliseconds.",
+            "minimum": 0
+          },
+          "chain": {
+            "type": "string",
+            "description": "Chain name."
+          },
+          "chain_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chain's own id of the network (Ethereum chain id, Solana genesis\nhash); always present, null where the name is enough."
+          },
+          "confirmations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Positions below the tip before a block counts as confirmed.",
+            "minimum": 0
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the server starts indexing it."
+          },
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcNode"
+            },
+            "description": "Its nodes as stored, in failover order; none enabled: no call can go\nout, its index job idles and its payments wait."
+          },
+          "explorer_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An address's explorer page, `{address}` filled in; always present,\nnull: none."
+          },
+          "explorer_transaction": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A transaction's explorer page, `{tx}` filled in; always present,\nnull: none."
+          },
+          "index": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NetworkIndexing",
+                "description": "Its indexing; always present, null: no tip known and no index job\nreason (or never indexed: not `enabled`)."
+              }
+            ]
+          },
+          "max_depth": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many positions below the tip a wallet's start may be; at least\n`confirmations`. Always present, null: no limit. Null on a chain that\nreads balances (Solana, Ethereum): its line is the chain's final block.",
+            "minimum": 0
+          },
+          "network": {
+            "type": "string",
+            "description": "Network name."
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RpcRoute"
+            },
+            "description": "Its routed methods, each over its own nodes; every other method goes\nto all of them."
+          },
+          "settings": {
+            "type": "object",
+            "description": "The chain's own knobs; an absent key is the chain's default."
+          },
+          "testnet": {
+            "type": "boolean",
+            "description": "Whether its coins are test coins."
           }
         }
       },
@@ -5155,6 +6070,10 @@
     {
       "name": "jobs",
       "description": "The job queue: indexing, trigger rounds, broadcasts, pruning"
+    },
+    {
+      "name": "logs",
+      "description": "The kept log entries: every one, a network's, a job's"
     },
     {
       "name": "stats",

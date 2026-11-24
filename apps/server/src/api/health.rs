@@ -1,4 +1,4 @@
-//! `GET /health`: readiness and every indexed network's `network_index` row.
+//! `GET /health`: readiness and every indexed network's indexing.
 
 use std::sync::Arc;
 
@@ -8,8 +8,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 use crate::{
     api::AppState,
-    models::{NetworkIndex, NetworkName},
-    usecase::stats,
+    models::{Index, Network, NetworkName, network},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -21,19 +20,53 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct NetworkHealth {
     /// The indexed chain and network.
     network: NetworkName,
-    /// What its indexer last wrote; always present, null: no tip known yet.
+    /// Its indexing; always present, null: no tip known and no index job
+    /// reason yet.
     #[schema(required)]
-    indexing: Option<NetworkIndex>,
+    indexing: Option<Index>,
+    /// How many of its RPC nodes are enabled; 0: no call can go out, its
+    /// index job idles (its reason says so) and its payments wait.
+    enabled_endpoints: usize,
+}
+
+impl From<Network> for NetworkHealth {
+    fn from(network: Network) -> Self {
+        Self {
+            enabled_endpoints: network.endpoints.enabled(),
+            network: network.key().into(),
+            indexing: network.index,
+        }
+    }
 }
 
 /// The health of every indexed network.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = Report)]
 struct ReadResponse {
-    /// At least one network, and no index job failing.
+    /// At least one network has an index, and no index job has a reason.
     ready: bool,
     /// Every indexed network.
     networks: Vec<NetworkHealth>,
+}
+
+impl From<Vec<Network>> for ReadResponse {
+    fn from(networks: Vec<Network>) -> Self {
+        let networks: Vec<NetworkHealth> = networks
+            .into_iter()
+            .filter(|network| network.enabled)
+            .map(Into::into)
+            .collect();
+        let indexes = networks.iter().map(|network| network.indexing.as_ref());
+        let indexed = indexes.clone().any(|index| index.is_some());
+        let failing = indexes.flatten().any(|index| index.job_reason.is_some());
+        let unserved = networks
+            .iter()
+            .any(|network| network.enabled_endpoints == 0);
+        Self {
+            ready: indexed && !failing && !unserved,
+            networks,
+        }
+    }
 }
 
 #[utoipa::path(
@@ -41,9 +74,10 @@ struct ReadResponse {
     path = "/health",
     operation_id = "read_health",
     summary = "Read readiness and every indexed network's indexing",
-    description = "Public readiness: ready when at least one network is indexed and no \
-        index job is failing (failed, or going again with a `reason`). Reads the \
-        `network_index` rows and the job queue; no RPC.",
+    description = "Public readiness: ready when at least one network has an index, every \
+        indexed network has an enabled RPC node, and no network's index job has a reason \
+        (`job_reason`: it failed, or goes again because of it). Reads the stored networks; \
+        no RPC.",
     responses(
         (status = 200, description = "Ready", body = ReadResponse),
         (status = 503, description = "Not ready", body = ReadResponse)
@@ -51,26 +85,13 @@ struct ReadResponse {
     tag = "health"
 )]
 async fn read(State(state): State<Arc<AppState>>) -> (StatusCode, Json<ReadResponse>) {
-    let health = stats::health(&state.db).await;
+    // A failed read is not ready.
+    let networks = state.db.read(network::db::find_all).await;
+    let health = ReadResponse::from(networks.unwrap_or_default());
     let status = if health.ready {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(health.into()))
-}
-
-impl From<stats::Health> for ReadResponse {
-    fn from(health: stats::Health) -> Self {
-        let networks = health.networks.into_iter();
-        Self {
-            ready: health.ready,
-            networks: networks
-                .map(|(network, indexing)| NetworkHealth {
-                    network: network.into(),
-                    indexing,
-                })
-                .collect(),
-        }
-    }
+    (status, Json(health))
 }

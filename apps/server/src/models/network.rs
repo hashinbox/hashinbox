@@ -1,13 +1,13 @@
 //! The chain and network something belongs to, as one nested object; and
-//! each network as stored: its `network` row with its assets, endpoints and
-//! index.
+//! each network as stored, one `network_state` view row each: its `network`
+//! row with its assets, routes, index and nodes.
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{Endpoint, NetworkAsset, NetworkIndex, Route, endpoint};
+use super::{Endpoints, NetworkAsset, Route};
 
 /// The chain and network a wallet, address, or transaction belongs to. It
 /// always ships as one nested object, never as two sibling fields.
@@ -29,12 +29,42 @@ impl From<base::Network> for NetworkName {
     }
 }
 
+/// One network's indexing: what its indexer last wrote (its `network_index`
+/// row) and why its index job last failed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
+#[schema(as = NetworkIndexing)]
+pub(crate) struct Index {
+    /// The node's newest block at the indexer's last read; always present,
+    /// null: no tip known yet (the job failed before its first).
+    #[schema(required)]
+    pub(crate) tip: Option<u64>,
+    /// `tip - confirmations` (saturating), written with it; always present,
+    /// null with it.
+    #[schema(required)]
+    pub(crate) confirmed: Option<u64>,
+    /// The last kept block; always present, null: none yet.
+    #[schema(required)]
+    pub(crate) indexed: Option<u64>,
+    /// Unix ms of the indexer's last read whose tip moved; always present.
+    #[schema(required)]
+    pub(crate) checked_at: Option<u64>,
+    /// Blocks kept.
+    pub(crate) blocks: u64,
+    /// Kept blocks reorged because the chain took them back.
+    pub(crate) reorgs: u64,
+    /// Failed steps.
+    pub(crate) failures: u64,
+    /// Why its index job's last run failed or idles (the job's `reason`),
+    /// cleared by the next run that does not; always present, null: none.
+    #[schema(required)]
+    pub(crate) job_reason: Option<String>,
+}
+
 /// One network as stored: its `network` row, its `network_asset` rows, its
-/// `network_endpoint` nodes and their routes, and its `network_index` row (`None`: no
-/// tip known yet); and the node's tip asked now (`tip_live`, the stored `tip`
-/// until a caller that asked sets it; `tip_error`, why asking failed).
+/// routes, its index and its `network_endpoint` nodes with their counts and
+/// state.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = ConfiguredNetwork)]
+#[schema(as = StoredNetwork)]
 pub(crate) struct Network {
     /// Chain name.
     pub(crate) chain: String,
@@ -70,26 +100,17 @@ pub(crate) struct Network {
     pub(crate) settings: Value,
     /// Its native currency and tokens.
     pub(crate) assets: Vec<NetworkAsset>,
-    /// Its nodes as stored, in failover order.
-    pub(crate) endpoints: Vec<Endpoint>,
     /// Its routed methods, each over its own nodes; every other method goes
     /// to all of them.
     pub(crate) routes: Vec<Route>,
-    /// Its indexing; always present, null: no tip known yet (or never
-    /// indexed: not `enabled`).
+    /// Its indexing; always present, null: no tip known and no index job
+    /// reason (or never indexed: not `enabled`).
     #[schema(required)]
-    pub(crate) index: Option<NetworkIndex>,
-    /// Why its index job's last run failed (the job's `reason`), cleared by
-    /// the next run that does not; always present, null: none.
-    #[schema(required)]
-    pub(crate) index_job_reason: Option<String>,
-    /// The node's newest block, asked now; the stored `tip` when that
-    /// failed. Always present.
-    #[schema(required)]
-    pub(crate) tip_live: Option<u64>,
-    /// Why asking the node failed; always present, null when it answered.
-    #[schema(required)]
-    pub(crate) tip_error: Option<String>,
+    pub(crate) index: Option<Index>,
+    /// Its nodes as stored, in failover order; none enabled: no call can go
+    /// out, its index job idles and its payments wait.
+    #[schema(value_type = Vec<super::Endpoint>)]
+    pub(crate) endpoints: Endpoints,
 }
 
 impl Network {
@@ -117,21 +138,21 @@ impl From<&Network> for base::NetworkConfig {
     }
 }
 
-/// The `network` table's statements.
+/// The `network_state` view's statements: the only reads of a network.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
-    use anyhow::Context as _;
     use diesel::{prelude::*, sqlite::Sqlite};
 
-    use crate::models::{endpoint_route, network_asset, network_index, schema::network, uint};
+    use crate::models::{
+        Endpoint, EndpointFailure, EndpointStats, Json, schema::network_state, uint,
+    };
 
-    /// One `network` row as the file holds it.
+    /// One `network_state` row as the file holds it.
     #[derive(Queryable, Selectable)]
-    #[diesel(table_name = network, check_for_backend(Sqlite))]
+    #[diesel(table_name = network_state, check_for_backend(Sqlite))]
     struct Row {
         chain: String,
-        #[diesel(column_name = name)]
         network: String,
         chain_id: Option<String>,
         testnet: bool,
@@ -141,16 +162,41 @@ pub(crate) mod db {
         max_depth: Option<i64>,
         explorer_address: Option<String>,
         explorer_transaction: Option<String>,
-        settings: String,
+        settings: Json<Value>,
+        assets: Json<Vec<NetworkAsset>>,
+        routes: Json<Vec<Route>>,
+        index: Option<Json<Index>>,
+        endpoints: Json<Vec<Element>>,
+    }
+
+    /// One element of the view's `endpoints`: a node but its network.
+    #[derive(Debug, Deserialize)]
+    struct Element {
+        id: i64,
+        url: rpc::Endpoint,
+        position: i64,
+        calls: i64,
+        failed_calls: i64,
+        updated_at: i64,
+        disabled: Option<EndpointFailure>,
     }
 
     impl TryFrom<Row> for Network {
         type Error = anyhow::Error;
 
-        /// The row alone: no assets, nodes or index yet.
         fn try_from(row: Row) -> anyhow::Result<Self> {
-            let settings = serde_json::from_str(&row.settings)
-                .with_context(|| format!("{}/{}: settings are not JSON", row.chain, row.network))?;
+            let endpoints = row.endpoints.0.into_iter().map(|node| Endpoint {
+                id: node.id,
+                url: node.url,
+                position: node.position,
+                stats: EndpointStats {
+                    endpoint_id: node.id,
+                    calls: node.calls,
+                    failed_calls: node.failed_calls,
+                    updated_at: node.updated_at,
+                },
+                disabled: node.disabled,
+            });
             Ok(Self {
                 chain: row.chain,
                 network: row.network,
@@ -162,60 +208,44 @@ pub(crate) mod db {
                 max_depth: row.max_depth.map(uint).transpose()?,
                 explorer_address: row.explorer_address,
                 explorer_transaction: row.explorer_transaction,
-                settings,
-                assets: Vec::new(),
-                endpoints: Vec::new(),
-                routes: Vec::new(),
-                index: None,
-                index_job_reason: None,
-                tip_live: None,
-                tip_error: None,
+                settings: row.settings.0,
+                assets: row.assets.0,
+                routes: row.routes.0,
+                index: row.index.map(|index| index.0),
+                endpoints: endpoints.collect(),
             })
         }
     }
 
-    /// The `enabled` networks: those the server indexes.
-    pub(crate) fn find_enabled(
-        connection: &mut SqliteConnection,
-    ) -> anyhow::Result<Vec<base::Network>> {
-        let rows: Vec<(String, String)> = network::table
-            .filter(network::enabled.eq(true))
-            .select((network::chain, network::name))
-            .order((network::chain, network::name))
-            .load(connection)?;
-        Ok(rows
-            .into_iter()
-            .map(|(chain, name)| base::Network::new(base::Chain::new(&chain), &name))
-            .collect())
-    }
-
-    /// Every network with its assets, nodes and index, in chain, then
-    /// name, order.
+    /// Every network, in chain, then name, order.
     ///
     /// # Errors
     ///
     /// The read, or a row that does not check; the refusal never quotes the
     /// stored endpoints.
     pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<Vec<Network>> {
-        let rows = network::table
+        let rows = network_state::table
             .select(Row::as_select())
-            .order((network::chain, network::name))
+            .order((network_state::chain, network_state::network))
             .load(connection)?;
-        let mut assets = network_asset::db::find_all(connection)?;
-        let endpoints = endpoint::db::find_all(connection)?;
-        let routes = endpoint_route::db::find_all(connection)?;
-        let mut indexes = network_index::db::find_all(connection)?;
-        let mut networks = Vec::new();
-        for row in rows {
-            let mut network = Network::try_from(row)?;
-            let key = network.key();
-            network.assets = assets.remove(&key).unwrap_or_default();
-            network.endpoints = endpoints.nodes(&key);
-            network.routes = routes.routes(&key);
-            network.index = indexes.remove(&key);
-            network.tip_live = network.index.as_ref().map(|index| index.tip);
-            networks.push(network);
-        }
-        Ok(networks)
+        rows.into_iter().map(TryInto::try_into).collect()
+    }
+
+    /// `network`; `None`: not stored.
+    ///
+    /// # Errors
+    ///
+    /// The read, or a row that does not check.
+    pub(crate) fn find(
+        connection: &mut SqliteConnection,
+        network: &base::Network,
+    ) -> anyhow::Result<Option<Network>> {
+        let row = network_state::table
+            .filter(network_state::chain.eq(network.chain.as_str()))
+            .filter(network_state::network.eq(&network.name))
+            .select(Row::as_select())
+            .first(connection)
+            .optional()?;
+        row.map(TryInto::try_into).transpose()
     }
 }

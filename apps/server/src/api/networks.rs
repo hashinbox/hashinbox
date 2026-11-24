@@ -15,12 +15,50 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(list))
 }
 
+/// The node's tip, asked now.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+struct LiveTip {
+    /// The node's newest block; the stored `index.tip` when asking failed.
+    /// Always present.
+    #[schema(required)]
+    live: Option<u64>,
+    /// Why asking the node failed; always present, null when it answered.
+    #[schema(required)]
+    error: Option<String>,
+}
+
+/// One stored network, and its node's tip asked now.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = ConfiguredNetwork)]
+struct NetworkResponse {
+    #[serde(flatten)]
+    network: Network,
+    tip: LiveTip,
+}
+
+impl From<(Network, Result<u64, String>)> for NetworkResponse {
+    fn from((network, asked): (Network, Result<u64, String>)) -> Self {
+        let stored = network.index.as_ref().and_then(|index| index.tip);
+        let tip = match asked {
+            Ok(tip) => LiveTip {
+                live: Some(tip),
+                error: None,
+            },
+            Err(error) => LiveTip {
+                live: stored,
+                error: Some(error),
+            },
+        };
+        Self { network, tip }
+    }
+}
+
 /// Every stored network.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = NetworkList)]
 struct ListResponse {
     /// Networks in chain, then name, order.
-    networks: Vec<Network>,
+    networks: Vec<NetworkResponse>,
 }
 
 #[utoipa::path(
@@ -28,12 +66,12 @@ struct ListResponse {
     path = "/v1/networks",
     operation_id = "list_networks",
     summary = "List every network, its assets, its RPC nodes, its indexing and its live tip",
-    description = "Every stored network: its row, its assets, its nodes (each URL with what \
-        the running server knows of it: last tip, failure streak, calls) and \
-        its `index` row (null: not indexed), and why its index job last failed \
-        (`index_job_reason`). `tip_live` asks every running network's node at \
-        once, each for at most 2 s; one that fails keeps the stored `tip` and says why in \
-        `tip_error`.",
+    description = "Every stored network: its row, its assets, its routes, its nodes (each \
+        URL with its calls and, while disabled, the record that disabled it: `disabled`) \
+        and its `index` (its `network_index` row and why its index job last failed, \
+        `job_reason`; null: neither). `tip.live` asks every running network's node at \
+        once, each for at most 2 s; one that fails keeps the stored `index.tip` and says \
+        why in `tip.error`.",
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Every network", body = ListResponse),
@@ -44,6 +82,7 @@ struct ListResponse {
 )]
 async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
     let networks = networks::overview(&state.container, &state.db).await?;
+    let networks = networks.into_iter().map(Into::into).collect();
     Ok(Json(ListResponse { networks }))
 }
 

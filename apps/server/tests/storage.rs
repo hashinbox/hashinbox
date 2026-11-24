@@ -548,6 +548,27 @@ async fn the_views_read_through_their_tables() {
     assert_eq!(transactions[0].legs.len(), 1);
 }
 
+/// A network with no `network_index` row and no node: no index, `[]`.
+#[tokio::test]
+async fn network_state_of_a_network_with_no_index_and_no_node() {
+    use diesel::RunQueryDsl as _;
+    let (_, db, directory) = seeded().await;
+    diesel::sql_query(
+        "INSERT INTO network (chain, network, testnet, enabled, block_time_ms, confirmations)
+         VALUES ('bare', 'net', 1, 1, 1000, 1)",
+    )
+    .execute(&mut raw(&directory))
+    .unwrap();
+    let bare = Network::new(Chain::new("bare"), "net");
+    let found = db.read(move |connection| crate::models::network::db::find(connection, &bare));
+    let network = found.await.unwrap().expect("its row");
+    assert!(network.enabled);
+    assert!(network.index.is_none());
+    assert!(network.assets.is_empty() && network.routes.is_empty());
+    assert!(network.endpoints.is_empty());
+    assert_eq!(network.endpoints.enabled(), 0);
+}
+
 /// The `transaction` rows of `txid`: their block ids, and the block ids of
 /// their legs.
 pub(super) fn rows(
@@ -2535,10 +2556,7 @@ async fn a_balance_read_not_answered_or_failed_leaves_the_index_for_the_next_ste
     );
     assert_eq!(
         opened(&db, &["alice", "bob"]).await,
-        [
-            (Indexing, vec![leg(15, 6, "5", "5")]),
-            (Indexing, vec![])
-        ]
+        [(Indexing, vec![leg(15, 6, "5", "5")]), (Indexing, vec![])]
     );
 }
 

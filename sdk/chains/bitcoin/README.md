@@ -23,7 +23,7 @@ async fn bitcoin(storage: Storage) -> anyhow::Result<()> {
     let mut config = Config::new(Network::Regtest);
     config.address_type = AddressType::Taproot;
     let node: Arc<dyn rpc::Client> =
-        Arc::new(rpc::node(&Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443"), Default::default())?);
+        Arc::new(rpc::node(&Endpoint::new("http://bitcoin:bitcoin@127.0.0.1:18443"))?);
     let rpc = Client::new(node.clone(), config.network);
     let factory = Factory::from(config);
 

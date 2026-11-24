@@ -41,33 +41,35 @@ pub struct Snapshot {
     pub last_failure: Option<String>,
 }
 
-/// An execution's outcome, as [`Counted`] and [`crate::Logged`] read it.
-pub(crate) trait Outcome {
-    /// What failed; `None` on success. A batch fails by its first error object.
-    fn failure(&self) -> Option<Error>;
+/// What failed in a call's outcome, as [`Counted`], [`crate::Logged`] and
+/// other decorators read it.
+pub trait Outcome {
+    /// The call's own error, or each error object of a batch's answers, in
+    /// order; empty on success.
+    fn errors(&self) -> Vec<Error>;
 }
 
 impl Outcome for Result<RawJson, Error> {
-    fn failure(&self) -> Option<Error> {
-        self.as_ref().err().cloned()
+    fn errors(&self) -> Vec<Error> {
+        self.as_ref().err().cloned().into_iter().collect()
     }
 }
 
 impl Outcome for Result<(), Error> {
-    fn failure(&self) -> Option<Error> {
-        self.as_ref().err().cloned()
+    fn errors(&self) -> Vec<Error> {
+        self.as_ref().err().cloned().into_iter().collect()
     }
 }
 
 impl Outcome for Result<Vec<Answer>, Error> {
-    fn failure(&self) -> Option<Error> {
+    fn errors(&self) -> Vec<Error> {
         match self {
-            Err(error) => Some(error.clone()),
+            Err(error) => vec![error.clone()],
             Ok(answers) => answers
                 .iter()
-                .find_map(|answer| answer.as_ref().err())
-                .cloned()
-                .map(Error::Remote),
+                .filter_map(|answer| answer.as_ref().err())
+                .map(|failure| Error::Remote(failure.clone()))
+                .collect(),
         }
     }
 }
@@ -133,7 +135,7 @@ impl<C> Counted<C> {
 
     async fn count<T: Outcome>(&self, sent: impl Future<Output = T>) -> T {
         let outcome = sent.await;
-        self.statistics.record(outcome.failure());
+        self.statistics.record(outcome.errors().into_iter().next());
         outcome
     }
 }
@@ -214,7 +216,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_invalid_parameter_is_not_counted() {
-        let node = crate::node(&Endpoint::new("http://127.0.0.1:9/"), Default::default()).unwrap();
+        let node = crate::node(&Endpoint::new("http://127.0.0.1:9/")).unwrap();
         let outcome = node.request(Request::new("m", json!(1))).await;
         assert_eq!(outcome.unwrap_err().kind(), Some(ErrorKind::InvalidRequest));
         assert_eq!(node.statistics().snapshot(), Snapshot::default());

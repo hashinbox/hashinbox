@@ -208,7 +208,7 @@ impl Endpoint {
     ///
     /// As [`crate::node`].
     pub fn validate(&self) -> Result<(), Error> {
-        crate::node(self, logging::Logger::default()).map(drop)
+        crate::node(self).map(drop)
     }
 }
 
@@ -238,7 +238,7 @@ mod tests {
         );
 
         let endpoint = Endpoint::new("http://node.invalid/");
-        let node = crate::Retry::new(crate::node(&endpoint, Default::default()).unwrap());
+        let node = crate::Retry::new(crate::node(&endpoint).unwrap());
         assert_eq!(crate::Client::endpoint(&node), Some(&endpoint));
     }
 

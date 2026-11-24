@@ -310,6 +310,14 @@ impl WalletIndexer {
             return Ok(());
         };
         self.store.settle(index, &holding).await?;
+        let (address, asset) = (&index.address.value, &index.asset.id);
+        tracing::info!(
+            target: "index.settle",
+            index = %format!("{address}/{asset}"),
+            position = holding.position,
+            amount = %holding.amount,
+            "Wallet index settled"
+        );
         Ok(())
     }
 }

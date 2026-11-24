@@ -44,8 +44,8 @@ async fn indexed(app: &App, name: &str, tip: u64) {
 async fn failing(app: &App, name: &str, why: &str) {
     until(&format!("{name} failing with {why}"), || async {
         let network = app.api.network_named(name).await;
-        let reason = network["index_job_reason"].as_str().unwrap_or_default();
-        if reason.contains(why) && network["tip_error"].is_string() {
+        let reason = network["index"]["job_reason"].as_str().unwrap_or_default();
+        if reason.contains(why) && network["tip"]["error"].is_string() {
             return Ok(());
         }
         Err(network.to_string())

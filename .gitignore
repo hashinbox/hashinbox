@@ -23,6 +23,7 @@
 # Logs/runtime files
 *.log
 logs/
+!apps/server/ui/src/pages/logs/
 *.db
 *.sqlite
 *.sqlite3

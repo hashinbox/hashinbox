@@ -197,9 +197,64 @@ diesel::table! {
 }
 
 diesel::table! {
+    network_endpoint_stats (endpoint_id) {
+        endpoint_id -> BigInt,
+        calls -> BigInt,
+        failed_calls -> BigInt,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    /// Read-only view `network_state`: a `network` row, and its assets,
+    /// routes, index and nodes as JSON.
+    network_state (chain, network) {
+        chain -> Text,
+        network -> Text,
+        chain_id -> Nullable<Text>,
+        testnet -> Bool,
+        enabled -> Bool,
+        block_time_ms -> BigInt,
+        confirmations -> BigInt,
+        max_depth -> Nullable<BigInt>,
+        explorer_address -> Nullable<Text>,
+        explorer_transaction -> Nullable<Text>,
+        settings -> Text,
+        assets -> Text,
+        routes -> Text,
+        index -> Nullable<Text>,
+        endpoints -> Text,
+    }
+}
+
+diesel::table! {
     network_endpoint_route (endpoint_id, method) {
         endpoint_id -> BigInt,
         method -> Text,
+    }
+}
+
+diesel::table! {
+    network_endpoint_failure (id) {
+        id -> BigInt,
+        endpoint_id -> BigInt,
+        at -> BigInt,
+        kind -> Text,
+        message -> Text,
+    }
+}
+
+diesel::table! {
+    log (id) {
+        id -> BigInt,
+        at -> BigInt,
+        level -> Text,
+        target -> Text,
+        message -> Text,
+        fields -> Text,
+        chain -> Nullable<Text>,
+        network -> Nullable<Text>,
+        job_id -> Nullable<BigInt>,
     }
 }
 
@@ -253,6 +308,7 @@ diesel::joinable!(leg -> transactions (transaction));
 diesel::joinable!(leg -> block (block));
 diesel::joinable!(wallet_index -> wallet (wallet_id));
 diesel::joinable!(network_endpoint_route -> network_endpoint (endpoint_id));
+diesel::joinable!(network_endpoint_failure -> network_endpoint (endpoint_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     block,
@@ -265,5 +321,8 @@ diesel::allow_tables_to_appear_in_same_query!(
     triggers,
     trigger_run,
     network_endpoint,
-    network_endpoint_route
+    network_endpoint_route,
+    network_endpoint_failure,
+    network_endpoint_stats,
+    log
 );

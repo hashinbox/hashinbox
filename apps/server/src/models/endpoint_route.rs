@@ -2,13 +2,9 @@
 //! spread round robin over some of the network's endpoints; every other
 //! method goes to all of them, highest tip first (`usecase::Transport`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
-use super::{
-    endpoint::Endpoint,
-    schema::{network_endpoint, network_endpoint_route},
-};
-use base::{Chain, Network};
+use super::{Endpoints, schema::network_endpoint_route};
 use diesel::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -34,7 +30,7 @@ impl Routes {
     /// # Errors
     ///
     /// A message naming the first route that does not check.
-    pub(crate) fn new(routes: Vec<Route>, endpoints: &[Endpoint]) -> Result<Self, String> {
+    pub(crate) fn new(routes: Vec<Route>, endpoints: &Endpoints) -> Result<Self, String> {
         let mut methods = BTreeSet::new();
         for route in &routes {
             let method = &route.method;
@@ -62,37 +58,24 @@ impl Routes {
     }
 }
 
-/// Every network's stored routes.
-pub(crate) struct NetworkRoutes(BTreeMap<Network, Vec<Route>>);
-
-impl NetworkRoutes {
-    /// `network`'s routes, by method; none when it has none.
-    pub(crate) fn routes(&self, network: &Network) -> Vec<Route> {
-        self.0.get(network).cloned().unwrap_or_default()
-    }
-}
-
 /// The `network_endpoint_route` table's statements.
 pub(crate) mod db {
     #[allow(clippy::wildcard_imports, reason = "the model file's own items")]
     use super::*;
 
-    /// Makes `routes` the stored ones of `network`.
+    /// Makes `routes` the stored ones of the network whose nodes are
+    /// `endpoint_ids`.
     ///
     /// # Errors
     ///
     /// When a write fails.
     pub(crate) fn replace(
         connection: &mut SqliteConnection,
-        network: &Network,
+        endpoint_ids: &[i64],
         routes: &Routes,
     ) -> anyhow::Result<()> {
-        let ids = network_endpoint::table
-            .filter(network_endpoint::chain.eq(network.chain.as_str()))
-            .filter(network_endpoint::network.eq(&network.name))
-            .select(network_endpoint::id);
         diesel::delete(network_endpoint_route::table)
-            .filter(network_endpoint_route::endpoint_id.eq_any(ids))
+            .filter(network_endpoint_route::endpoint_id.eq_any(endpoint_ids))
             .execute(connection)?;
         for route in &routes.0 {
             for id in &route.endpoint_ids {
@@ -105,44 +88,5 @@ pub(crate) mod db {
             }
         }
         Ok(())
-    }
-
-    /// The stored routes of every network, by method, each one's endpoints
-    /// in failover order.
-    ///
-    /// # Errors
-    ///
-    /// The read.
-    pub(crate) fn find_all(connection: &mut SqliteConnection) -> anyhow::Result<NetworkRoutes> {
-        let rows: Vec<(String, String, String, i64)> = network_endpoint_route::table
-            .inner_join(network_endpoint::table)
-            .select((
-                network_endpoint::chain,
-                network_endpoint::network,
-                network_endpoint_route::method,
-                network_endpoint::id,
-            ))
-            .order((
-                network_endpoint::chain,
-                network_endpoint::network,
-                network_endpoint_route::method,
-                network_endpoint::position,
-                network_endpoint::id,
-            ))
-            .load(connection)?;
-        let mut networks: BTreeMap<Network, Vec<Route>> = BTreeMap::new();
-        for (chain, name, method, id) in rows {
-            let routes = networks
-                .entry(Network::new(Chain::new(&chain), name))
-                .or_default();
-            match routes.last_mut() {
-                Some(route) if route.method == method => route.endpoint_ids.push(id),
-                _ => routes.push(Route {
-                    method,
-                    endpoint_ids: vec![id],
-                }),
-            }
-        }
-        Ok(NetworkRoutes(networks))
     }
 }

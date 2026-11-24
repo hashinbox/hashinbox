@@ -34,6 +34,26 @@ pub enum Ack {
     Again(u64, Option<String>),
 }
 
+impl Ack {
+    /// Its name: `done`, `idle`, `fail`, `retry` or `again`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Idle => "idle",
+            Self::Fail(_) => "fail",
+            Self::Retry(_) => "retry",
+            Self::Again(..) => "again",
+        }
+    }
+
+    /// Whether the run failed: for good, or for a retry.
+    #[must_use]
+    pub const fn failed(&self) -> bool {
+        matches!(self, Self::Fail(_) | Self::Retry(_))
+    }
+}
+
 /// How retries go: at most `attempts` executions, a retry after attempt `n`
 /// waiting `backoff × n`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

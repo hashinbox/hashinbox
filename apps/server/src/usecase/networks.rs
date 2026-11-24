@@ -9,15 +9,19 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use base::{Container, InfoClient, NetworkConfig, ServiceFactory};
-use tasks::Worker as _;
+use tasks::Worker;
 use tokio::sync::mpsc;
 
-use super::{Error, Transport, workers::index};
+use super::{
+    Error, Served as _, Transport, now,
+    tasks::Queue,
+    workers::index::{Index, Target},
+};
 use crate::{
     db::{Db, Page},
     models::{
-        Block, Endpoint, Network, Route, Routes, RpcEndpoints, block, endpoint, endpoint_route,
-        network, task,
+        Block, EndpointFailure, EndpointFailures, Endpoints, Network, Route, Routes, RpcEndpoints,
+        block, endpoint, endpoint_failure, endpoint_route, network,
         transaction::{self, Transaction},
     },
 };
@@ -27,29 +31,37 @@ const LIVE: Duration = Duration::from_secs(2);
 
 /// Every stored network: its config, nodes and routes, as the database holds
 /// them.
-pub(crate) struct Networks(Vec<Network>);
+pub(crate) struct Networks {
+    networks: Vec<Network>,
+    /// Where they were read, and where the transports [`Self::register`]
+    /// builds turn off and count their stored nodes.
+    db: Db,
+}
 
 impl Networks {
-    /// The networks with their assets, nodes, routes and index: one read.
+    /// The networks of `db` with their assets, nodes, routes and index: one
+    /// read.
     ///
     /// # Errors
     ///
     /// The read.
-    pub(crate) async fn read(db: &Db) -> anyhow::Result<Self> {
-        Ok(Self(db.read(network::db::find_all).await?))
+    pub(crate) async fn new(db: Db) -> anyhow::Result<Self> {
+        let networks = db.read(network::db::find_all).await?;
+        Ok(Self { networks, db })
     }
 
     /// Every indexed network of `F::CHAIN`: a transport read by `I`
-    /// (`Transport::new::<I>`), loaded with its nodes and routes, registered
-    /// with `F`. Main only, once per chain.
+    /// (`Transport::new::<I>`), its stored nodes turned off and counted in
+    /// the database read, loaded with its nodes and routes, registered with
+    /// `F`. Main only, once per chain.
     pub(crate) fn register<I: InfoClient + 'static, F: ServiceFactory>(
         &self,
         container: &Container<Transport>,
     ) -> &Self {
-        let indexed = self.0.iter().filter(|network| network.enabled);
+        let indexed = self.networks.iter().filter(|network| network.enabled);
         for network in indexed.filter(|network| network.key().chain == F::CHAIN) {
             let config = NetworkConfig::from(network);
-            let transport = Transport::new::<I>(&config);
+            let transport = Transport::new::<I>(&config, self.db.clone());
             // Every stored URL was checked when stored; one that no longer
             // builds is left out, and the API shows it without state.
             let _ = transport.load(&network.endpoints, &network.routes);
@@ -70,18 +82,17 @@ impl Networks {
         container: &Container<Transport>,
     ) -> anyhow::Result<()> {
         let transport = container.transport(network)?;
-        let Some(stored) = self.0.iter().find(|stored| stored.key() == *network) else {
-            return transport.load(&[], &[]);
+        let Some(stored) = self.networks.iter().find(|stored| stored.key() == *network) else {
+            return transport.load(&Endpoints::default(), &[]);
         };
         transport.load(&stored.endpoints, &stored.routes)
     }
 }
 
-/// A network's nodes as stored, in failover order, each with what the
-/// running server knows of it.
+/// A network's nodes as stored, in failover order, each with its state.
 pub(crate) struct Nodes {
     pub(crate) network: base::Network,
-    pub(crate) endpoints: Vec<Endpoint>,
+    pub(crate) endpoints: Endpoints,
 }
 
 /// One step of a [`search_tip`].
@@ -95,9 +106,8 @@ pub(crate) enum Search {
     Failed(String),
 }
 
-/// Every stored network with why its index job last failed, its nodes'
-/// states, and its node's tip asked now: every network at once, each for at
-/// most [`LIVE`]; one that fails keeps the stored tip and says why.
+/// Every stored network, each with its node's tip asked now, or why not:
+/// every network at once, each for at most [`LIVE`].
 ///
 /// # Errors
 ///
@@ -105,38 +115,13 @@ pub(crate) enum Search {
 pub(crate) async fn overview(
     container: &Container<Transport>,
     db: &Db,
-) -> Result<Vec<Network>, Error> {
-    let (mut networks, mut reasons) = db
-        .read(|connection| {
-            let networks = network::db::find_all(connection)?;
-            let reasons = task::db::find_last_reasons(connection, index::KIND)?;
-            Ok((networks, reasons))
-        })
-        .await?;
-    for network in &mut networks {
-        let target = index::Target {
-            chain: network.chain.clone(),
-            network: network.network.clone(),
-        };
-        let topic = index::Index::topic(&target).map(|topic| topic.to_string());
-        network.index_job_reason = topic.and_then(|topic| reasons.remove(&topic));
-    }
-    let live = networks.into_iter().map(|network| live(container, network));
+) -> Result<Vec<(Network, Result<u64, String>)>, Error> {
+    let networks = db.read(network::db::find_all).await?;
+    let live = networks.into_iter().map(|network| async move {
+        let tip = tip(container, &network.key()).await;
+        (network, tip)
+    });
     Ok(futures_util::future::join_all(live).await)
-}
-
-/// `network` with its nodes' states, and its node's tip asked now or why
-/// not.
-async fn live(container: &Container<Transport>, mut network: Network) -> Network {
-    let key = network.key();
-    if let Ok(transport) = container.transport(&key) {
-        transport.clients().states(&mut network.endpoints).await;
-    }
-    match tip(container, &key).await {
-        Ok(tip) => network.tip_live = Some(tip),
-        Err(error) => network.tip_error = Some(error),
-    }
-    network
 }
 
 /// The newest block of `network`'s node, asked now for at most [`LIVE`];
@@ -155,7 +140,7 @@ async fn tip(container: &Container<Transport>, network: &base::Network) -> Resul
         .map_err(|error| format!("{error:#}"))
 }
 
-/// `network`'s stored nodes, each with its node's state.
+/// `network`'s stored nodes, each with its state.
 ///
 /// # Errors
 ///
@@ -166,13 +151,25 @@ pub(crate) async fn endpoints(
     network: &base::Network,
 ) -> Result<Nodes, Error> {
     container.service(network)?;
-    let mut endpoints = db.read(endpoint::db::find_all).await?.nodes(network);
-    let transport = container.transport(network)?;
-    transport.clients().states(&mut endpoints).await;
     Ok(Nodes {
         network: network.clone(),
-        endpoints,
+        endpoints: stored(db, network).await?,
     })
+}
+
+/// `network` as stored; none: not stored.
+async fn stored_network(db: &Db, network: &base::Network) -> Result<Option<Network>, Error> {
+    let network = network.clone();
+    Ok(db
+        .read(move |connection| network::db::find(connection, &network))
+        .await?)
+}
+
+/// `network`'s stored nodes, in failover order; none for a network not
+/// stored.
+async fn stored(db: &Db, network: &base::Network) -> Result<Endpoints, Error> {
+    let network = stored_network(db, network).await?;
+    Ok(network.map(|network| network.endpoints).unwrap_or_default())
 }
 
 /// Appends `added` after `network`'s nodes: each asked first, then the list
@@ -185,6 +182,7 @@ pub(crate) async fn endpoints(
 pub(crate) async fn add_endpoints(
     container: &Container<Transport>,
     db: &Db,
+    queue: &Queue,
     network: &base::Network,
     added: Vec<rpc::Endpoint>,
 ) -> Result<Nodes, Error> {
@@ -192,12 +190,12 @@ pub(crate) async fn add_endpoints(
     if added.is_empty() {
         return Err(Error::invalid("add 1 to 16 nodes at once"));
     }
-    let mut nodes = endpoint::urls(&db.read(endpoint::db::find_all).await?.nodes(network));
+    let mut nodes = stored(db, network).await?.urls();
     nodes.extend(added.clone());
     let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid)?;
     verify(container, network, &added).await?;
     store(db, network, nodes).await?;
-    connected(container, db, network).await
+    connected(container, db, queue, network).await
 }
 
 /// Makes `nodes` `network`'s list: each asked first, then stored and in use.
@@ -211,6 +209,7 @@ pub(crate) async fn add_endpoints(
 pub(crate) async fn replace_endpoints(
     container: &Container<Transport>,
     db: &Db,
+    queue: &Queue,
     network: &base::Network,
     nodes: Vec<rpc::Endpoint>,
 ) -> Result<Nodes, Error> {
@@ -218,7 +217,7 @@ pub(crate) async fn replace_endpoints(
     let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid)?;
     verify(container, network, nodes.nodes()).await?;
     store(db, network, nodes).await?;
-    connected(container, db, network).await
+    connected(container, db, queue, network).await
 }
 
 /// Appends each of `added` after its network's nodes: each asked first,
@@ -231,15 +230,18 @@ pub(crate) async fn replace_endpoints(
 pub(crate) async fn add_endpoints_each(
     container: &Container<Transport>,
     db: &Db,
+    queue: &Queue,
     added: Vec<(base::Network, rpc::Endpoint)>,
 ) -> Result<Vec<Nodes>, Error> {
-    let stored = db.read(endpoint::db::find_all).await?;
     let mut lists: BTreeMap<base::Network, Vec<rpc::Endpoint>> = BTreeMap::new();
     for (network, endpoint) in &added {
         container.service(network)?;
+        if !lists.contains_key(network) {
+            lists.insert(network.clone(), stored(db, network).await?.urls());
+        }
         lists
             .entry(network.clone())
-            .or_insert_with(|| endpoint::urls(&stored.nodes(network)))
+            .or_default()
             .push(endpoint.clone());
     }
     let lists = lists
@@ -260,7 +262,7 @@ pub(crate) async fn add_endpoints_each(
     .await?;
     let mut networks = Vec::new();
     for (network, _) in lists {
-        networks.push(connected(container, db, &network).await?);
+        networks.push(connected(container, db, queue, &network).await?);
     }
     Ok(networks)
 }
@@ -275,19 +277,79 @@ pub(crate) async fn add_endpoints_each(
 pub(crate) async fn remove_endpoint(
     container: &Container<Transport>,
     db: &Db,
+    queue: &Queue,
     network: &base::Network,
     id: i64,
 ) -> Result<Nodes, Error> {
     container.service(network)?;
-    let mut nodes = db.read(endpoint::db::find_all).await?.nodes(network);
-    let Some(position) = nodes.iter().position(|node| node.id == id) else {
+    let nodes = stored(db, network).await?;
+    if !nodes.iter().any(|node| node.id == id) {
         return Err(Error::not_found("no such node"));
-    };
-    nodes.remove(position);
-    let nodes = RpcEndpoints::new(endpoint::urls(&nodes))
+    }
+    let kept = nodes.iter().filter(|node| node.id != id);
+    let nodes = RpcEndpoints::new(kept.map(|node| node.url.clone()).collect())
         .map_err(|_| Error::invalid("a network keeps at least one node"))?;
     store(db, network, nodes).await?;
-    connected(container, db, network).await
+    connected(container, db, queue, network).await
+}
+
+/// Enables (`enabled`) or disables node `id` of `network` by hand
+/// (`reason`: why; none: `by hand`): an `enabled` or a `manual` record
+/// stored, logged as `endpoint.enabled` or `endpoint.disabled`, then its
+/// transport reloaded: a disabled node gets no call and its routes skip it.
+///
+/// # Errors
+///
+/// Not found for an unconfigured network or no such node; the store.
+pub(crate) async fn set_endpoint_state(
+    container: &Container<Transport>,
+    db: &Db,
+    queue: &Queue,
+    network: &base::Network,
+    id: i64,
+    enabled: bool,
+    reason: Option<String>,
+) -> Result<Nodes, Error> {
+    container.service(network)?;
+    if !stored(db, network).await?.iter().any(|node| node.id == id) {
+        return Err(Error::not_found("no such node"));
+    }
+    // Stored before connected: a restart never forgets a change in use.
+    let reason = reason.unwrap_or_else(|| "by hand".to_owned());
+    let record = if enabled {
+        EndpointFailure::enabled(id, now(), reason.clone())
+    } else {
+        EndpointFailure::manual(id, now(), reason.clone())
+    };
+    db.write(move |connection| Ok(endpoint_failure::db::insert(connection, &record)?))
+        .await?;
+    if enabled {
+        tracing::info!(target: "endpoint.enabled", node = id, reason, "RPC node enabled");
+    } else {
+        tracing::warn!(target: "endpoint.disabled", node = id, kind = "manual", reason, "RPC node disabled");
+    }
+    connected(container, db, queue, network).await
+}
+
+/// A page of node `id` of `network`'s records (what disabled or enabled
+/// it), newest first.
+///
+/// # Errors
+///
+/// Not found for an unconfigured network or no such node; the read.
+pub(crate) async fn endpoint_failures_page(
+    container: &Container<Transport>,
+    db: &Db,
+    network: &base::Network,
+    id: i64,
+    page: Page<i64>,
+) -> Result<EndpointFailures, Error> {
+    container.service(network)?;
+    if !stored(db, network).await?.iter().any(|node| node.id == id) {
+        return Err(Error::not_found("no such node"));
+    }
+    let page = move |connection: &mut _| Ok(endpoint_failure::db::find_page(connection, id, page)?);
+    Ok(db.read(page).await?)
 }
 
 /// Asks each of `endpoints` which chain it serves and its tip, once, before
@@ -317,14 +379,22 @@ async fn store(db: &Db, network: &base::Network, nodes: RpcEndpoints) -> Result<
     Ok(())
 }
 
-/// `network`'s stored nodes, each with its node's state, after loading them
-/// and its routes into its transport.
+/// `network`'s stored nodes, each with its state, after loading them and
+/// its routes into its transport.
 async fn connected(
     container: &Container<Transport>,
     db: &Db,
+    queue: &Queue,
     network: &base::Network,
 ) -> Result<Nodes, Error> {
-    Networks::read(db).await?.load(network, container)?;
+    Networks::new(db.clone()).await?.load(network, container)?;
+    // A network with a node again indexes again: its index job stopped
+    // (`Ack::Idle`) when its last node went. Unique: a running one stays.
+    if container.has_node(network) {
+        <Index as Worker>::enqueue(queue, &Target::from(network))
+            .await
+            .map_err(|error| Error::unavailable(error.to_string()))?;
+    }
     endpoints(container, db, network).await
 }
 
@@ -339,7 +409,8 @@ pub(crate) async fn routes(
     network: &base::Network,
 ) -> Result<Vec<Route>, Error> {
     container.service(network)?;
-    Ok(db.read(endpoint_route::db::find_all).await?.routes(network))
+    let network = stored_network(db, network).await?;
+    Ok(network.map(|network| network.routes).unwrap_or_default())
 }
 
 /// Makes `routes` `network`'s routed methods: checked against its nodes,
@@ -357,14 +428,21 @@ pub(crate) async fn replace_routes(
     routes: Vec<Route>,
 ) -> Result<Vec<Route>, Error> {
     container.service(network)?;
-    let endpoints = db.read(endpoint::db::find_all).await?.nodes(network);
+    let endpoints = stored(db, network).await?;
     let routes = Routes::new(routes, &endpoints).map_err(Error::invalid)?;
-    let key = network.clone();
+    let ids = endpoints.ids();
     // Stored before connected: a restart never forgets a change in use.
-    db.write(move |connection| endpoint_route::db::replace(connection, &key, &routes))
+    db.write(move |connection| endpoint_route::db::replace(connection, &ids, &routes))
         .await?;
-    Networks::read(db).await?.load(network, container)?;
-    Ok(db.read(endpoint_route::db::find_all).await?.routes(network))
+    let networks = Networks::new(db.clone()).await?;
+    networks.load(network, container)?;
+    let stored = networks
+        .networks
+        .iter()
+        .find(|stored| stored.key() == *network);
+    Ok(stored
+        .map(|stored| stored.routes.clone())
+        .unwrap_or_default())
 }
 
 /// A page of `network`'s live kept blocks, latest first.

@@ -6,6 +6,7 @@ use std::{future::Future, panic::AssertUnwindSafe, pin::Pin, sync::Arc, time::Du
 
 use futures_util::FutureExt as _;
 use tokio::{sync::watch, task::JoinSet};
+use tracing::Instrument as _;
 
 use crate::{
     job::{Job, millis, now},
@@ -114,13 +115,36 @@ impl<W: Worker> Task<W> {
         self.store.update(self.job.clone(), self.attempt).await
     }
 
-    /// Runs the worker and settles the job by its answer ([`Job::settle`]).
-    /// Stores nothing.
+    /// Runs the worker, in a `job` span (`job_id kind topic attempt`) so
+    /// every event of the run names its job; logs how it ended as `job.run`
+    /// (`ms ack`: debug, warn when it failed); and settles the job by its
+    /// answer ([`Job::settle`]). Stores nothing.
     pub async fn run(&mut self) {
+        let job = &self.job;
+        let span = tracing::info_span!(
+            "job",
+            job_id = job.id.0,
+            kind = %job.kind,
+            topic = %job.topic,
+            attempt = job.attempts
+        );
+        let started = std::time::Instant::now();
         let ack = match Context::new(&mut self.job, self.store.clone()) {
-            Ok(cx) => Self::execute(&self.worker, cx).await,
+            Ok(cx) => {
+                Self::execute(&self.worker, cx)
+                    .instrument(span.clone())
+                    .await
+            }
             Err(ack) => ack,
         };
+        let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let entered = span.enter();
+        if ack.failed() {
+            tracing::warn!(target: "job.run", ms, ack = ack.as_str(), "Job ran");
+        } else {
+            tracing::debug!(target: "job.run", ms, ack = ack.as_str(), "Job ran");
+        }
+        drop(entered);
         self.job = self.job.clone().settle(ack, &W::POLICY, now());
     }
 

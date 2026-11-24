@@ -6,6 +6,8 @@ import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
 import Stack from '@mui/material/Stack';
+import Tab from '@mui/material/Tab';
+import Tabs from '@mui/material/Tabs';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
@@ -18,12 +20,18 @@ import { Nodes } from './_components/nodes';
 import { Chain } from './_components/chain';
 import { AddNodes } from './_components/add';
 import { Split } from '@/_components/split';
+import { Logs } from '@/_components/logs';
 
 const BEAT_MS = 4000;
 
 /** `chain/network`. */
 function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
   return `${n.chain}/${n.network}`;
+}
+
+/** How many of a network's nodes are enabled: none disabled them. */
+function enabledOf(n: Pick<ConfiguredNetwork, 'endpoints'>): number {
+  return n.endpoints.filter((node) => node.disabled === null).length;
 }
 
 /**
@@ -33,12 +41,14 @@ function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
  * network is not indexed at all.
  */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
-  const { tip_live: tip, index_job_reason: reason } = n;
+  const { live: tip, error } = n.tip;
+  const reason = n.index?.job_reason;
   const last = n.index?.indexed;
+  if (n.enabled && enabledOf(n) === 0)
+    return { label: 'No enabled RPC endpoint', color: 'error.main', live: false };
   if (reason) return { label: 'Retrying after an error', color: 'error.main', live: false };
-  if (n.tip_error)
-    return { label: `Node unreadable: ${n.tip_error}`, color: 'error.main', live: false };
-  if (!n.index)
+  if (error) return { label: `Node unreadable: ${error}`, color: 'error.main', live: false };
+  if (n.index?.tip == null)
     return n.enabled
       ? { label: 'Waiting for the tip', color: 'warning.main', live: false }
       : { label: 'Not indexed', color: 'text.disabled', live: false };
@@ -56,10 +66,23 @@ function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boo
 export function Networks({ shell }: { shell: Shell }) {
   const [networks, setNetworks] = useState<ConfiguredNetwork[]>([]);
   const [adding, setAdding] = useState(false);
-  // networks/{chain}/{network}[/settings | /mempool | /blocks/{position}]
+  // networks/{chain}/{network}[/settings | /logs | /mempool | /blocks/{position}]
   const [, chain, network, page, position] = useSegments();
   const selected = chain && network ? `${chain}/${network}` : null;
   const settings = page === 'settings';
+  const logs = page === 'logs';
+  const readLogs = useCallback(
+    (cursor: string | undefined) =>
+      call(
+        client.GET('/v1/networks/{chain}/{network}/logs', {
+          params: {
+            path: { chain: chain ?? '', network: network ?? '' },
+            query: cursor === undefined ? {} : { cursor },
+          },
+        }),
+      ),
+    [chain, network],
+  );
 
   const refresh = useCallback(() => {
     call(client.GET('/v1/networks'))
@@ -129,8 +152,9 @@ export function Networks({ shell }: { shell: Shell }) {
                   </Stack>
                   <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
                     <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
-                      {n.endpoints.length} node{n.endpoints.length === 1 ? '' : 's'} · indexed #
-                      {n.index?.indexed ?? '—'} · tip #{n.tip_live ?? '—'}
+                      {enabledOf(n)}/{n.endpoints.length} node
+                      {n.endpoints.length === 1 ? '' : 's'} enabled · indexed #
+                      {n.index?.indexed ?? '—'} · tip #{n.tip.live ?? '—'}
                     </Typography>
                     <Tooltip title="Settings">
                       <IconButton
@@ -153,9 +177,9 @@ export function Networks({ shell }: { shell: Shell }) {
                       </IconButton>
                     </Tooltip>
                   </Stack>
-                  {n.index_job_reason && (
+                  {n.index?.job_reason && (
                     <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
-                      {n.index_job_reason}
+                      {n.index.job_reason}
                     </Typography>
                   )}
                 </ListItemButton>
@@ -170,8 +194,26 @@ export function Networks({ shell }: { shell: Shell }) {
         }
         detail={
           <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
+            {current && !settings && (
+              <Tabs
+                value={logs ? 'logs' : 'chain'}
+                onChange={(_, tab: string) =>
+                  go(
+                    tab === 'logs'
+                      ? ['networks', current.chain, current.network, 'logs']
+                      : ['networks', current.chain, current.network],
+                  )
+                }
+                sx={{ mb: 2 }}
+              >
+                <Tab value="chain" label="Chain" />
+                <Tab value="logs" label="Logs" />
+              </Tabs>
+            )}
             {current && settings ? (
               <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
+            ) : current && logs ? (
+              <Logs key={nameOf(current)} shell={shell} read={readLogs} />
             ) : current ? (
               <Chain
                 key={nameOf(current)}

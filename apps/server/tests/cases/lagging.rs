@@ -17,7 +17,7 @@ pub(super) fn prepare<T: TestChain>(chain: &T) {
 
 pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     let network = app.api.network().await;
-    assert_eq!(network["tip_live"], chain.tip(), "{network}");
+    assert_eq!(network["tip"]["live"], chain.tip(), "{network}");
     let wallet = app.api.wallet(&chain.network()).await;
     let index = app.api.index(&wallet, "native", None).await;
     assert_eq!(index["requested_from"], chain.tip());

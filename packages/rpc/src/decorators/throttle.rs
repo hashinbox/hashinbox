@@ -47,12 +47,13 @@ fn spacing(rps: f64) -> Option<Duration> {
 /// request takes one per call it carries (a batch, its length), waiting until
 /// the tokens taken before it have refilled. An idle node's first request
 /// goes at once. It waits, never fails, for the limit. Clones share the
-/// bucket. `None`: no limit.
+/// bucket. `None`: no limit. A wait is logged as `rpc.wait` (`calls
+/// wait_ms`), debug.
 ///
 /// [`crate::node`] puts it under [`crate::Split`], so it paces each request
 /// sent, and over [`crate::Http`], so a wait never counts toward a request's
 /// timeout.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Throttle<C> {
     inner: C,
     bucket: Option<Arc<Bucket>>,
@@ -71,8 +72,8 @@ struct Bucket {
 
 impl Bucket {
     /// Waits until the tokens taken before have refilled, having taken
-    /// `calls` more.
-    async fn take(&self, calls: usize) {
+    /// `calls` more; how long.
+    async fn take(&self, calls: usize) -> Duration {
         let now = self.origin.elapsed();
         let start = {
             let mut refilled = self.refilled.lock().unwrap_or_else(PoisonError::into_inner);
@@ -82,6 +83,7 @@ impl Bucket {
             start
         };
         tokio::time::sleep(start - now).await;
+        start - now
     }
 }
 
@@ -100,9 +102,15 @@ impl<C> Throttle<C> {
     }
 
     async fn wait(&self, calls: usize) {
-        if let Some(bucket) = &self.bucket {
-            bucket.take(calls).await;
+        let Some(bucket) = &self.bucket else {
+            return;
+        };
+        let waited = bucket.take(calls).await;
+        if waited.is_zero() {
+            return;
         }
+        let wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+        tracing::debug!(target: "rpc.wait", calls, wait_ms, "RPC request waited for its rate");
     }
 }
 

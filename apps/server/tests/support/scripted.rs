@@ -20,13 +20,17 @@ pub(crate) fn network() -> Network {
 /// How the scripted network answers: its wallets sign as `keys` say, its
 /// broadcasts answer as `broadcasts` says; the chain's balance reads, when
 /// it has them; the chain its indexer reads (none: an empty one, or
-/// [`days`] with a depth limit); how its payments are checked and bumped.
+/// [`days`] with a depth limit; `hung`: one that never answers); how its
+/// payments are checked and bumped; `relay`: each broadcast also sent to the
+/// network's nodes (`sendrawtransaction`), their answer ignored.
 pub(crate) struct Script {
     pub(crate) keys: Keys,
     pub(crate) broadcasts: Arc<Broadcasts>,
     pub(crate) balances: Option<Arc<dyn base::Balances>>,
     pub(crate) chain: Option<Served>,
+    pub(crate) hung: bool,
     pub(crate) tracking: Tracking,
+    pub(crate) relay: bool,
 }
 
 impl Default for Script {
@@ -36,7 +40,9 @@ impl Default for Script {
             broadcasts: Arc::default(),
             balances: None,
             chain: None,
+            hung: false,
             tracking: Tracking::default(),
+            relay: false,
         }
     }
 }
@@ -53,6 +59,49 @@ fn days() -> Served {
         block
     };
     Served::new((0..=100).map(block).collect(), 0)
+}
+
+/// Broadcasts, each also sent to `client`'s nodes first.
+struct Relayed {
+    client: Arc<dyn rpc::Client>,
+    broadcasts: Arc<Broadcasts>,
+}
+
+impl base::Broadcaster for Relayed {
+    fn broadcast<'a>(
+        &'a self,
+        transaction: &'a base::Transaction,
+    ) -> Future<'a, Result<(), TransactionError>> {
+        Box::pin(async move {
+            let raw = hex::encode(&transaction.bytes);
+            let request = rpc::Request::once("sendrawtransaction", serde_json::json!([raw]));
+            let _answer = rpc::Client::broadcast(&*self.client, request).await;
+            base::Broadcaster::broadcast(&*self.broadcasts, transaction).await
+        })
+    }
+}
+
+/// A chain whose node never answers.
+struct Hung;
+
+impl Networked for Hung {
+    fn network(&self) -> &Network {
+        Unpriced.network()
+    }
+}
+
+impl base::Chained for Hung {
+    fn tips(&self) -> Future<'_, anyhow::Result<base::Tips>> {
+        Box::pin(std::future::pending())
+    }
+
+    fn confirmations(&self) -> u64 {
+        0
+    }
+
+    fn block(&self, _: u64) -> Future<'_, anyhow::Result<Option<base::Block>>> {
+        Box::pin(std::future::pending())
+    }
 }
 
 /// The fee rates of a network that prices no sends.
@@ -109,7 +158,11 @@ impl base::ServiceFactory for Scripted {
             Some(_) => Line::Final,
             None => Line::Depth(self.max_depth.unwrap_or(u64::MAX)),
         };
-        let chain: Arc<dyn base::Chained> = Arc::new(chain.with_line(line));
+        let chain: Arc<dyn base::Chained> = if self.script.hung {
+            Arc::new(Hung)
+        } else {
+            Arc::new(chain.with_line(line))
+        };
         let wallets = WalletIndexer::new(storage.indexes.clone(), chain.clone(), balances);
         let transactions =
             TransactionIndexer::new(storage.transaction_indexes.clone(), chain.clone(), None);
@@ -124,7 +177,14 @@ impl base::ServiceFactory for Scripted {
             wallets: WalletFactoryBroadcaster {
                 network: network(),
                 factory: Arc::new(self.script.keys.clone()),
-                broadcaster: self.script.broadcasts.clone(),
+                broadcaster: if self.script.relay {
+                    Arc::new(Relayed {
+                        client: client.clone(),
+                        broadcasts: self.script.broadcasts.clone(),
+                    })
+                } else {
+                    self.script.broadcasts.clone()
+                },
             },
             assets: Assets::from_iter([AssetInfo {
                 asset: Asset::native(network()),
@@ -180,7 +240,9 @@ pub(crate) fn limited(
     let container = base::Container::new(crate::usecase::sdk::Stores::storage(db.clone()));
     let config = config(max_depth);
     let node: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
-    let transport = crate::usecase::Transport::from_clients::<Unasked>(&config, vec![node]);
+
+    let transport =
+        crate::usecase::Transport::from_clients::<Unasked>(&config, vec![node], Some(db.clone()));
     SCRIPT.set(Some(script));
     container.register::<Scripted>(config, transport);
     Arc::new(container)

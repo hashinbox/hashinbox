@@ -97,7 +97,8 @@ impl Error {
     }
 
     /// Whether the work was refused before sending, so no node was asked.
-    pub(crate) const fn is_local(&self) -> bool {
+    #[must_use]
+    pub const fn is_local(&self) -> bool {
         matches!(
             self,
             Self::Transport {
@@ -105,6 +106,28 @@ impl Error {
                 ..
             }
         )
+    }
+
+    /// A short name for logs: `timeout`, `connect`, `http_429`,
+    /// `too_large`, `invalid_response`, `invalid_request`,
+    /// `invalid_configuration`, or `rpc_{code}` for an error
+    /// object.
+    #[must_use]
+    pub fn label(&self) -> String {
+        let kind = match self {
+            Self::Remote(failure) => return format!("rpc_{}", failure.code),
+            Self::Transport { kind, .. } => kind,
+        };
+        let name = match kind {
+            ErrorKind::HttpStatus(status) => return format!("http_{status}"),
+            ErrorKind::InvalidConfiguration => "invalid_configuration",
+            ErrorKind::InvalidRequest => "invalid_request",
+            ErrorKind::Timeout => "timeout",
+            ErrorKind::Unavailable => "connect",
+            ErrorKind::ResponseTooLarge => "too_large",
+            ErrorKind::InvalidResponse => "invalid_response",
+        };
+        name.to_owned()
     }
 
     /// What a log shows: the kind, or the node's code and truncated message;

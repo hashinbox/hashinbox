@@ -104,7 +104,7 @@ impl fmt::Debug for Http {
 impl Http {
     /// The client of `endpoint`, parsed as `url`, under its [`HttpParams`];
     /// does no I/O. Userinfo becomes HTTP Basic authorization.
-    pub(crate) fn new(url: &Url, endpoint: Endpoint) -> Result<Self, Error> {
+    pub fn new(url: &Url, endpoint: Endpoint) -> Result<Self, Error> {
         let params = HttpParams::try_from(url)?;
         let client = HttpClientBuilder::default()
             .set_headers(params.headers)

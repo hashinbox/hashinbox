@@ -50,7 +50,8 @@ impl Default for Backoff {
 /// whatever the policy says. A batch repeats whole, so only on a failure of
 /// the whole batch, never on one call's error object. A broadcast stays a
 /// broadcast: each attempt is one [`Client::broadcast`] of the inner client.
-#[derive(Clone, Debug)]
+/// Each repeat is logged as `rpc.retry` (`method attempt kind`), info.
+#[derive(Clone)]
 pub struct Retry<C> {
     inner: C,
     attempts: NonZeroU32,
@@ -86,6 +87,7 @@ impl<C: Client> Retry<C> {
     /// once for [`Repetition::Forbidden`] work.
     async fn repeat<'a, T>(
         &'a self,
+        method: &str,
         repetition: Repetition,
         send: impl Fn() -> BoxFuture<'a, Result<T, Error>>,
     ) -> Result<T, Error> {
@@ -101,6 +103,10 @@ impl<C: Client> Retry<C> {
             if !repeats || attempt == self.attempts.get() {
                 return outcome;
             }
+            if let Err(error) = &outcome {
+                let kind = error.label();
+                tracing::info!(target: "rpc.retry", method, attempt, kind, "RPC call repeated");
+            }
             tokio::time::sleep(self.backoff.delay(attempt)).await;
             attempt += 1;
         }
@@ -109,20 +115,30 @@ impl<C: Client> Retry<C> {
 
 impl<C: Client> Client for Retry<C> {
     fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
-        let repetition = request.repetition();
-        Box::pin(self.repeat(repetition, move || self.inner.request(request.clone())))
+        let (method, repetition) = (request.method().to_owned(), request.repetition());
+        Box::pin(async move {
+            let send = || self.inner.request(request.clone());
+            self.repeat(&method, repetition, send).await
+        })
     }
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
+        let method = batch.method().unwrap_or("batch").to_owned();
         let repetition = batch.repetition();
-        Box::pin(self.repeat(repetition, move || self.inner.batch(batch.clone())))
+        Box::pin(async move {
+            let send = || self.inner.batch(batch.clone());
+            self.repeat(&method, repetition, send).await
+        })
     }
 
     /// Repeats whole broadcasts under the same policy; [`Repetition::Forbidden`]
     /// work is broadcast once.
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
-        let repetition = request.repetition();
-        Box::pin(self.repeat(repetition, move || self.inner.broadcast(request.clone())))
+        let (method, repetition) = (request.method().to_owned(), request.repetition());
+        Box::pin(async move {
+            let send = || self.inner.broadcast(request.clone());
+            self.repeat(&method, repetition, send).await
+        })
     }
 
     fn endpoint(&self) -> Option<&Endpoint> {

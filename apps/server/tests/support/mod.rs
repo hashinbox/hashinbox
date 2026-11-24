@@ -76,17 +76,17 @@ impl App {
                 .map(|node| format!("http://{}-{node}.invalid/", network.network.name))
                 .collect();
             seed(&db, network.clone(), urls).await;
-            let transport = usecase::Transport::from_clients::<T::Info>(&network, nodes);
+            let transport = usecase::Transport::from_clients::<T::Info>(&network, nodes, None);
             container.register::<T::Factory>(network, transport);
         }
         let state = Arc::new(AppState {
             container: Arc::new(container),
             queue: usecase::tasks::queue(db.clone()),
             actions: Arc::new(usecase::workers::trigger::actions::registry()),
+            logs: crate::usecase::logs::feed(),
             db: db.clone(),
         });
         let (container, queue, actions) = (&state.container, &state.queue, &state.actions);
-        let logger = logging::Logger::default();
         let jobs = Executor::new(queue.clone(), TICK)
             .add(workers::index::Index::new(
                 container.clone(),
@@ -103,7 +103,6 @@ impl App {
                 db.clone(),
                 queue.clone(),
                 actions.clone(),
-                logger,
             ))
             .run();
         let config = http_server::Config::new(

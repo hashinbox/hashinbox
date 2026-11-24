@@ -5,21 +5,27 @@
 //! needs (keys, headers) is written into it. A change is stored, then every
 //! later call of the network goes to the new list and its routes. A node
 //! kept by URL keeps its id and routes; a removed one leaves its routes.
+//! A node is disabled or enabled by hand (`PUT …/{id}/state`), and what
+//! disabled or enabled it is listed (`GET …/{id}/failures`).
 
 use std::sync::Arc;
 
 use axum::{
     Json,
-    extract::{Path, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
 };
 use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, networks::NetworkPath};
+use super::{Error, ErrorBody, IndexParams, networks::NetworkPath};
 use crate::{
     api::AppState,
-    models::{Endpoint, NetworkName},
+    db::Paged as _,
+    models::{Endpoint, EndpointFailure, EndpointFailures, Endpoints, NetworkName},
     usecase::networks::{self, Nodes},
 };
 
@@ -28,6 +34,8 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list, add, replace))
         .routes(routes!(add_many))
         .routes(routes!(remove))
+        .routes(routes!(set_state))
+        .routes(routes!(list_failures))
 }
 
 /// A network's nodes.
@@ -36,7 +44,8 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 struct EndpointsResponse {
     network: NetworkName,
     /// Its nodes as stored, in failover order.
-    endpoints: Vec<Endpoint>,
+    #[schema(value_type = Vec<Endpoint>)]
+    endpoints: Endpoints,
 }
 
 impl From<Nodes> for EndpointsResponse {
@@ -53,9 +62,9 @@ impl From<Nodes> for EndpointsResponse {
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "list_network_endpoints",
     summary = "List a network's RPC nodes",
-    description = "Its stored nodes in stored order: each one's id and URL, as `PUT` takes \
-        them, and what the running server knows of it (`state`: last tip, failure streak, \
-        calls).",
+    description = "Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) \
+        and position, its calls (`stats`, each written as it finishes) and, while disabled, \
+        the record that disabled it (`disabled`: its kind and why; null: enabled).",
     params(NetworkPath),
     security(("bearerAuth" = [])),
     responses(
@@ -122,7 +131,8 @@ async fn add(
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let (container, db, network) = (&state.container, &state.db, path.network());
-    let nodes = networks::add_endpoints(container, db, &network, request.nodes()).await?;
+    let nodes =
+        networks::add_endpoints(container, db, &state.queue, &network, request.nodes()).await?;
     Ok(Json(nodes.into()))
 }
 
@@ -156,7 +166,8 @@ async fn replace(
 ) -> Result<Json<EndpointsResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
     let (container, db, network) = (&state.container, &state.db, path.network());
-    let nodes = networks::replace_endpoints(container, db, &network, request.nodes()).await?;
+    let nodes =
+        networks::replace_endpoints(container, db, &state.queue, &network, request.nodes()).await?;
     Ok(Json(nodes.into()))
 }
 
@@ -227,7 +238,8 @@ async fn add_many(
     request: Result<Json<AddManyRequest>, JsonRejection>,
 ) -> Result<Json<AddManyResponse>, Error> {
     let Json(request) = request.map_err(Error::invalid_json)?;
-    let changed = networks::add_endpoints_each(&state.container, &state.db, request.nodes()?);
+    let changed =
+        networks::add_endpoints_each(&state.container, &state.db, &state.queue, request.nodes()?);
     let networks = changed.await?.into_iter().map(Into::into).collect();
     Ok(Json(AddManyResponse { networks }))
 }
@@ -266,6 +278,126 @@ async fn remove(
     Path(path): Path<NodePath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
-    let nodes = networks::remove_endpoint(&state.container, &state.db, &network, path.id);
+    let nodes =
+        networks::remove_endpoint(&state.container, &state.db, &state.queue, &network, path.id);
     Ok(Json(nodes.await?.into()))
+}
+
+/// Whether the transport uses a node.
+#[derive(Clone, Copy, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+#[schema(as = RpcNodeState)]
+#[serde(rename_all = "snake_case")]
+enum NodeState {
+    /// Used: calls go to it.
+    Enabled,
+    /// Left out: no call goes to it, its routes skip it.
+    Disabled,
+}
+
+/// `PUT /v1/networks/{chain}/{network}/endpoints/{id}/state` body.
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
+#[schema(as = SetRpcNodeState)]
+#[serde(deny_unknown_fields)]
+struct StateRequest {
+    /// `disabled`: no call goes to it, its routes skip it (a `manual`
+    /// record); `enabled`: used again, its reason cleared (an `enabled`
+    /// record).
+    state: NodeState,
+    /// Why, kept in its records (`failures`); none: `by hand`.
+    reason: Option<String>,
+}
+
+#[utoipa::path(
+    put,
+    path = "/v1/networks/{chain}/{network}/endpoints/{id}/state",
+    operation_id = "set_network_endpoint_state",
+    summary = "Enable or disable one RPC node of a network",
+    description = "Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call \
+        of the network to its enabled nodes only; a route skips a disabled node. Disabling the last \
+        enabled node is allowed: the network's index job idles and its payments wait until \
+        one is enabled again. Asks no node.",
+    params(NodePath),
+    request_body = StateRequest,
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "Stored and in use", body = EndpointsResponse),
+        (status = 400, description = "Malformed body", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "No such node, or network not configured",
+            body = ErrorBody),
+        (status = 503, description = "The state could not be stored", body = ErrorBody)
+    ),
+    tag = "networks"
+)]
+async fn set_state(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<NodePath>,
+    request: Result<Json<StateRequest>, JsonRejection>,
+) -> Result<Json<EndpointsResponse>, Error> {
+    let Json(request) = request.map_err(Error::invalid_json)?;
+    let network = base::Network::new(base::Chain::new(path.chain), path.network);
+    let (container, db) = (&state.container, &state.db);
+    let nodes = networks::set_endpoint_state(
+        container,
+        db,
+        &state.queue,
+        &network,
+        path.id,
+        request.state == NodeState::Enabled,
+        request.reason,
+    );
+    Ok(Json(nodes.await?.into()))
+}
+
+/// `GET /v1/networks/{chain}/{network}/endpoints/{id}/failures`: a page of
+/// what disabled or enabled a node.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = RpcNodeFailureList)]
+struct FailuresResponse {
+    /// The node's records, newest first.
+    #[schema(value_type = Vec<EndpointFailure>)]
+    failures: EndpointFailures,
+    /// Pass as `cursor` for the next page; null on the last page. Always
+    /// present.
+    #[schema(required)]
+    next_cursor: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
+    operation_id = "list_network_endpoint_failures",
+    summary = "List what disabled or enabled one RPC node",
+    description = "Every failure of the node it cannot recover from (which disabled it: \
+        `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by \
+        hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it \
+        may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).",
+    params(NodePath, IndexParams),
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "The node's records", body = FailuresResponse),
+        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 404, description = "No such node, or network not configured",
+            body = ErrorBody),
+        (status = 503, description = "The store is unavailable", body = ErrorBody)
+    ),
+    tag = "networks"
+)]
+async fn list_failures(
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<NodePath>,
+    index: Result<Query<IndexParams>, QueryRejection>,
+) -> Result<Json<FailuresResponse>, Error> {
+    let Query(index) = index.map_err(Error::invalid_query)?;
+    let page = index.page("failures", |cursor| cursor.parse().ok())?;
+    let limit = page.limit;
+    let network = base::Network::new(base::Chain::new(path.chain), path.network);
+    let failures =
+        networks::endpoint_failures_page(&state.container, &state.db, &network, path.id, page);
+    let failures = failures.await?;
+    Ok(Json(FailuresResponse {
+        next_cursor: failures.cursor(limit),
+        failures,
+    }))
 }
