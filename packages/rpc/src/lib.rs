@@ -16,8 +16,8 @@ pub use client::{
     Answer, BATCH_BASE, BATCH_PER_CALL, Batch, BoxFuture, Client, Repetition, Request, SEND_TIMEOUT,
 };
 pub use decorators::{
-    Backoff, Counted, Logged, MakeSpan, Outcome, Retry, Snapshot, Spanned, Split, SplitParams,
-    Statistics, Swap, Throttle, ThrottleParams, Traced,
+    Backoff, Counted, MakeSpan, Outcome, Retry, Snapshot, Spanned, Split, SplitParams, Statistics,
+    Swap, Tally, Throttle, ThrottleParams, Traced,
 };
 pub use endpoint::{Endpoint, Params, Url};
 pub use error::{Error, ErrorKind, Failure};

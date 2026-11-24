@@ -9,7 +9,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use base::Container;
 use futures_util::Stream;
 use tokio::sync::{broadcast, mpsc};
 use tracing::{
@@ -19,7 +18,7 @@ use tracing::{
 };
 use tracing_subscriber::{layer::Context, registry::LookupSpan};
 
-use super::{Error, Transport, jobs};
+use super::Error;
 use crate::{
     db::{Db, Page},
     models::{Log, LogFilter, log},
@@ -45,8 +44,9 @@ pub(crate) fn feed() -> Feed {
 }
 
 /// Every event it is given, as a [`Log`] row with its spans' fields
-/// (`network`, `node`, `job_id`, …), queued to its own writer and
-/// published to its feed.
+/// (`network`, `node`, `job_id`, …) and, as `purpose`, the name of its
+/// innermost span named with a dot (`index.fetch`, `send.sign`: why it
+/// happened), queued to its own writer and published to its feed.
 pub(crate) struct DbLayer {
     sender: mpsc::Sender<Log>,
     feed: Feed,
@@ -80,6 +80,10 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> tracing_subscriber::Layer<S> for Db
         let Some(span) = ctx.span(id) else { return };
         let mut fields = Fields::default();
         attrs.record(&mut fields);
+        let name = attrs.metadata().name();
+        if name.contains('.') {
+            fields.fields.insert("purpose".to_owned(), name.to_owned());
+        }
         span.extensions_mut().insert(SpanFields(fields.fields));
     }
 
@@ -156,7 +160,8 @@ impl Fields {
     }
 }
 
-/// A page of the kept entries `filter` reads, newest first.
+/// A page of the kept entries `filter` reads: newest first; oldest first
+/// from `filter.after`.
 ///
 /// # Errors
 ///
@@ -184,7 +189,7 @@ pub(crate) async fn targets(db: &Db) -> Result<Vec<String>, Error> {
 /// What a feed listener hears.
 pub(crate) enum Heard {
     /// An entry its filter reads.
-    Entry(Log),
+    Entry(Box<Log>),
     /// How many entries it missed by lagging.
     Missed(u64),
 }
@@ -197,7 +202,7 @@ pub(crate) fn listen(feed: &Feed, filter: LogFilter) -> impl Stream<Item = Heard
         async move {
             loop {
                 let heard = match receiver.recv().await {
-                    Ok(log) if filter.matches(&log) => Heard::Entry(log),
+                    Ok(log) if filter.matches(&log) => Heard::Entry(Box::new(log)),
                     Ok(_) => continue,
                     Err(broadcast::error::RecvError::Lagged(missed)) => Heard::Missed(missed),
                     Err(broadcast::error::RecvError::Closed) => return None,
@@ -206,38 +211,4 @@ pub(crate) fn listen(feed: &Feed, filter: LogFilter) -> impl Stream<Item = Heard
             }
         }
     })
-}
-
-/// A page of `network`'s kept entries `filter` reads, newest first.
-///
-/// # Errors
-///
-/// Not found for an unconfigured network; the read.
-pub(crate) async fn network_page(
-    container: &Container<Transport>,
-    db: &Db,
-    network: base::Network,
-    filter: LogFilter,
-    page: Page<i64>,
-) -> Result<Vec<Log>, Error> {
-    container.service(&network)?;
-    let filter = LogFilter {
-        network: Some(network),
-        ..filter
-    };
-    find_page(db, filter, page).await
-}
-
-/// A page of job `id`'s kept entries, newest first.
-///
-/// # Errors
-///
-/// Not found for an unknown job; the read.
-pub(crate) async fn job_page(db: &Db, id: &str, page: Page<i64>) -> Result<Vec<Log>, Error> {
-    let job = jobs::read(db, id).await?.job;
-    let filter = LogFilter {
-        job_id: i64::try_from(job.id.0).ok(),
-        ..LogFilter::default()
-    };
-    find_page(db, filter, page).await
 }

@@ -7,8 +7,11 @@
 //! the blocks below its line that nothing needs (`block::db::prune`), one
 //! write per network: on a chain that reads balances, its indexer's last
 //! final block; else its stored tip less its `max_depth`. With the jobs, it
-//! deletes the kept log entries older than [`HISTORY_KEPT`], and each
-//! network's (and no network's) beyond its newest [`LOGS_MOST`].
+//! deletes the kept `debug` and `trace` log entries older than
+//! [`ROUTINE_KEPT`], and every one older than [`HISTORY_KEPT`]; then each
+//! job's entries but its newest [`LOGS_PER_JOB`] (a long-lived index job is
+//! capped, a payment keeps its whole story), and the entries of no job but
+//! each network's (and no network's) newest [`LOGS_PER_NETWORK`].
 //!
 //! Its `before` enqueues it when its queue starts; it is unique. Its topic (`prune`)
 //! conflicts with nothing else.
@@ -38,11 +41,18 @@ const PERIOD: Duration = Duration::from_secs(60 * 60);
 /// How long a succeeded job is kept after it last changed.
 const KEEP: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// How long a log entry is kept.
-const HISTORY_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+/// How long a `debug` or `trace` log entry is kept.
+const ROUTINE_KEPT: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// The most log entries kept per network, and of no network.
-pub(crate) const LOGS_MOST: i64 = 100_000;
+/// How long any other log entry is kept.
+const HISTORY_KEPT: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// The most log entries one job keeps, newest first.
+const LOGS_PER_JOB: i64 = 10_000;
+
+/// The most log entries of no job one network keeps (and no network),
+/// newest first.
+const LOGS_PER_NETWORK: i64 = 10_000;
 
 /// Deletes the jobs that succeeded long enough ago, and the blocks nothing
 /// needs.
@@ -106,13 +116,15 @@ impl Worker for Prune {
         Topic::new([KIND])
     }
 
-    /// Deletes what succeeded before [`KEEP`] ago and the log entries
-    /// before [`HISTORY_KEPT`] ago or beyond [`LOGS_MOST`], then prunes
-    /// blocks ([`Self::blocks`]); a failed read or write retries.
+    /// Deletes what succeeded before [`KEEP`] ago, the log entries before
+    /// [`ROUTINE_KEPT`] (`debug`, `trace`) or [`HISTORY_KEPT`] ago and those
+    /// past [`LOGS_PER_JOB`] or [`LOGS_PER_NETWORK`], then prunes blocks ([`Self::blocks`]); a failed read or write
+    /// retries.
     async fn run(&self, _cx: Context<'_, (), ()>) -> Ack {
         let now = tasks::now();
-        let (Ok(before), Ok(history_before)) = (
+        let (Ok(before), Ok(routine_before), Ok(history_before)) = (
             i64::try_from(now.saturating_sub(millis(KEEP))),
+            i64::try_from(now.saturating_sub(millis(ROUTINE_KEPT))),
             i64::try_from(now.saturating_sub(millis(HISTORY_KEPT))),
         ) else {
             return Ack::Fail("now is above range".into());
@@ -121,7 +133,9 @@ impl Worker for Prune {
             self.db
                 .write(move |connection| {
                     task::db::delete_done_before(connection, &RECURRING, before)?;
-                    log::db::prune(connection, history_before, LOGS_MOST)?;
+                    log::db::prune(connection, routine_before, history_before)?;
+                    log::db::delete_beyond_per_job(connection, LOGS_PER_JOB)?;
+                    log::db::delete_jobless_beyond_per_network(connection, LOGS_PER_NETWORK)?;
                     Ok(())
                 })
                 .await?;

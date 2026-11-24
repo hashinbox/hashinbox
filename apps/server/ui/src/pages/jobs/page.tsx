@@ -1,5 +1,6 @@
 import WorkHistory from '@mui/icons-material/WorkHistory';
 import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -17,7 +18,7 @@ import { shorten } from '@/_components/trim';
 import { When } from '@/_components/when';
 import { mono } from '@/theme';
 import { Split } from '@/_components/split';
-import { Logs } from '@/_components/logs';
+import { openLogs } from '@/_components/logs/open';
 import { valueOf, type Tag } from '@/_components/tag';
 import { Tags } from '@/_components/tags';
 import { segments } from '@/route';
@@ -218,7 +219,7 @@ export function Jobs({ shell }: { shell: Shell }) {
             }}
           >
             {current ? (
-              <Detail key={current.id} shell={shell} job={current} />
+              <Detail key={current.id} job={current} />
             ) : (
               <Empty icon={<WorkHistory />} title="Jobs">
                 A job is a piece of background work, like indexing a network, checking triggers or
@@ -234,16 +235,7 @@ export function Jobs({ shell }: { shell: Shell }) {
 }
 
 /** One job whole: where it is, what it was given, what its worker did. */
-function Detail({ shell, job }: { shell: Shell; job: Job }) {
-  const readLogs = useCallback(
-    (cursor: string | undefined) =>
-      call(
-        client.GET('/v1/jobs/{id}/logs', {
-          params: { path: { id: job.id }, query: cursor === undefined ? {} : { cursor } },
-        }),
-      ),
-    [job.id],
-  );
+function Detail({ job }: { job: Job }) {
   const facts: [string, ReactNode][] = [
     ['id', job.id],
     ['kind', job.kind],
@@ -263,9 +255,12 @@ function Detail({ shell, job }: { shell: Shell; job: Job }) {
     <Stack spacing={2}>
       <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
         <Dot state={job.state} />
-        <Typography variant="h4" component="h2">
+        <Typography variant="h4" component="h2" sx={{ flexGrow: 1 }}>
           {labelOf(job.kind)}
         </Typography>
+        <Button size="small" onClick={() => openLogs({ job_id: Number(job.id) })}>
+          Logs
+        </Button>
       </Stack>
       <Box
         component="dl"
@@ -298,9 +293,6 @@ function Detail({ shell, job }: { shell: Shell; job: Job }) {
         ) : (
           <Json value={job.progress} />
         )}
-      </Section>
-      <Section title="Logs">
-        <Logs shell={shell} read={readLogs} />
       </Section>
     </Stack>
   );

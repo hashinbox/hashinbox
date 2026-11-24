@@ -25,6 +25,7 @@ export function Tags<G extends string>({
   return (
     <Autocomplete
       multiple
+      fullWidth
       size="small"
       options={options}
       value={value}
@@ -48,7 +49,7 @@ export function Tags<G extends string>({
                 {t.label}
               </>
             }
-            sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
+            sx={{ borderRadius: '6px', bgcolor: 'action.selected', fontSize: 12 }}
           />
         ))
       }

@@ -80,7 +80,7 @@ pub(crate) struct Serve {
     #[arg(long = "log", value_parser = target_level)]
     log: Vec<(String, LevelFilter)>,
     /// One event's level in the `log` table, `TARGET=LEVEL`; repeatable.
-    /// The rest are kept from `info`; a failed `rpc.http` always is.
+    /// The rest are kept from `debug`; a failed `rpc.http` always is.
     #[arg(long = "log-db", value_parser = target_level)]
     log_db: Vec<(String, LevelFilter)>,
 }
@@ -146,7 +146,7 @@ impl Serve {
 
     /// The one subscriber, two layers, each with its own filter: every
     /// event at `--log-level` (or its `--log` level) as a line on stdout;
-    /// and every event from `info` (or its `--log-db` level), and every
+    /// and every event from `debug` (or its `--log-db` level), and every
     /// failed `rpc.http`, to the `log` table of `db` and to `feed`
     /// ([`DbLayer`]).
     ///
@@ -164,7 +164,17 @@ impl Serve {
         let failed_http = filter_fn(|metadata| {
             metadata.target() == "rpc.http" && *metadata.level() <= Level::WARN
         });
-        let kept = filter(LevelFilter::INFO, &self.log_db)?.or(failed_http);
+        // Our events are named (`rpc.http`, `index.step`); a library's are
+        // its module path (`hyper_util::client`): kept from warn only, so
+        // its connection chatter never fills the table.
+        let ours = filter_fn(|metadata| {
+            metadata.is_span()
+                || !metadata.target().contains("::")
+                || *metadata.level() <= Level::WARN
+        });
+        let kept = filter(LevelFilter::DEBUG, &self.log_db)?
+            .and(ours)
+            .or(failed_http);
         let database = DbLayer::new(db.clone(), feed).with_filter(kept);
         Ok(tracing_subscriber::registry().with(stdout).with(database))
     }

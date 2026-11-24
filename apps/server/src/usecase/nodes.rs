@@ -16,6 +16,7 @@ use std::{
 use base::{CachedInfo, InfoClient, NodeInfo};
 use futures_util::future::join_all;
 use rpc::{Error, ErrorKind};
+use tracing::Instrument as _;
 
 use super::{
     decorators::{Counter, Guard},
@@ -74,17 +75,20 @@ impl NodeFactory {
         let client = inner;
 
         // 2. Traced, in the node's context (`network=chain/name`, `node`:
-        //    its stored id, `new` when not stored): one `rpc.http` event per
+        //    its stored id, `new` when not stored; `endpoint`: its host, never
+        //    its path or query, where keys live): one `rpc.http` event per
         //    request, exactly as sent, seeing what Guard and Counter see.
         let id = endpoint_id.map_or_else(|| "new".to_owned(), |id| id.to_string());
         let network = self.label.clone();
-        let span: rpc::MakeSpan =
-            Arc::new(move || tracing::info_span!("node", network = %network, node = %id));
+        let host = url.node.host_str().unwrap_or_default().to_owned();
+        let span: rpc::MakeSpan = Arc::new(
+            move || tracing::info_span!("node", network = %network, node = %id, endpoint = %host),
+        );
         let client: Arc<dyn rpc::Client> = Arc::new(rpc::Traced::new(client, span.clone()));
 
         // 3. Guard (stored nodes only): refuses once the switch is off, before
         //    a refused call is paced or counted; turns it off on an answer the
-        //    node cannot recover from (401, 403, 404).
+        //    node cannot recover from (401, 403, 404, 5xx, not on its plan).
         let client: Arc<dyn rpc::Client> = match &switch {
             Some(switch) => Arc::new(Guard::new(client, switch.clone())),
             None => client,
@@ -104,11 +108,8 @@ impl NodeFactory {
         // 6. Split: a batch sent in requests of at most `rpc.max_batch`.
         let client = rpc::Split::new(client, rpc::SplitParams::try_from(url)?.max_batch);
 
-        // 7. Logged: the failure streaks of whole calls.
-        let client = rpc::Logged::new(client);
-
-        // 8. Spanned, outermost: the same node context for the layers above
-        //    Traced (Throttle's waits, Logged's streaks).
+        // 7. Spanned, outermost: the same node context for the layers above
+        //    Traced (Throttle's waits, a switch turned off).
         let client: Arc<dyn rpc::Client> = Arc::new(rpc::Spanned::new(client, span));
 
         Ok(Node {
@@ -143,7 +144,9 @@ pub(crate) struct Node {
     chain_checked: AtomicBool,
 }
 
-/// A node's failure streak, and since when it is demoted.
+/// A node's failure streak, and since when it is demoted. A demotion is
+/// logged as `node.demoted` (`node reason streak`), warn; the answer that
+/// ends it as `node.restored` (`node`), info.
 #[derive(Default)]
 pub(super) struct Health {
     pub(super) failures: u32,
@@ -178,6 +181,12 @@ impl Node {
         self.switch.as_ref().is_some_and(|switch| switch.is_off())
     }
 
+    /// The last tip it told, however old; `None` before the first. Asks
+    /// nothing.
+    pub(super) async fn known_tip(&self) -> Option<u64> {
+        self.info.last().await
+    }
+
     /// Asks it now: its chain ID and tip.
     ///
     /// # Errors
@@ -205,9 +214,16 @@ impl Node {
             return self.info.last().await;
         }
         self.check_chain().await;
-        let Ok(Ok(tip)) = tokio::time::timeout(PROBE, self.info.tip()).await else {
-            self.failed(false);
-            return None;
+        let tip = match tokio::time::timeout(PROBE, self.info.tip()).await {
+            Ok(Ok(tip)) => tip,
+            Ok(Err(_)) => {
+                self.failed(false, "tip probe failed");
+                return None;
+            }
+            Err(_) => {
+                self.failed(false, "tip probe timed out");
+                return None;
+            }
         };
         Some(tip)
     }
@@ -217,8 +233,16 @@ impl Node {
     /// error is the node answering.
     pub(super) fn observe(&self, error: Option<&Error>) {
         match error {
-            None => *lock(&self.health) = Health::default(),
-            Some(error) if error.is_retryable() => self.failed(error.is_rate_limited()),
+            None => {
+                let health = std::mem::take(&mut *lock(&self.health));
+                if health.demoted.is_some() {
+                    let node = self.label();
+                    tracing::info!(target: "node.restored", node, "RPC node restored");
+                }
+            }
+            Some(error) if error.is_retryable() => {
+                self.failed(error.is_rate_limited(), &error.label());
+            }
             Some(_) => {}
         }
     }
@@ -244,14 +268,23 @@ impl Node {
         }
     }
 
-    fn failed(&self, limited: bool) {
+    /// One more retryable failure for `reason`; a rate limit (`limited`)
+    /// demotes at once.
+    fn failed(&self, limited: bool, reason: &str) {
         let mut health = lock(&self.health);
         health.failures = health.failures.saturating_add(1);
         if limited {
             health.failures = health.failures.max(DEMOTION);
         }
-        if health.failures >= DEMOTION {
-            health.demoted = Some(Instant::now());
+        if health.failures < DEMOTION {
+            return;
+        }
+        let demoted = health.demoted.replace(Instant::now());
+        let streak = health.failures;
+        drop(health);
+        if demoted.is_none() {
+            let node = self.label();
+            tracing::warn!(target: "node.demoted", node, reason, streak, "RPC node demoted");
         }
     }
 }
@@ -289,9 +322,11 @@ impl Nodes {
     /// Every node in selection order: the healthy one with the highest tip
     /// (ties and unknown tips: stored order), then the other healthy ones
     /// within `lag` of that tip, then those further behind or with no known
-    /// tip, then the demoted ones; each group in stored order.
+    /// tip, then the demoted ones; each group in stored order. The tips are
+    /// asked in a `node.rank` span.
     pub(super) async fn ranked(&self, lag: u64) -> Vec<&Arc<Node>> {
-        let tips = join_all(self.iter().map(|node| node.tip())).await;
+        let tips = join_all(self.iter().map(|node| node.tip()));
+        let tips = tips.instrument(tracing::info_span!("node.rank")).await;
         let healthy: Vec<bool> = self.iter().map(|node| node.healthy()).collect();
         let highest = (0..self.len())
             .filter(|&position| healthy[position])
@@ -317,21 +352,37 @@ pub(super) fn lock<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// key refused (401, 403), its path unknown (404).
 const UNRECOVERABLE: [i64; 3] = [401, 403, 404];
 
-/// `error`, failed by node `endpoint_id`, as a failure it cannot recover
-/// from: an HTTP status or an error object's code of [`UNRECOVERABLE`].
+/// What a provider answers a method its plan does not include with (Tatum's
+/// `-16401`, "…is available for paid plans only…").
+const NOT_ON_PLAN: &str = "paid plans only";
+
+/// `error`, failed by node `endpoint_id`, as a failure it is turned off
+/// for: an HTTP status of [`UNRECOVERABLE`] or 500 and above (the node is
+/// broken or overloaded: other nodes take its calls), an error object's code
+/// of [`UNRECOVERABLE`], or a method refused as not on the node's plan.
 pub(crate) fn unrecoverable(endpoint_id: i64, error: &Error) -> Option<EndpointFailure> {
-    let (code, answered) = match error {
+    let message = match error {
         Error::Transport {
             kind: ErrorKind::HttpStatus(status),
             ..
-        } => (i64::from(*status), "HTTP"),
-        Error::Remote(failure) => (failure.code, "error code"),
-        Error::Transport { .. } => return None,
+        } if *status >= 500 || UNRECOVERABLE.contains(&i64::from(*status)) => {
+            format!("the node answered HTTP {status}")
+        }
+        Error::Remote(failure) if UNRECOVERABLE.contains(&failure.code) => {
+            format!("the node answered error code {}", failure.code)
+        }
+        Error::Remote(failure) if failure.message.contains(NOT_ON_PLAN) => format!(
+            "the node refused a method as not on its plan (error code {})",
+            failure.code
+        ),
+        _ => return None,
     };
-    let message = format!("the node answered {answered} {code}");
-    UNRECOVERABLE
-        .contains(&code)
-        .then(|| EndpointFailure::new(endpoint_id, now(), error.label(), message))
+    Some(EndpointFailure::new(
+        endpoint_id,
+        now(),
+        error.label(),
+        message,
+    ))
 }
 
 /// One stored node, on until turned off: off at once here, and stored off

@@ -10,7 +10,8 @@ use rpc::{Answer, Batch, BoxFuture, Client, Endpoint, Error, Outcome, RawJson, R
 use crate::{db::Db, models::endpoint_stats, usecase::now};
 
 /// `C`, each request it sends counted in node `endpoint_id`'s row, failed
-/// or not; one refused before sending is not. The write runs on its own
+/// or not (a node not at the block asked yet, `rpc::Error::is_not_ready`,
+/// is no failure); one refused before sending is not. The write runs on its own
 /// task, so the call never waits for it; a failed write is logged, and the
 /// call's outcome is untouched. Put under `rpc::Split`, it counts HTTP
 /// requests.
@@ -36,7 +37,8 @@ impl<C> Counter<C> {
         if errors.iter().any(Error::is_local) {
             return outcome;
         }
-        let (db, id, failed, at) = (self.db.clone(), self.endpoint_id, !errors.is_empty(), now());
+        let failed = errors.iter().any(|error| !error.is_not_ready());
+        let (db, id, at) = (self.db.clone(), self.endpoint_id, now());
         // Not waited for: the call answers at once, the count lands after.
         let count = async move {
             let written = db
@@ -46,7 +48,7 @@ impl<C> Counter<C> {
                 .await;
             if let Err(error) = written {
                 let error = format!("{error:#}");
-                tracing::warn!(target: "endpoint.counted", node = id, error, "RPC node call not counted");
+                tracing::error!(target: "endpoint.counted", node = id, error, "RPC node call not counted");
             }
         };
         tokio::spawn(count.instrument(tracing::Span::current()));

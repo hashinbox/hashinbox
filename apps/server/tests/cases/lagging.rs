@@ -16,8 +16,16 @@ pub(super) fn prepare<T: TestChain>(chain: &T) {
 }
 
 pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
-    let network = app.api.network().await;
-    assert_eq!(network["tip"]["live"], chain.tip(), "{network}");
+    // The highest tip a node told: the one in sync's, once selection asked it.
+    let tip = chain.tip();
+    until("the tip the nodes told", || async {
+        let network = app.api.network().await;
+        if network["tip"]["live"] == tip {
+            return Ok(());
+        }
+        Err(network.to_string())
+    })
+    .await;
     let wallet = app.api.wallet(&chain.network()).await;
     let index = app.api.index(&wallet, "native", None).await;
     assert_eq!(index["requested_from"], chain.tip());

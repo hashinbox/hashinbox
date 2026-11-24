@@ -92,6 +92,7 @@ export function Routes({
           label="Method"
           placeholder="getBlock"
           value={method}
+          sx={{ flexGrow: 1 }}
           onChange={(e) => setMethod(e.target.value)}
           slotProps={{ htmlInput: { spellCheck: false, sx: { fontFamily: mono, fontSize: 13 } } }}
         />
@@ -102,7 +103,7 @@ export function Routes({
           value={picked}
           onChange={(e) => setPicked(e.target.value as unknown as number[])}
           slotProps={{ select: { multiple: true } }}
-          sx={{ minWidth: 240 }}
+          sx={{ flexGrow: 1, minWidth: 240 }}
         >
           {network.endpoints.map((e) => (
             <MenuItem key={e.id} value={e.id}>
@@ -111,8 +112,10 @@ export function Routes({
           ))}
         </TextField>
         <Button
-          variant="outlined"
+          variant="contained"
+          disableElevation
           loading={busy}
+          sx={{ whiteSpace: 'nowrap', flexShrink: 0, height: 40 }}
           disabled={method.trim() === '' || picked.length === 0}
           onClick={() =>
             save(

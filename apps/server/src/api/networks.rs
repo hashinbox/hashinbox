@@ -15,19 +15,17 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(list))
 }
 
-/// The node's tip, asked now.
+/// The network's tip as its nodes last told it.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 struct LiveTip {
-    /// The node's newest block; the stored `index.tip` when asking failed.
-    /// Always present.
+    /// The highest tip its nodes last told, kept in memory (asked at most
+    /// once per block time, by selection and indexing); the stored
+    /// `index.tip` before any node told one. Always present, null: neither.
     #[schema(required)]
     live: Option<u64>,
-    /// Why asking the node failed; always present, null when it answered.
-    #[schema(required)]
-    error: Option<String>,
 }
 
-/// One stored network, and its node's tip asked now.
+/// One stored network, and its tip as its nodes last told it.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = ConfiguredNetwork)]
 struct NetworkResponse {
@@ -36,18 +34,11 @@ struct NetworkResponse {
     tip: LiveTip,
 }
 
-impl From<(Network, Result<u64, String>)> for NetworkResponse {
-    fn from((network, asked): (Network, Result<u64, String>)) -> Self {
+impl From<(Network, Option<u64>)> for NetworkResponse {
+    fn from((network, known): (Network, Option<u64>)) -> Self {
         let stored = network.index.as_ref().and_then(|index| index.tip);
-        let tip = match asked {
-            Ok(tip) => LiveTip {
-                live: Some(tip),
-                error: None,
-            },
-            Err(error) => LiveTip {
-                live: stored,
-                error: Some(error),
-            },
+        let tip = LiveTip {
+            live: known.or(stored),
         };
         Self { network, tip }
     }
@@ -65,13 +56,12 @@ struct ListResponse {
     get,
     path = "/v1/networks",
     operation_id = "list_networks",
-    summary = "List every network, its assets, its RPC nodes, its indexing and its live tip",
+    summary = "List every network, its assets, its RPC nodes, its indexing and its tip",
     description = "Every stored network: its row, its assets, its routes, its nodes (each \
         URL with its calls and, while disabled, the record that disabled it: `disabled`) \
         and its `index` (its `network_index` row and why its index job last failed, \
-        `job_reason`; null: neither). `tip.live` asks every running network's node at \
-        once, each for at most 2 s; one that fails keeps the stored `index.tip` and says \
-        why in `tip.error`.",
+        `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, \
+        kept in memory: no node is asked.",
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Every network", body = ListResponse),

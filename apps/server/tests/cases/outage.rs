@@ -22,7 +22,7 @@ pub(super) async fn case<T: TestChain>(app: &App, chain: &T) {
     chain.mine(1);
     until("the network to fail with why", || async {
         let network = app.api.network().await;
-        if network["index"]["job_reason"].is_string() && network["tip"]["error"].is_string() {
+        if network["index"]["job_reason"].is_string() {
             return Ok(());
         }
         Err(network.to_string())

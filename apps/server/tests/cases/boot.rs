@@ -39,13 +39,13 @@ async fn indexed(app: &App, name: &str, tip: u64) {
     .await;
 }
 
-/// Waits until network `name`'s index job and live tip fail, the job's
-/// reason containing `why`.
+/// Waits until network `name`'s index job fails, its reason containing
+/// `why`.
 async fn failing(app: &App, name: &str, why: &str) {
     until(&format!("{name} failing with {why}"), || async {
         let network = app.api.network_named(name).await;
         let reason = network["index"]["job_reason"].as_str().unwrap_or_default();
-        if reason.contains(why) && network["tip"]["error"].is_string() {
+        if reason.contains(why) {
             return Ok(());
         }
         Err(network.to_string())

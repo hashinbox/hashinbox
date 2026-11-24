@@ -101,26 +101,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/v1/jobs/{id}/logs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List a job's kept log entries
-         * @description Every kept entry of the job's runs (its steps, its nodes' calls), newest first, a page at a time; deleted with the job.
-         */
-        get: operations["list_job_logs"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/v1/logs": {
         parameters: {
             query?: never;
@@ -130,7 +110,7 @@ export interface paths {
         };
         /**
          * List the kept log entries
-         * @description Every kept entry, newest first, a page at a time: its level, event (`target`), message and fields, and its network and job when it has them. Kept 7 days, at most 100 000 per network and as many of no network.
+         * @description The kept entries the filters read, newest first, a page at a time: its level, event (`target`), message and fields, and its network, job, wallet, transaction and trigger when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.
          */
         get: operations["list_logs"];
         put?: never;
@@ -150,7 +130,7 @@ export interface paths {
         };
         /**
          * Stream new log entries
-         * @description `text/event-stream` of every entry kept from now on that the filters read: one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
+         * @description `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
          */
         get: operations["stream_logs"];
         put?: never;
@@ -189,8 +169,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * List every network, its assets, its RPC nodes, its indexing and its live tip
-         * @description Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `index.tip` and says why in `tip.error`.
+         * List every network, its assets, its RPC nodes, its indexing and its tip
+         * @description Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, kept in memory: no node is asked.
          */
         get: operations["list_networks"];
         put?: never;
@@ -356,26 +336,6 @@ export interface paths {
          * @description Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call of the network to its enabled nodes only; a route skips a disabled node. Disabling the last enabled node is allowed: the network's index job idles and its payments wait until one is enabled again. Asks no node.
          */
         put: operations["set_network_endpoint_state"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/v1/networks/{chain}/{network}/logs": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * List a network's kept log entries
-         * @description The network's kept entries (those naming it: its nodes' calls, its index steps, its payments), newest first, a page at a time.
-         */
-        get: operations["list_network_logs"];
-        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -819,7 +779,7 @@ export interface components {
              */
             transactions: number;
         };
-        /** @description One stored network, and its node's tip asked now. */
+        /** @description One stored network, and its tip as its nodes last told it. */
         ConfiguredNetwork: components["schemas"]["StoredNetwork"] & {
             tip: components["schemas"]["LiveTip"];
         };
@@ -1060,14 +1020,13 @@ export interface components {
             /** @description The chain and network this asset's wallets live on. */
             network: components["schemas"]["Network"];
         };
-        /** @description The node's tip, asked now. */
+        /** @description The network's tip as its nodes last told it. */
         LiveTip: {
-            /** @description Why asking the node failed; always present, null when it answered. */
-            error: string | null;
             /**
              * Format: int64
-             * @description The node's newest block; the stored `index.tip` when asking failed.
-             *     Always present.
+             * @description The highest tip its nodes last told, kept in memory (asked at most
+             *     once per block time, by selection and indexing); the stored
+             *     `index.tip` before any node told one. Always present, null: neither.
              */
             live: number | null;
         };
@@ -1102,10 +1061,22 @@ export interface components {
             network: string | null;
             /** @description The event: `rpc.http`, `index.step`, `send.broadcast`, … */
             target: string;
+            /**
+             * @description The transaction it concerns (`{chain}.{network}.{txid}`); always
+             *     present, null: none.
+             */
+            transaction_id: string | null;
+            /** @description The trigger it concerns; always present, null: none. */
+            trigger_id: string | null;
+            /**
+             * @description The wallet it concerns (`{chain}.{network}.{address}`); always
+             *     present, null: none.
+             */
+            wallet_id: string | null;
         };
         /** @description A page of log entries. */
         LogList: {
-            /** @description The entries, newest first. */
+            /** @description The entries, newest first; oldest first with `after`. */
             logs: components["schemas"]["LogEntry"][];
             /**
              * @description Pass as `cursor` for the next page; null on the last page. Always
@@ -2099,80 +2070,32 @@ export interface operations {
             };
         };
     };
-    list_job_logs: {
-        parameters: {
-            query?: {
-                /** @description `next_cursor` of the previous page; absent for the first page. */
-                cursor?: string;
-                /** @description Page size, 1 to 500. */
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                /** @description The job's id. */
-                id: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The job's entries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LogList"];
-                };
-            };
-            /** @description Malformed query, cursor, or limit */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Job is unknown */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The store is unavailable */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
     list_logs: {
         parameters: {
             query?: {
+                /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
+                network?: string;
+                /** @description Only entries of this job. */
+                job_id?: number;
+                /** @description Only entries of this wallet, its id (`{chain}.{network}.{address}`). */
+                wallet_id?: string;
+                /** @description Only entries of this transaction, its id (`{chain}.{network}.{txid}`). */
+                transaction_id?: string;
+                /** @description Only entries of this trigger, its id. */
+                trigger_id?: string;
                 /**
                  * @description Only entries at this level or more severe: `error`, `warn`, `info`,
                  *     `debug` or `trace`.
                  */
                 level?: string;
-                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
+                /** @description With `level`: only entries at exactly that level. */
+                only?: boolean;
+                /** @description Only entries of these events, comma-separated (`rpc.http,index.leg`). */
                 target?: string;
+                /** @description Only entries from before this Unix ms. */
+                before?: number;
+                /** @description Only entries from this Unix ms on; a page then lists oldest first. */
+                after?: number;
                 /** @description `next_cursor` of the previous page; absent for the first page. */
                 cursor?: string;
                 /** @description Page size, 1 to 500. */
@@ -2193,7 +2116,7 @@ export interface operations {
                     "application/json": components["schemas"]["LogList"];
                 };
             };
-            /** @description Malformed query, level, cursor, or limit */
+            /** @description Malformed query, level, network, cursor, or limit */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -2225,17 +2148,29 @@ export interface operations {
     stream_logs: {
         parameters: {
             query?: {
+                /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
+                network?: string;
+                /** @description Only entries of this job. */
+                job_id?: number;
+                /** @description Only entries of this wallet, its id (`{chain}.{network}.{address}`). */
+                wallet_id?: string;
+                /** @description Only entries of this transaction, its id (`{chain}.{network}.{txid}`). */
+                transaction_id?: string;
+                /** @description Only entries of this trigger, its id. */
+                trigger_id?: string;
                 /**
                  * @description Only entries at this level or more severe: `error`, `warn`, `info`,
                  *     `debug` or `trace`.
                  */
                 level?: string;
-                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
+                /** @description With `level`: only entries at exactly that level. */
+                only?: boolean;
+                /** @description Only entries of these events, comma-separated (`rpc.http,index.leg`). */
                 target?: string;
-                /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
-                network?: string;
-                /** @description Only entries of this job, its `job_id`. */
-                job_id?: number;
+                /** @description Only entries from before this Unix ms. */
+                before?: number;
+                /** @description Only entries from this Unix ms on; a page then lists oldest first. */
+                after?: number;
             };
             header?: never;
             path?: never;
@@ -2960,79 +2895,6 @@ export interface operations {
                 };
             };
             /** @description The state could not be stored */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-        };
-    };
-    list_network_logs: {
-        parameters: {
-            query?: {
-                /**
-                 * @description Only entries at this level or more severe: `error`, `warn`, `info`,
-                 *     `debug` or `trace`.
-                 */
-                level?: string;
-                /** @description Only entries of this event (`rpc.http`, `index.step`, ...). */
-                target?: string;
-                /** @description `next_cursor` of the previous page; absent for the first page. */
-                cursor?: string;
-                /** @description Page size, 1 to 500. */
-                limit?: number;
-            };
-            header?: never;
-            path: {
-                /** @description Chain name, as `GET /v1/networks` lists it. */
-                chain: string;
-                /** @description Network name, as `GET /v1/networks` lists it. */
-                network: string;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description The network's entries */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LogList"];
-                };
-            };
-            /** @description Malformed query, level, cursor, or limit */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description Missing or invalid bearer token */
-            401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The network is not configured */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
-            /** @description The store is unavailable */
             503: {
                 headers: {
                     [name: string]: unknown;

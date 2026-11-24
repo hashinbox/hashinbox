@@ -50,7 +50,7 @@ impl Default for Backoff {
 /// whatever the policy says. A batch repeats whole, so only on a failure of
 /// the whole batch, never on one call's error object. A broadcast stays a
 /// broadcast: each attempt is one [`Client::broadcast`] of the inner client.
-/// Each repeat is logged as `rpc.retry` (`method attempt kind`), info.
+/// Each repeat is logged as `rpc.retry` (`method attempt reason`), debug.
 #[derive(Clone)]
 pub struct Retry<C> {
     inner: C,
@@ -104,8 +104,8 @@ impl<C: Client> Retry<C> {
                 return outcome;
             }
             if let Err(error) = &outcome {
-                let kind = error.label();
-                tracing::info!(target: "rpc.retry", method, attempt, kind, "RPC call repeated");
+                let reason = error.label();
+                tracing::debug!(target: "rpc.retry", method, attempt, reason, "RPC call repeated");
             }
             tokio::time::sleep(self.backoff.delay(attempt)).await;
             attempt += 1;

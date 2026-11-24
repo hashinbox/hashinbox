@@ -24,6 +24,7 @@
 *.log
 logs/
 !apps/server/ui/src/pages/logs/
+!apps/server/ui/src/_components/logs/
 *.db
 *.sqlite
 *.sqlite3

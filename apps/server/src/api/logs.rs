@@ -1,13 +1,13 @@
-//! The kept log entries (the `log` table), newest first, a page at a
-//! time: every entry (`/v1/logs`), a network's
-//! (`/v1/networks/{chain}/{network}/logs`) and a job's
-//! (`/v1/jobs/{id}/logs`); and each new one, live (`/v1/logs/stream`).
+//! The kept log entries (the `log` table), a page at a time (`/v1/logs`),
+//! and each new one, live (`/v1/logs/stream`), both read by the same
+//! filters: network, job, wallet, transaction, trigger, level, event and
+//! time.
 
 use std::{convert::Infallible, sync::Arc};
 
 use axum::{
     Json,
-    extract::{Path, Query, State, rejection::QueryRejection},
+    extract::{Query, State, rejection::QueryRejection},
     response::sse::{Event, KeepAlive, Sse},
 };
 use futures_util::{Stream, StreamExt as _};
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, networks::NetworkPath};
+use super::{Error, ErrorBody, IndexParams};
 use crate::{
     api::AppState,
     db::{Page, Paged as _},
@@ -28,15 +28,13 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list))
         .routes(routes!(stream))
         .routes(routes!(list_targets))
-        .routes(routes!(list_network))
-        .routes(routes!(list_job))
 }
 
 /// A page of log entries.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 #[schema(as = LogList)]
 struct ListResponse {
-    /// The entries, newest first.
+    /// The entries, newest first; oldest first with `after`.
     logs: Vec<Log>,
     /// Pass as `cursor` for the next page; null on the last page. Always
     /// present.
@@ -54,19 +52,36 @@ impl ListResponse {
     }
 }
 
-/// Which entries a log list reads.
+/// Which entries a log list or the stream reads; each unset reads all.
 #[derive(Clone, Debug, Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 struct LogQuery {
+    /// Only entries of this network, `chain/name` (`bitcoin/regtest`).
+    network: Option<String>,
+    /// Only entries of this job.
+    job_id: Option<i64>,
+    /// Only entries of this wallet, its id (`{chain}.{network}.{address}`).
+    wallet_id: Option<String>,
+    /// Only entries of this transaction, its id (`{chain}.{network}.{txid}`).
+    transaction_id: Option<String>,
+    /// Only entries of this trigger, its id.
+    trigger_id: Option<String>,
     /// Only entries at this level or more severe: `error`, `warn`, `info`,
     /// `debug` or `trace`.
     level: Option<String>,
-    /// Only entries of this event (`rpc.http`, `index.step`, ...).
+    /// With `level`: only entries at exactly that level.
+    only: Option<bool>,
+    /// Only entries of these events, comma-separated (`rpc.http,index.leg`).
     target: Option<String>,
+    /// Only entries from before this Unix ms.
+    before: Option<i64>,
+    /// Only entries from this Unix ms on; a page then lists oldest first.
+    after: Option<i64>,
 }
 
 impl LogQuery {
-    /// As a filter; a 400 for a level that is none.
+    /// As a filter; a 400 for a level that is none, or a network that is
+    /// not `chain/name`.
     fn filter(self) -> Result<LogFilter, Error> {
         let level = self
             .level
@@ -75,10 +90,27 @@ impl LogQuery {
             .map_err(|_| {
                 Error::invalid_request("log level is not error, warn, info, debug or trace")
             })?;
+        let network = match self.network {
+            None => None,
+            Some(label) => {
+                let (chain, name) = label
+                    .split_once('/')
+                    .ok_or_else(|| Error::invalid_request("network is not chain/name"))?;
+                Some(base::Network::new(base::Chain::new(chain), name.to_owned()))
+            }
+        };
+        let targets = self.target.iter().flat_map(|targets| targets.split(','));
         Ok(LogFilter {
+            network,
+            job_id: self.job_id,
+            wallet_id: self.wallet_id,
+            transaction_id: self.transaction_id,
+            trigger_id: self.trigger_id,
             level,
-            target: self.target,
-            ..LogFilter::default()
+            only: self.only.unwrap_or(false),
+            targets: targets.map(str::to_owned).collect(),
+            before: self.before,
+            after: self.after,
         })
     }
 }
@@ -94,14 +126,17 @@ fn page(index: Result<Query<IndexParams>, QueryRejection>) -> Result<Page<i64>, 
     path = "/v1/logs",
     operation_id = "list_logs",
     summary = "List the kept log entries",
-    description = "Every kept entry, newest first, a page at a time: its level, event \
-        (`target`), message and fields, and its network and job when it has them. Kept 7 \
-        days, at most 100 000 per network and as many of no network.",
+    description = "The kept entries the filters read, newest first, a page at a time: its \
+        level, event (`target`), message and fields, and its network, job, wallet, \
+        transaction and trigger when it has them. With `after`, oldest first from that \
+        moment, so a reader can page forward from a time. Debug and trace entries are kept \
+        24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's \
+        (or no network's) entries outside a job.",
     params(LogQuery, IndexParams),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The entries", body = ListResponse),
-        (status = 400, description = "Malformed query, level, cursor, or limit", body = ErrorBody),
+        (status = 400, description = "Malformed query, level, network, cursor, or limit", body = ErrorBody),
         (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
         (status = 503, description = "The store is unavailable", body = ErrorBody)
     ),
@@ -148,37 +183,6 @@ async fn list_targets(State(state): State<Arc<AppState>>) -> Result<Json<Targets
     Ok(Json(TargetsResponse { targets }))
 }
 
-/// Whose entries the stream sends, beside [`LogQuery`]'s filters.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Query)]
-struct StreamScope {
-    /// Only entries of this network, `chain/name` (`bitcoin/regtest`).
-    network: Option<String>,
-    /// Only entries of this job, its `job_id`.
-    job_id: Option<i64>,
-}
-
-impl StreamScope {
-    /// `filter` narrowed to it; a 400 for a network that is not
-    /// `chain/name`.
-    fn filter(self, filter: LogFilter) -> Result<LogFilter, Error> {
-        let network = match self.network {
-            None => None,
-            Some(label) => {
-                let (chain, name) = label
-                    .split_once('/')
-                    .ok_or_else(|| Error::invalid_request("network is not chain/name"))?;
-                Some(base::Network::new(base::Chain::new(chain), name.to_owned()))
-            }
-        };
-        Ok(LogFilter {
-            network,
-            job_id: self.job_id,
-            ..filter
-        })
-    }
-}
-
 /// A `missed` event.
 #[derive(Debug, Serialize)]
 struct Missed {
@@ -192,10 +196,11 @@ struct Missed {
     operation_id = "stream_logs",
     summary = "Stream new log entries",
     description = "`text/event-stream` of every entry kept from now on that the filters \
-        read: one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A \
-        reader too slow for the feed gets `event: missed` with `{\"missed\": n}`, then the \
-        entries after. Comments keep the connection alive; the stream does not end.",
-    params(LogQuery, StreamScope),
+        read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: \
+        not yet stored). A reader too slow for the feed gets `event: missed` with \
+        `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the \
+        stream does not end.",
+    params(LogQuery),
     security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The entries, as they are kept",
@@ -208,11 +213,9 @@ struct Missed {
 async fn stream(
     State(state): State<Arc<AppState>>,
     query: Result<Query<LogQuery>, QueryRejection>,
-    scope: Result<Query<StreamScope>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
     let Query(query) = query.map_err(Error::invalid_query)?;
-    let Query(scope) = scope.map_err(Error::invalid_query)?;
-    let filter = scope.filter(query.filter()?)?;
+    let filter = query.filter()?;
     let events = logs::listen(&state.logs, filter).map(|heard| Ok(event(&heard)));
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))
 }
@@ -225,72 +228,4 @@ fn event(heard: &Heard) -> Event {
             .event("missed")
             .data(serde_json::to_string(&Missed { missed: *missed }).unwrap_or_default()),
     }
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/networks/{chain}/{network}/logs",
-    operation_id = "list_network_logs",
-    summary = "List a network's kept log entries",
-    description = "The network's kept entries (those naming it: its nodes' calls, its index \
-        steps, its payments), newest first, a page at a time.",
-    params(NetworkPath, LogQuery, IndexParams),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "The network's entries", body = ListResponse),
-        (status = 400, description = "Malformed query, level, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "The network is not configured", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
-    ),
-    tag = "networks"
-)]
-async fn list_network(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<NetworkPath>,
-    query: Result<Query<LogQuery>, QueryRejection>,
-    index: Result<Query<IndexParams>, QueryRejection>,
-) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    let (filter, page) = (query.filter()?, page(index)?);
-    let limit = page.limit;
-    let logs = logs::network_page(&state.container, &state.db, path.network(), filter, page);
-    Ok(Json(ListResponse::new(logs.await?, limit)))
-}
-
-/// The job whose entries are read.
-#[derive(Clone, Debug, Deserialize, IntoParams)]
-#[into_params(parameter_in = Path)]
-struct JobPath {
-    /// The job's id.
-    id: String,
-}
-
-#[utoipa::path(
-    get,
-    path = "/v1/jobs/{id}/logs",
-    operation_id = "list_job_logs",
-    summary = "List a job's kept log entries",
-    description = "Every kept entry of the job's runs (its steps, its nodes' calls), newest \
-        first, a page at a time; deleted with the job.",
-    params(JobPath, IndexParams),
-    security(("bearerAuth" = [])),
-    responses(
-        (status = 200, description = "The job's entries", body = ListResponse),
-        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Job is unknown", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
-    ),
-    tag = "jobs"
-)]
-async fn list_job(
-    State(state): State<Arc<AppState>>,
-    Path(path): Path<JobPath>,
-    index: Result<Query<IndexParams>, QueryRejection>,
-) -> Result<Json<ListResponse>, Error> {
-    let page = page(index)?;
-    let limit = page.limit;
-    let logs = logs::job_page(&state.db, &path.id, page).await?;
-    Ok(Json(ListResponse::new(logs, limit)))
 }

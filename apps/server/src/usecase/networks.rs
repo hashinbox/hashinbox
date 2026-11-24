@@ -6,7 +6,7 @@
 //! then in use); its kept blocks and transactions; and the search for its
 //! block at a time.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use base::{Container, InfoClient, NetworkConfig, ServiceFactory};
 use tasks::Worker;
@@ -25,9 +25,6 @@ use crate::{
         transaction::{self, Transaction},
     },
 };
-
-/// Longest [`overview`] waits for one network's node to tell its tip.
-const LIVE: Duration = Duration::from_secs(2);
 
 /// Every stored network: its config, nodes and routes, as the database holds
 /// them.
@@ -106,8 +103,9 @@ pub(crate) enum Search {
     Failed(String),
 }
 
-/// Every stored network, each with its node's tip asked now, or why not:
-/// every network at once, each for at most [`LIVE`].
+/// Every stored network, each with the highest tip its nodes last told
+/// (kept in memory, `Transport::known_tip`; `None` before the first, or for
+/// a network not running). Asks no node.
 ///
 /// # Errors
 ///
@@ -115,29 +113,16 @@ pub(crate) enum Search {
 pub(crate) async fn overview(
     container: &Container<Transport>,
     db: &Db,
-) -> Result<Vec<(Network, Result<u64, String>)>, Error> {
+) -> Result<Vec<(Network, Option<u64>)>, Error> {
     let networks = db.read(network::db::find_all).await?;
-    let live = networks.into_iter().map(|network| async move {
-        let tip = tip(container, &network.key()).await;
+    let known = networks.into_iter().map(|network| async move {
+        let tip = match container.transport(&network.key()) {
+            Ok(transport) => transport.known_tip().await,
+            Err(_) => None,
+        };
         (network, tip)
     });
-    Ok(futures_util::future::join_all(live).await)
-}
-
-/// The newest block of `network`'s node, asked now for at most [`LIVE`];
-/// why not otherwise.
-async fn tip(container: &Container<Transport>, network: &base::Network) -> Result<u64, String> {
-    let service = container
-        .service(network)
-        .map_err(|error| format!("{error:#}"))?;
-    let Some(dated) = &service.dated else {
-        return Err("this network cannot read its tip".to_owned());
-    };
-    let Ok(tips) = tokio::time::timeout(LIVE, dated.tips()).await else {
-        return Err("the node did not answer in time".to_owned());
-    };
-    tips.map(|tips| tips.position)
-        .map_err(|error| format!("{error:#}"))
+    Ok(futures_util::future::join_all(known).await)
 }
 
 /// `network`'s stored nodes, each with its state.
@@ -326,7 +311,7 @@ pub(crate) async fn set_endpoint_state(
     if enabled {
         tracing::info!(target: "endpoint.enabled", node = id, reason, "RPC node enabled");
     } else {
-        tracing::warn!(target: "endpoint.disabled", node = id, kind = "manual", reason, "RPC node disabled");
+        tracing::info!(target: "endpoint.disabled", node = id, kind = "manual", reason, "RPC node disabled");
     }
     connected(container, db, queue, network).await
 }

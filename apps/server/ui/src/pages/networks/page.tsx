@@ -2,12 +2,11 @@ import Add from '@mui/icons-material/Add';
 import Hub from '@mui/icons-material/Hub';
 import Settings from '@mui/icons-material/Settings';
 import Box from '@mui/material/Box';
+import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
 import Stack from '@mui/material/Stack';
-import Tab from '@mui/material/Tab';
-import Tabs from '@mui/material/Tabs';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
@@ -20,9 +19,11 @@ import { Nodes } from './_components/nodes';
 import { Chain } from './_components/chain';
 import { AddNodes } from './_components/add';
 import { Split } from '@/_components/split';
-import { Logs } from '@/_components/logs';
+import { openLogs } from '@/_components/logs/open';
 
 const BEAT_MS = 4000;
+/** How far behind its tip (in time) a network still counts as live. */
+const LATE_MS = 30_000;
 
 /** `chain/network`. */
 function nameOf(n: Pick<ConfiguredNetwork, 'chain' | 'network'>): string {
@@ -36,25 +37,28 @@ function enabledOf(n: Pick<ConfiguredNetwork, 'endpoints'>): number {
 
 /**
  * Where a network's indexing is: green while it is indexed (an index row, a
- * readable node, no failing job), amber while catching up or before its
- * first tip, red on a failing job or an unreadable node, grey when the
+ * readable node, no failing job) and within its confirmations or 30 s of
+ * its tip, amber while further behind or before its first tip, red on a failing job or an unreadable node, grey when the
  * network is not indexed at all.
  */
 function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boolean } {
-  const { live: tip, error } = n.tip;
+  const { live: tip } = n.tip;
   const reason = n.index?.job_reason;
   const last = n.index?.indexed;
   if (n.enabled && enabledOf(n) === 0)
     return { label: 'No enabled RPC endpoint', color: 'error.main', live: false };
   if (reason) return { label: 'Retrying after an error', color: 'error.main', live: false };
-  if (error) return { label: `Node unreadable: ${error}`, color: 'error.main', live: false };
   if (n.index?.tip == null)
     return n.enabled
       ? { label: 'Waiting for the tip', color: 'warning.main', live: false }
       : { label: 'Not indexed', color: 'text.disabled', live: false };
-  if (last != null && tip != null && tip - last > 1)
+  // Behind by time, not blocks: a fast chain (Solana: 400 ms slots) is
+  // always some blocks behind its live tip while it keeps up.
+  const behind = last != null && tip != null ? Math.max(tip - last, 0) : 0;
+  const late = behind * n.block_time_ms;
+  if (late > Math.max(LATE_MS, n.confirmations * n.block_time_ms))
     return {
-      label: `Catching up: ${String(tip - last)} behind`,
+      label: `Catching up: ${String(behind)} behind`,
       color: 'warning.main',
       live: false,
     };
@@ -66,23 +70,10 @@ function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boo
 export function Networks({ shell }: { shell: Shell }) {
   const [networks, setNetworks] = useState<ConfiguredNetwork[]>([]);
   const [adding, setAdding] = useState(false);
-  // networks/{chain}/{network}[/settings | /logs | /mempool | /blocks/{position}]
+  // networks/{chain}/{network}[/settings | /mempool | /blocks/{position}]
   const [, chain, network, page, position] = useSegments();
   const selected = chain && network ? `${chain}/${network}` : null;
   const settings = page === 'settings';
-  const logs = page === 'logs';
-  const readLogs = useCallback(
-    (cursor: string | undefined) =>
-      call(
-        client.GET('/v1/networks/{chain}/{network}/logs', {
-          params: {
-            path: { chain: chain ?? '', network: network ?? '' },
-            query: cursor === undefined ? {} : { cursor },
-          },
-        }),
-      ),
-    [chain, network],
-  );
 
   const refresh = useCallback(() => {
     call(client.GET('/v1/networks'))
@@ -195,25 +186,16 @@ export function Networks({ shell }: { shell: Shell }) {
         detail={
           <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
             {current && !settings && (
-              <Tabs
-                value={logs ? 'logs' : 'chain'}
-                onChange={(_, tab: string) =>
-                  go(
-                    tab === 'logs'
-                      ? ['networks', current.chain, current.network, 'logs']
-                      : ['networks', current.chain, current.network],
-                  )
-                }
+              <Button
+                size="small"
+                onClick={() => openLogs({ network: nameOf(current) })}
                 sx={{ mb: 2 }}
               >
-                <Tab value="chain" label="Chain" />
-                <Tab value="logs" label="Logs" />
-              </Tabs>
+                Logs
+              </Button>
             )}
             {current && settings ? (
               <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
-            ) : current && logs ? (
-              <Logs key={nameOf(current)} shell={shell} read={readLogs} />
             ) : current ? (
               <Chain
                 key={nameOf(current)}

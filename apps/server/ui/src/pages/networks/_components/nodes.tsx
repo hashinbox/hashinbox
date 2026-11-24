@@ -1,6 +1,8 @@
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import FormControlLabel from '@mui/material/FormControlLabel';
+import Switch from '@mui/material/Switch';
 import Chip from '@mui/material/Chip';
 import List from '@mui/material/List';
 import ListItemButton from '@mui/material/ListItemButton';
@@ -9,7 +11,6 @@ import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
 import TableRow from '@mui/material/TableRow';
-import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState } from 'react';
 import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
@@ -74,13 +75,11 @@ export function Nodes({
       .catch(shell.fail);
   };
 
-  const toggle = (target: Node, reason: string) => {
+  const toggle = (target: Node) => {
     const params = {
       path: { chain: network.chain, network: network.network, id: target.stored.id },
     };
-    const body = target.enabled
-      ? { state: 'disabled' as const, reason: reason || null }
-      : { state: 'enabled' as const };
+    const body = { state: target.enabled ? ('disabled' as const) : ('enabled' as const) };
     call(client.PUT('/v1/networks/{chain}/{network}/endpoints/{id}/state', { params, body }))
       .then(() => {
         shell.notify(`${target.url.origin} ${target.enabled ? 'disabled' : 'enabled'}.`);
@@ -166,7 +165,7 @@ export function Nodes({
             node={node}
             network={network}
             onRemove={() => setRemoving(node)}
-            onToggle={(reason) => toggle(node, reason)}
+            onToggle={() => toggle(node)}
             last={nodes.length === 1}
           />
         )}
@@ -210,10 +209,9 @@ function Detail({
   node: Node;
   network: ConfiguredNetwork;
   onRemove: () => void;
-  onToggle: (reason: string) => void;
+  onToggle: () => void;
   last: boolean;
 }) {
-  const [reason, setReason] = useState('');
   const row = (label: string, value: string) => (
     <TableRow>
       <TableCell sx={{ color: 'text.secondary', width: 150 }}>{label}</TableCell>
@@ -266,23 +264,17 @@ function Detail({
         </TableBody>
       </Table>
       <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: 'center' }}>
-        {node.enabled && (
-          <TextField
-            size="small"
-            label="Why disable it"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-          />
-        )}
-        <Button variant="outlined" onClick={() => onToggle(reason)}>
-          {node.enabled ? 'Disable' : 'Enable'}
-        </Button>
+        <FormControlLabel
+          control={<Switch checked={node.enabled} onChange={onToggle} />}
+          label={node.enabled ? 'Enabled' : 'Disabled'}
+        />
         <Box sx={{ flexGrow: 1 }} />
         <Button color="error" disabled={last} onClick={onRemove}>
           {last ? 'The last node stays' : 'Remove node'}
         </Button>
       </Stack>
-      <Failures network={network} id={stored.id} />
+      {/* Read again whenever the node is disabled or enabled. */}
+      <Failures key={stored.disabled?.id ?? 0} network={network} id={stored.id} />
     </Box>
   );
 }

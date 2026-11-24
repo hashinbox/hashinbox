@@ -7,12 +7,12 @@ substitute a scripted node.
 | Decorator | One job |
 |---|---|
 | `Http` | JSON-RPC over HTTP to one node; answers mapped to results, error objects and `Error` kinds |
-| `Traced` | logs each HTTP request as `rpc.http` (`method batch ms status rpc_errors error`) |
+| `Traced` | logs each HTTP request as `rpc.http` (`method batch ms wait_ms status rpc_errors error`), and `rpc.slow` while one is pending |
 | `Split` | sends a batch in requests of at most `rpc.max_batch` calls |
 | `Throttle` | paces requests to at most `rpc.rps` calls a second; waits, never fails |
-| `Logged` | logs a node's failure streaks and recovery (`rpc.failed`, `rpc.recovered`) |
 | `Spanned` | runs every call inside a `tracing` span made per call, a child of the caller's |
 | `Counted` | counts a node's outcomes into `Statistics` |
+| `Tally` | sums the requests sent under one piece of work (`calls rpc_ms wait_ms`) |
 | `Retry` | repeats retryable work with backoff |
 | `Swap` | replaces the stack live |
 
@@ -27,10 +27,10 @@ userinfo, `header.*` or `rpc.*` params.
 ## Usage
 
 `rpc::node` turns one URL into that node's preset,
-`Node = Counted<Logged<Split<Throttle<Traced<Http>>>>>`. It does no I/O.
+`Node = Counted<Split<Throttle<Traced<Http>>>>`. It does no I/O.
 An application that needs its own decorators composes the same pieces
-itself. Events are `tracing` events (targets `rpc.http`, `rpc.wait`,
-`rpc.retry`, `rpc.failed`, `rpc.recovered`); the application installs the
+itself. Events are `tracing` events (targets `rpc.http`, `rpc.slow`,
+`rpc.wait`, `rpc.retry`); the application installs the
 subscriber.
 
 ```rust
@@ -143,9 +143,9 @@ fn repoint() -> Result<(), rpc::Error> {
   broadcast, so wrapping never narrows it to one node. When no node
   succeeds, a transport failure is returned before an error object, because
   that node may have accepted the envelope.
-- `Logged` reports sanitized failures, repeated-failure counts (at most every
-  30 seconds), and recovery to a logger scoped to the node. No URL, request
-  parameters or provider error prose reaches the sink.
+- `Traced` logs every request once: debug when answered, or when the node
+  is not at the block asked yet (`Error::is_not_ready`), warn otherwise. No
+  URL, request parameters or provider error prose reaches an event.
 
 The `testing` feature adds `rpc::testing::Script`, a node double that
 replies in order and asserts each method and its parameters, and `Faults`,

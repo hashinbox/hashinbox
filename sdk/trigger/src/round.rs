@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use base::{Assets, FeeEstimator, Network};
 use serde::{Deserialize, Serialize};
+use tracing::Instrument as _;
 
 use crate::{
     actions::Registry,
@@ -102,7 +103,7 @@ impl<'a, E: 'static> Round<'a, E> {
     }
 
     /// Every trigger in the order given, each read of `store` answered once
-    /// per round.
+    /// per round; each decides in a `trigger` span naming it (`trigger_id`).
     pub async fn run<F: Condition, C: Condition>(
         self,
         store: &mut dyn Store,
@@ -111,7 +112,8 @@ impl<'a, E: 'static> Round<'a, E> {
         let mut store = CachedStore::new(store);
         let mut decided = Vec::with_capacity(triggers.len());
         for enabled in triggers {
-            decided.push(self.decide(&mut store, enabled).await);
+            let span = tracing::info_span!("trigger", trigger_id = %enabled.id);
+            decided.push(self.decide(&mut store, enabled).instrument(span).await);
         }
         decided
     }

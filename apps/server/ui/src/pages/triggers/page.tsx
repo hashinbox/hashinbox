@@ -2,6 +2,7 @@ import Add from '@mui/icons-material/Add';
 import Bolt from '@mui/icons-material/Bolt';
 import DeleteOutlined from '@mui/icons-material/DeleteOutlined';
 import Edit from '@mui/icons-material/Edit';
+import Notes from '@mui/icons-material/Notes';
 import Settings from '@mui/icons-material/Settings';
 import Box from '@mui/material/Box';
 import Chip from '@mui/material/Chip';
@@ -21,6 +22,7 @@ import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Confirm } from '@/_components/confirm';
+import { openLogs } from '@/_components/logs/open';
 import { Editor } from './_components/editor';
 import { View } from './_components/view';
 import { Compose } from './_components/compose';
@@ -236,6 +238,17 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
             <Edit fontSize="small" />
           </ListItemIcon>
           Edit
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            if (menu) openLogs({ trigger_id: menu.trigger.id });
+            setMenu(null);
+          }}
+        >
+          <ListItemIcon>
+            <Notes fontSize="small" />
+          </ListItemIcon>
+          Logs
         </MenuItem>
         <MenuItem
           onClick={() => {

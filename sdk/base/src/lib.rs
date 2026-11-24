@@ -25,7 +25,7 @@ pub use address::{Address, Addressed};
 pub use asset::{Asset, AssetInfo, Assets};
 pub use balance::{Balances, Holding};
 pub use block::{
-    Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader, Line,
+    Block, Blocks, Chained, Dated, Hash as BlockHash, Header as BlockHeader, Kept, Line,
     Listener as BlockListener, NotServed, Notify as BlockNotify, Notifying, Parent as BlockParent,
     Probe as BlockProbe, Reward, Stamp as BlockStamp, Store as BlockStore, Tips,
 };

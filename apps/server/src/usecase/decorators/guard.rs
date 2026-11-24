@@ -11,8 +11,10 @@ use crate::usecase::nodes::{NodeSwitch, unrecoverable};
 
 /// `C`, guarded: while its switch is off every call is refused at once
 /// with a local error ([`ErrorKind::InvalidRequest`]), so the transport
-/// moves on; the first outcome it cannot recover from (HTTP 401, 403, 404,
-/// or an error object of such a code, also inside a batch) turns it off.
+/// moves on; the first outcome it is turned off for (`nodes::unrecoverable`:
+/// HTTP 401, 403, 404 or 500 and above, an error object of 401, 403 or 404,
+/// or a method refused as not on its plan, also inside a batch) turns it
+/// off, logged as `endpoint.disabled`.
 /// Anything else passes through untouched.
 pub(crate) struct Guard<C> {
     inner: C,

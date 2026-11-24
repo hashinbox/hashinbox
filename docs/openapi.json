@@ -300,115 +300,61 @@
         ]
       }
     },
-    "/v1/jobs/{id}/logs": {
-      "get": {
-        "tags": [
-          "jobs"
-        ],
-        "summary": "List a job's kept log entries",
-        "description": "Every kept entry of the job's runs (its steps, its nodes' calls), newest first, a page at a time; deleted with the job.",
-        "operationId": "list_job_logs",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "description": "The job's id.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "`next_cursor` of the previous page; absent for the first page.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Page size, 1 to 500.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "default": 100,
-              "maximum": 500,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The job's entries",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LogList"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed query, cursor, or limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Job is unknown",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The store is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
     "/v1/logs": {
       "get": {
         "tags": [
           "logs"
         ],
         "summary": "List the kept log entries",
-        "description": "Every kept entry, newest first, a page at a time: its level, event (`target`), message and fields, and its network and job when it has them. Kept 7 days, at most 100 000 per network and as many of no network.",
+        "description": "The kept entries the filters read, newest first, a page at a time: its level, event (`target`), message and fields, and its network, job, wallet, transaction and trigger when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.",
         "operationId": "list_logs",
         "parameters": [
+          {
+            "name": "network",
+            "in": "query",
+            "description": "Only entries of this network, `chain/name` (`bitcoin/regtest`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "job_id",
+            "in": "query",
+            "description": "Only entries of this job.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Only entries of this wallet, its id (`{chain}.{network}.{address}`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transaction_id",
+            "in": "query",
+            "description": "Only entries of this transaction, its id (`{chain}.{network}.{txid}`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "query",
+            "description": "Only entries of this trigger, its id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
           {
             "name": "level",
             "in": "query",
@@ -419,12 +365,41 @@
             }
           },
           {
+            "name": "only",
+            "in": "query",
+            "description": "With `level`: only entries at exactly that level.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
             "name": "target",
             "in": "query",
-            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
+            "description": "Only entries of these events, comma-separated (`rpc.http,index.leg`).",
             "required": false,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only entries from before this Unix ms.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only entries from this Unix ms on; a page then lists oldest first.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
             }
           },
           {
@@ -462,7 +437,7 @@
             }
           },
           "400": {
-            "description": "Malformed query, level, cursor, or limit",
+            "description": "Malformed query, level, network, cursor, or limit",
             "content": {
               "application/json": {
                 "schema": {
@@ -505,27 +480,9 @@
           "logs"
         ],
         "summary": "Stream new log entries",
-        "description": "`text/event-stream` of every entry kept from now on that the filters read: one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the stream does not end.",
+        "description": "`text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the stream does not end.",
         "operationId": "stream_logs",
         "parameters": [
-          {
-            "name": "level",
-            "in": "query",
-            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "target",
-            "in": "query",
-            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
           {
             "name": "network",
             "in": "query",
@@ -538,7 +495,81 @@
           {
             "name": "job_id",
             "in": "query",
-            "description": "Only entries of this job, its `job_id`.",
+            "description": "Only entries of this job.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "wallet_id",
+            "in": "query",
+            "description": "Only entries of this wallet, its id (`{chain}.{network}.{address}`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "transaction_id",
+            "in": "query",
+            "description": "Only entries of this transaction, its id (`{chain}.{network}.{txid}`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "trigger_id",
+            "in": "query",
+            "description": "Only entries of this trigger, its id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "level",
+            "in": "query",
+            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "only",
+            "in": "query",
+            "description": "With `level`: only entries at exactly that level.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "target",
+            "in": "query",
+            "description": "Only entries of these events, comma-separated (`rpc.http,index.leg`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only entries from before this Unix ms.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only entries from this Unix ms on; a page then lists oldest first.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -637,8 +668,8 @@
         "tags": [
           "networks"
         ],
-        "summary": "List every network, its assets, its RPC nodes, its indexing and its live tip",
-        "description": "Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` asks every running network's node at once, each for at most 2 s; one that fails keeps the stored `index.tip` and says why in `tip.error`.",
+        "summary": "List every network, its assets, its RPC nodes, its indexing and its tip",
+        "description": "Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, kept in memory: no node is asked.",
         "operationId": "list_networks",
         "responses": {
           "200": {
@@ -1639,133 +1670,6 @@
           },
           "503": {
             "description": "The state could not be stored",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ]
-      }
-    },
-    "/v1/networks/{chain}/{network}/logs": {
-      "get": {
-        "tags": [
-          "networks"
-        ],
-        "summary": "List a network's kept log entries",
-        "description": "The network's kept entries (those naming it: its nodes' calls, its index steps, its payments), newest first, a page at a time.",
-        "operationId": "list_network_logs",
-        "parameters": [
-          {
-            "name": "chain",
-            "in": "path",
-            "description": "Chain name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "network",
-            "in": "path",
-            "description": "Network name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "level",
-            "in": "query",
-            "description": "Only entries at this level or more severe: `error`, `warn`, `info`,\n`debug` or `trace`.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "target",
-            "in": "query",
-            "description": "Only entries of this event (`rpc.http`, `index.step`, ...).",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "`next_cursor` of the previous page; absent for the first page.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "limit",
-            "in": "query",
-            "description": "Page size, 1 to 500.",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "default": 100,
-              "maximum": 500,
-              "minimum": 1
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The network's entries",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LogList"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed query, level, cursor, or limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "The store is unavailable",
             "content": {
               "application/json": {
                 "schema": {
@@ -3952,7 +3856,7 @@
             }
           }
         ],
-        "description": "One stored network, and its node's tip asked now."
+        "description": "One stored network, and its tip as its nodes last told it."
       },
       "CreateWallet": {
         "type": "object",
@@ -4407,26 +4311,18 @@
       },
       "LiveTip": {
         "type": "object",
-        "description": "The node's tip, asked now.",
+        "description": "The network's tip as its nodes last told it.",
         "required": [
-          "live",
-          "error"
+          "live"
         ],
         "properties": {
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why asking the node failed; always present, null when it answered."
-          },
           "live": {
             "type": [
               "integer",
               "null"
             ],
             "format": "int64",
-            "description": "The node's newest block; the stored `index.tip` when asking failed.\nAlways present.",
+            "description": "The highest tip its nodes last told, kept in memory (asked at most\nonce per block time, by selection and indexing); the stored\n`index.tip` before any node told one. Always present, null: neither.",
             "minimum": 0
           }
         }
@@ -4443,7 +4339,10 @@
           "fields",
           "chain",
           "network",
-          "job_id"
+          "job_id",
+          "wallet_id",
+          "transaction_id",
+          "trigger_id"
         ],
         "properties": {
           "at": {
@@ -4498,6 +4397,27 @@
           "target": {
             "type": "string",
             "description": "The event: `rpc.http`, `index.step`, `send.broadcast`, …"
+          },
+          "transaction_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The transaction it concerns (`{chain}.{network}.{txid}`); always\npresent, null: none."
+          },
+          "trigger_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The trigger it concerns; always present, null: none."
+          },
+          "wallet_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The wallet it concerns (`{chain}.{network}.{address}`); always\npresent, null: none."
           }
         }
       },
@@ -4514,7 +4434,7 @@
             "items": {
               "$ref": "#/components/schemas/LogEntry"
             },
-            "description": "The entries, newest first."
+            "description": "The entries, newest first; oldest first with `after`."
           },
           "next_cursor": {
             "type": [

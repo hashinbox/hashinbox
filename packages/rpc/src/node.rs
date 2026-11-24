@@ -2,17 +2,15 @@
 
 use std::sync::Arc;
 
-use crate::{
-    Counted, Endpoint, Error, Http, Logged, Split, SplitParams, Throttle, ThrottleParams, Traced,
-};
+use crate::{Counted, Endpoint, Error, Http, Split, SplitParams, Throttle, ThrottleParams, Traced};
 
 /// One node as [`node()`] builds it.
-pub type Node = Counted<Logged<Split<Throttle<Traced<Http>>>>>;
+pub type Node = Counted<Split<Throttle<Traced<Http>>>>;
 
 /// `endpoint`'s client: [`Http`]; [`Traced`] on it, each request logged;
 /// [`Throttle`] and [`Split`], each under the params it reads from the URL,
-/// so every request `Split` sends is paced; [`Logged`]; [`Counted`], so it
-/// and `Logged` see logical calls. Does no I/O.
+/// so every request `Split` sends is paced; [`Counted`], so it sees
+/// logical calls. Does no I/O.
 ///
 /// # Errors
 ///
@@ -25,5 +23,5 @@ pub fn node(endpoint: &Endpoint) -> Result<Node, Error> {
     );
     let throttle = Throttle::new(traced, ThrottleParams::try_from(&url)?.rps);
     let split = Split::new(throttle, SplitParams::try_from(&url)?.max_batch);
-    Ok(Counted::new(Logged::new(split)))
+    Ok(Counted::new(split))
 }

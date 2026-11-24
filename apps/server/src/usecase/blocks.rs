@@ -7,21 +7,41 @@ use diesel::SqliteConnection;
 
 use crate::models::{Block, block, leg, transaction, transaction_index, wallet_index};
 
+/// One block as [`keep`] kept it: what its events (`index.block`,
+/// `index.leg`, `index.found`) tell once the write commits.
+pub(crate) struct Kept {
+    /// Its position.
+    pub(crate) position: i64,
+    /// Its transactions, as fetched.
+    pub(crate) transactions: usize,
+    /// Its transactions kept: with a leg of a wallet index, or watched.
+    pub(crate) matched: usize,
+    /// Its legs kept, each with its index's total after it.
+    pub(crate) legs: leg::Legs,
+    /// The watched transactions found in it: txid, and whether it reverted.
+    pub(crate) found: Vec<(String, bool)>,
+}
+
 /// Keeps `run` (one network, linked): each block's row, then applies it
-/// ([`apply`]). A block conflicting with a kept one at its position fails
-/// the write ([`block::db::save`]); links need no check: the run is linked,
-/// and the indexer reads forward from the last kept block.
+/// ([`apply`]); what each block kept. A block conflicting with a kept one at
+/// its position fails the write ([`block::db::save`]); links need no check:
+/// the run is linked, and the indexer reads forward from the last kept
+/// block.
 ///
 /// # Errors
 ///
 /// When a block does not decode or a write fails.
-pub(crate) fn keep(connection: &mut SqliteConnection, run: &[BaseBlock]) -> anyhow::Result<()> {
+pub(crate) fn keep(
+    connection: &mut SqliteConnection,
+    run: &[BaseBlock],
+) -> anyhow::Result<Vec<Kept>> {
+    let mut kept = Vec::with_capacity(run.len());
     for base in run {
         let mut block = Block::try_from(base)?;
         block::db::save(connection, &mut block)?;
-        apply(connection, block)?;
+        kept.push(apply(connection, block)?);
     }
-    Ok(())
+    Ok(kept)
 }
 
 /// Applies kept `block` to the indexes, in 072's order:
@@ -38,21 +58,33 @@ pub(crate) fn keep(connection: &mut SqliteConnection, run: &[BaseBlock]) -> anyh
 /// # Errors
 ///
 /// When a value does not decode or a write fails (a seq an index holds).
-fn apply(connection: &mut SqliteConnection, mut block: Block) -> anyhow::Result<()> {
+fn apply(connection: &mut SqliteConnection, mut block: Block) -> anyhow::Result<Kept> {
+    let transactions = block.transactions.len();
     let ours = wallet_index::db::advance(connection, &block)?;
     transaction_index::db::set_indexed_at(connection, &block)?;
     let watched = transaction_index::db::set_found_at(connection, &block, &block.txids())?;
     let senders = block.indexes_of(&watched);
     let behind = wallet_index::db::find_behind_block(connection, &block, &senders)?;
     block.keep(&ours, &watched, &behind);
+    let found = block.transactions.iter();
+    let found = found.filter(|transaction| watched.contains(transaction.id.as_ref()));
+    let found = found.map(|transaction| (transaction.txid.clone(), transaction.state == 2));
 
+    let found = found.collect();
     let mut legs = block.take_legs();
     leg::db::delete_in(connection, &block.id, block.position, &legs.indexes())?;
     for transaction in &block.transactions {
         transaction::db::upsert(connection, transaction)?;
         leg::db::delete_moved(connection, &block.id, &transaction.id)?;
     }
-    leg::db::append(connection, &mut legs, block.position)
+    leg::db::append(connection, &mut legs, block.position)?;
+    Ok(Kept {
+        position: block.position,
+        transactions,
+        matched: block.transactions.len(),
+        legs,
+        found,
+    })
 }
 
 /// Deletes `network`'s blocks from position `from` up (a reorg, design 088):

@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use tracing::Instrument as _;
+
 use anyhow::{Result, ensure};
 
 use super::{CLOSES, IndexState, Indexed, IntoIndex, Progress, Skipped, behind, lowest_next};
@@ -310,14 +312,6 @@ impl WalletIndexer {
             return Ok(());
         };
         self.store.settle(index, &holding).await?;
-        let (address, asset) = (&index.address.value, &index.asset.id);
-        tracing::info!(
-            target: "index.settle",
-            index = %format!("{address}/{asset}"),
-            position = holding.position,
-            amount = %holding.amount,
-            "Wallet index settled"
-        );
         Ok(())
     }
 }
@@ -336,14 +330,17 @@ impl Indexes for WalletIndexer {
     /// Closes the gaps of at most a few indexes whose next block is below
     /// `line` ([`Self::close_one`]), at `confirmed`, the confirmed position;
     /// one failing does not stop the others, and the first failure, naming
-    /// its index, is the answer.
+    /// its index, is the answer. Each runs in an `index.close` span
+    /// (`wallet asset`).
     fn close<'a>(&'a self, line: u64, confirmed: u64) -> Future<'a, Result<()>> {
         Box::pin(async move {
             let behind = self.store.find_behind(self.network(), line, CLOSES);
             let mut failed = None;
             for index in &behind.await? {
-                if let Err(error) = self.close_one(index, line, confirmed).await {
-                    let (address, asset) = (&index.address.value, &index.asset.id);
+                let (address, asset) = (&index.address.value, &index.asset.id);
+                let span = tracing::info_span!("index.close", wallet = %address, asset = %asset);
+                let closed = self.close_one(index, line, confirmed).instrument(span);
+                if let Err(error) = closed.await {
                     failed.get_or_insert(error.context(format!("wallet index {address} {asset}")));
                 }
             }

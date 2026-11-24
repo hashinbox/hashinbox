@@ -37,6 +37,8 @@ import {
   type Wallet,
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
+import { LogsDrawer } from '@/_components/logs/drawer';
+import { logSource } from '@/api/logs';
 import { Docs } from '@/pages/docs/page';
 import { Explorers, type Explorer } from '@/_components/explorers';
 import { Dashboard } from '@/pages/dashboard/page';
@@ -355,6 +357,7 @@ export function Layout() {
             {view === 'logs' && <Logs shell={shell} />}
             {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
           </Box>
+          <LogsDrawer shell={shell} source={logSource} />
         </Explorers.Provider>
       )}
       {door === 'locked' && view === 'docs' && (

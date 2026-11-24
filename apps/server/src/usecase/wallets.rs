@@ -417,6 +417,13 @@ pub(crate) async fn send(
         })?;
     // A send is not unique: it is always queued.
     let (tasks::Admission::Queued(id) | tasks::Admission::Duplicate(id)) = queued;
+    let network = super::network_label(&from.network);
+    let (wallet, asset, amount) = (&intent.address, &intent.asset, &intent.amount);
+    tracing::info!(
+        target: "send.queued",
+        network, job_id = id.0, wallet, asset, amount,
+        "Payment queued"
+    );
     Ok(id)
 }
 

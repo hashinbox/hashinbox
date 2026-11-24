@@ -23,7 +23,11 @@
 //! - every call runs in a `network` span, each node's call in a `node`
 //!   span (`network`, `node`: its stored id), each made per call under the
 //!   caller's (a job's); every request of a node is logged (`rpc.http`);
-//!   each move to the next node is logged (`rpc.failover`).
+//!   each move to the next node is logged (`rpc.failover`, debug); a node's
+//!   demotion and its end (`node.demoted`, `node.restored`);
+//! - the network losing its last node is logged as `network.unserved`,
+//!   error, and getting one back as `network.served`, info: checked on
+//!   every load and after every failed call.
 //!
 //! A node's tip and failure streak live here, in memory; whether a stored
 //! node is enabled, and its counts, live in the database: its `Guard` and
@@ -32,7 +36,7 @@
 
 use std::sync::{
     Arc, PoisonError, RwLock,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use anyhow::ensure;
@@ -61,6 +65,8 @@ struct Shared {
     factory: NodeFactory,
     /// How far a node may trail the highest tip and stay in sync.
     lag: u64,
+    /// Whether it had a node to call when last checked ([`Transport::check_served`]).
+    served: AtomicBool,
 }
 
 /// The current nodes, in stored order, and the routes over them.
@@ -103,6 +109,7 @@ impl Transport {
                 label: super::network_label(network),
             },
             lag: config.confirmations,
+            served: AtomicBool::new(true),
         }))
     }
 
@@ -181,6 +188,7 @@ impl Transport {
             nodes,
             routes: routes.collect(),
         };
+        self.check_served();
         ensure!(failed.is_empty(), "{}", failed.join("; "));
         Ok(())
     }
@@ -230,9 +238,32 @@ impl Transport {
         Ok(info)
     }
 
+    /// The highest tip its nodes last told, kept in memory; `None` before
+    /// any told one. Asks no node.
+    pub(crate) async fn known_tip(&self) -> Option<u64> {
+        let nodes = self.clients();
+        let tips = join_all(nodes.iter().map(|node| node.known_tip())).await;
+        tips.into_iter().flatten().max()
+    }
+
     /// Whether it has no node to call: every stored one disabled or off.
     pub(crate) fn has_no_node(&self) -> bool {
         self.clients().is_empty()
+    }
+
+    /// Logs the network losing its last node (`network.unserved`, error) or
+    /// getting one back (`network.served`, info), once per change.
+    fn check_served(&self) {
+        let served = !self.has_no_node();
+        if self.0.served.swap(served, Ordering::Relaxed) == served {
+            return;
+        }
+        let network = &self.0.factory.label;
+        if served {
+            tracing::info!(target: "network.served", network, "Network has an RPC node again");
+        } else {
+            tracing::error!(target: "network.unserved", network, "Network has no enabled RPC node");
+        }
     }
 
     /// The current nodes, in stored order, without those turned off since
@@ -291,20 +322,23 @@ impl Transport {
             let gone = outcome.is_err() && node.is_off();
             let walks = repetition == Repetition::Permitted && (retryable || unserved || gone);
             if !walks {
-                return outcome;
+                break;
             }
             from = Some(node);
+        }
+        if outcome.is_err() {
+            self.check_served();
         }
         outcome
     }
 
     /// Logs a call of `method` moving on from node `from`, failed with
-    /// `error`, to node `to`: `rpc.failover`, info.
+    /// `error`, to node `to`: `rpc.failover`, debug.
     fn failover(&self, method: &str, from: &Node, to: &Node, error: &Error) {
-        let (from, to, kind) = (from.label(), to.label(), error.label());
-        tracing::info!(
+        let (from, to, reason) = (from.label(), to.label(), error.label());
+        tracing::debug!(
             target: "rpc.failover",
-            method, from, to, kind,
+            method, from, to, reason,
             "RPC call moved on to the next node"
         );
     }
@@ -326,6 +360,7 @@ impl Transport {
                 Err(refusal) => failed = failed.or(Some(refusal)),
             }
         }
+        self.check_served();
         Err(failed.unwrap_or_else(no_node))
     }
 }

@@ -117,8 +117,8 @@ impl<W: Worker> Task<W> {
 
     /// Runs the worker, in a `job` span (`job_id kind topic attempt`) so
     /// every event of the run names its job; logs how it ended as `job.run`
-    /// (`ms ack`: debug, warn when it failed); and settles the job by its
-    /// answer ([`Job::settle`]). Stores nothing.
+    /// (`ms ack reason`: debug, warn when it failed or retries); and settles
+    /// the job by its answer ([`Job::settle`]). Stores nothing.
     pub async fn run(&mut self) {
         let job = &self.job;
         let span = tracing::info_span!(
@@ -139,10 +139,14 @@ impl<W: Worker> Task<W> {
         };
         let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         let entered = span.enter();
+        let reason = match &ack {
+            Ack::Fail(why) | Ack::Retry(why) | Ack::Again(_, Some(why)) => why.as_str(),
+            Ack::Done | Ack::Idle | Ack::Again(_, None) => "-",
+        };
         if ack.failed() {
-            tracing::warn!(target: "job.run", ms, ack = ack.as_str(), "Job ran");
+            tracing::warn!(target: "job.run", ms, ack = ack.as_str(), reason, "Job ran");
         } else {
-            tracing::debug!(target: "job.run", ms, ack = ack.as_str(), "Job ran");
+            tracing::debug!(target: "job.run", ms, ack = ack.as_str(), reason, "Job ran");
         }
         drop(entered);
         self.job = self.job.clone().settle(ack, &W::POLICY, now());

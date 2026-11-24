@@ -41,8 +41,8 @@ pub struct Snapshot {
     pub last_failure: Option<String>,
 }
 
-/// What failed in a call's outcome, as [`Counted`], [`crate::Logged`] and
-/// other decorators read it.
+/// What failed in a call's outcome, as [`Counted`] and other decorators
+/// read it.
 pub trait Outcome {
     /// The call's own error, or each error object of a batch's answers, in
     /// order; empty on success.
@@ -87,11 +87,14 @@ impl Statistics {
         }
     }
 
-    /// Records one finished execution; work refused before sending is none.
+    /// Records one finished execution; work refused before sending is none,
+    /// and a node not at the block asked yet ([`Error::is_not_ready`]) no
+    /// failure.
     fn record(&self, failure: Option<Error>) {
         if failure.as_ref().is_some_and(Error::is_local) {
             return;
         }
+        let failure = failure.filter(|error| !error.is_not_ready());
         Self::increment(&self.0.attempts);
         let Some(error) = failure else {
             self.0.consecutive_failures.store(0, Ordering::Relaxed);

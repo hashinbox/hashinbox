@@ -4795,6 +4795,7 @@ dependencies = [
  "futures-executor",
  "serde",
  "serde_json",
+ "tracing",
  "trigger",
  "utoipa",
 ]

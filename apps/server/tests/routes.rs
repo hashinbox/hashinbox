@@ -284,7 +284,6 @@ async fn wallets_balance_legs_and_sends() {
         (&network["index"]["tip"], &network["tip"]["live"]),
         (&Value::Null, &Value::Null)
     );
-    assert!(network["tip"]["error"].is_string(), "{network}");
     let endpoints = "/v1/networks/bitcoin/regtest/endpoints";
     let (status, listed) = call(&router, Method::GET, endpoints, None).await;
     assert_eq!((status, &listed["endpoints"]), (StatusCode::OK, &json!([])));
@@ -565,7 +564,8 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
     .unwrap();
     let (_, networks) = call(&router, Method::GET, "/v1/networks", None).await;
     assert_eq!(networks["networks"][0]["max_depth"], 30);
-    assert_eq!(networks["networks"][0]["tip"]["live"], 100);
+    // No node told a tip yet, and none is stored: the list asks no node.
+    assert_eq!(networks["networks"][0]["tip"]["live"], Value::Null);
     // Block p is 100 - p days old: 50.5 days ago is after block 49.
     let at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1416,6 +1416,50 @@ async fn a_401_disables_the_node_in_the_store_and_its_calls_move_on() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_5xx_or_a_method_not_on_the_plan_disables_the_node_and_calls_move_on() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let unavailable = replying(|_| (503, json!({}))).await;
+    let unpaid = replying(|body| {
+        let error = json!({
+            "code": -16401,
+            "message": "Method 'getBalance' is available for paid plans only."
+        });
+        (
+            200,
+            json!({"jsonrpc": "2.0", "id": body["id"], "error": error}),
+        )
+    })
+    .await;
+    let ids = stored(
+        &container,
+        &db,
+        vec![unavailable, unpaid, answering(7).await],
+    )
+    .await;
+    let transport = container.transport(&network()).unwrap();
+    let answer = transport
+        .request(rpc::Request::new("getBalance", json!([])))
+        .await;
+    assert_eq!(answer.unwrap().deserialize::<u64>().unwrap(), 7, "moved on");
+
+    let nodes = listed(&router).await;
+    assert_eq!(nodes[0]["disabled"]["kind"], "http_503", "{nodes:?}");
+    assert_eq!(
+        nodes[0]["disabled"]["message"],
+        "the node answered HTTP 503"
+    );
+    let message = &nodes[1]["disabled"]["message"];
+    let refused = "the node refused a method as not on its plan (error code -16401)";
+    assert_eq!(message, refused, "{nodes:?}");
+    assert_eq!(nodes[2]["disabled"], Value::Null, "{nodes:?}");
+    assert_eq!(records(&router, ids[0]).await.len(), 1);
+    assert_eq!(transport.clients().len(), 1, "both off at once");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_node_of_another_chain_is_disabled_by_the_probe() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
@@ -1550,7 +1594,10 @@ fn enabled(network: &Value) -> usize {
 
 /// A subscriber keeping every event from debug, with its spans' fields, in
 /// `db`'s `log` table, published to `feed`.
-fn subscriber(db: &crate::db::Db, feed: crate::usecase::logs::Feed) -> tracing::Dispatch {
+pub(super) fn subscriber(
+    db: &crate::db::Db,
+    feed: crate::usecase::logs::Feed,
+) -> tracing::Dispatch {
     use tracing_subscriber::{Layer as _, layer::SubscriberExt as _};
 
     // With one dispatcher alive, `tracing` judges a callsite first hit on
@@ -1615,7 +1662,7 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
     .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
     .await;
 
-    let at = "/v1/networks/bitcoin/regtest/logs?target=rpc.http";
+    let at = "/v1/logs?network=bitcoin/regtest&target=rpc.http";
     let mut http = kept(&router, at, 3).await;
     http.reverse();
     assert_eq!(http.len(), 3, "{http:?}");
@@ -1626,13 +1673,10 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
             "the node span"
         );
         assert_eq!(entry["fields"]["node"], json!(node));
-        assert!(
-            entry["fields"]["ms"]
-                .as_str()
-                .unwrap()
-                .parse::<u64>()
-                .is_ok()
-        );
+        for timing in ["ms", "wait_ms"] {
+            let shown = entry["fields"][timing].as_str().unwrap_or_default();
+            assert!(shown.parse::<u64>().is_ok(), "{timing}: {entry}");
+        }
         assert!(!entry.to_string().contains("secret"), "no params: {entry}");
     }
     let keys = ["method", "batch", "status", "rpc_errors", "error"];
@@ -1657,6 +1701,57 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
     );
 }
 
+/// reth and Erigon answer `eth_getLogs` past their head with `-32602`:
+/// the node is not there yet, not failing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_range_beyond_the_head_is_debug_and_not_a_failure() {
+    use diesel::prelude::*;
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::models::schema::network_endpoint_stats as stats;
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let node = replying(|body| {
+        let message = "block range extends beyond current head block: requested 6, head 5";
+        let error = json!({"code": -32602, "message": message});
+        (
+            200,
+            json!({"jsonrpc": "2.0", "id": body["id"], "error": error}),
+        )
+    })
+    .await;
+    let ids = stored(&container, &db, vec![node]).await;
+    let transport = container.transport(&network()).unwrap();
+    async {
+        let ahead = transport.request(rpc::Request::new("eth_getLogs", json!([])));
+        assert!(ahead.await.unwrap_err().is_not_ready());
+    }
+    .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
+    .await;
+
+    let at = "/v1/logs?target=rpc.http";
+    let http = kept(&router, at, 1).await;
+    assert_eq!(http[0]["level"], "debug", "{http:?}");
+    assert_eq!(http[0]["fields"]["rpc_errors"], "-32602");
+    let id = ids[0];
+    let counted = super::support::until("the call counted", || async {
+        let read = db.read(move |connection| {
+            let counts = stats::table.filter(stats::endpoint_id.eq(id));
+            let counts = counts.select((stats::calls, stats::failed_calls));
+            Ok(counts.first::<(i64, i64)>(connection)?)
+        });
+        let counts = read.await.map_err(|error| error.to_string())?;
+        (counts.0 == 1)
+            .then_some(counts)
+            .ok_or(format!("{counts:?}"))
+    })
+    .await;
+    assert_eq!(counted, (1, 0), "answered, not failed");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_index_run_logs_one_step_in_its_job_and_network() {
     use tracing::instrument::WithSubscriber as _;
@@ -1677,7 +1772,7 @@ async fn an_index_run_logs_one_step_in_its_job_and_network() {
         .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
         .await;
 
-    let at = format!("/v1/jobs/{}/logs", job.id);
+    let at = format!("/v1/logs?job_id={}", job.id);
     let entries = super::support::until("the job's entries stored", || async {
         let (_, listed) = call(&router, Method::GET, &at, None).await;
         let logs = listed["logs"].as_array().cloned().unwrap_or_default();
@@ -1707,10 +1802,7 @@ async fn kept_logs_go_to_the_table_list_newest_first_and_prune() {
     use diesel::{connection::SimpleConnection as _, prelude::*};
     use tracing::instrument::WithSubscriber as _;
 
-    use crate::{
-        models::schema::log,
-        usecase::workers::prune::{LOGS_MOST, Prune},
-    };
+    use crate::{models::schema::log, usecase::workers::prune::Prune};
 
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
@@ -1736,8 +1828,8 @@ async fn kept_logs_go_to_the_table_list_newest_first_and_prune() {
     .await;
     assert_eq!(all["logs"][0]["target"], "api", "newest first");
     assert_eq!(all["logs"][0]["network"], Value::Null);
-    let at = "/v1/networks/bitcoin/regtest/logs";
-    let (_, page) = call(&router, Method::GET, &format!("{at}?limit=1"), None).await;
+    let at = "/v1/logs?network=bitcoin/regtest";
+    let (_, page) = call(&router, Method::GET, &format!("{at}&limit=1"), None).await;
     let newest = &page["logs"][0];
     assert_eq!(newest["target"], "index.reorg", "{page}");
     assert_eq!(newest["level"], "warn");
@@ -1748,48 +1840,248 @@ async fn kept_logs_go_to_the_table_list_newest_first_and_prune() {
     assert_eq!(newest["fields"]["from"], "3");
     assert_eq!(newest["fields"]["network"], "bitcoin/regtest");
     let cursor = page["next_cursor"].as_str().expect("a cursor").to_owned();
-    let older = format!("{at}?limit=1&cursor={cursor}");
+    let older = format!("{at}&limit=1&cursor={cursor}");
     let (_, page) = call(&router, Method::GET, &older, None).await;
     assert_eq!(page["logs"][0]["target"], "index.step", "older");
-    let (_, warned) = call(&router, Method::GET, &format!("{at}?level=warn"), None).await;
-    assert_eq!(warned["logs"].as_array().map(Vec::len), Some(1));
+    let count = |listed: &Value| listed["logs"].as_array().map(Vec::len);
+    let (_, warned) = call(&router, Method::GET, &format!("{at}&level=warn"), None).await;
+    assert_eq!(count(&warned), Some(1));
+    let (_, only) = call(&router, Method::GET, "/v1/logs?level=info&only=true", None).await;
+    assert_eq!(count(&only), Some(2), "info alone, not the warn: {only}");
     let (_, targeted) = call(&router, Method::GET, "/v1/logs?target=api", None).await;
-    assert_eq!(targeted["logs"].as_array().map(Vec::len), Some(1));
+    assert_eq!(count(&targeted), Some(1));
+    let both = "/v1/logs?target=api,index.reorg";
+    let (_, targeted) = call(&router, Method::GET, both, None).await;
+    assert_eq!(count(&targeted), Some(2));
     let (status, _) = call(&router, Method::GET, "/v1/logs?level=loud", None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = call(&router, Method::GET, "/v1/logs?network=regtest", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 
-    // An old entry of no network, and more than the most of the network.
+    // By time: none after the future, all before it; from a moment, oldest first.
     let now = i64::try_from(tasks::now()).unwrap();
+    let later = now + 60_000;
+    let (_, after) = call(
+        &router,
+        Method::GET,
+        &format!("/v1/logs?after={later}"),
+        None,
+    )
+    .await;
+    assert_eq!(count(&after), Some(0));
+    let (_, before) = call(&router, Method::GET, &format!("{at}&before={later}"), None).await;
+    assert_eq!(count(&before), Some(2));
+    let (_, before) = call(&router, Method::GET, "/v1/logs?before=1", None).await;
+    assert_eq!(count(&before), Some(0));
+    let (_, forward) = call(&router, Method::GET, &format!("{at}&after=0&limit=1"), None).await;
+    assert_eq!(forward["logs"][0]["target"], "index.step", "oldest first");
+    let cursor = forward["next_cursor"]
+        .as_str()
+        .expect("a cursor")
+        .to_owned();
+    let next = format!("{at}&after=0&limit=1&cursor={cursor}");
+    let (_, forward) = call(&router, Method::GET, &next, None).await;
+    assert_eq!(forward["logs"][0]["target"], "index.reorg", "then newer");
+
+    // Debug a day and more old goes; info goes only past 30 days.
+    let day = now - 25 * 60 * 60 * 1000;
+    let month = now - 31 * 24 * 60 * 60 * 1000;
     db.write(move |connection| {
-        connection.batch_execute(
-            "INSERT INTO log (at, level, target, message, fields) \
-             VALUES (1, 'info', 'api', 'old', '{}');
-             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 100000)
-             INSERT INTO log (at, level, target, message, fields, chain, network)
-             SELECT strftime('%s', 'now') * 1000, 'info', 't', 'm', '{}', 'bitcoin', 'regtest'
-             FROM n;",
-        )?;
+        connection.batch_execute(&format!(
+            "INSERT INTO log (at, level, target, message, fields) VALUES
+                ({day}, 'debug', 'old.debug', 'm', '{{}}'),
+                ({day}, 'trace', 'old.trace', 'm', '{{}}'),
+                ({day}, 'info', 'old.info', 'm', '{{}}'),
+                ({month}, 'error', 'ancient', 'm', '{{}}');"
+        ))?;
         Ok(())
     })
     .await
     .unwrap();
     let job = run_once(&queue, Prune::new(db.clone(), container.clone()), &()).await;
     assert_eq!(job.reason, None, "{job:?}");
-    let (network_rows, oldest) = db
+    let kept: Vec<String> = db
         .read(move |connection| {
-            let rows: i64 = log::table
-                .filter(log::network.eq("regtest"))
-                .count()
-                .get_result(connection)?;
-            let oldest = log::table
-                .select(diesel::dsl::min(log::at))
-                .first::<Option<i64>>(connection)?;
-            Ok((rows, oldest))
+            let targets = log::table.select(log::target).order(log::target.asc());
+            Ok(targets.load(connection)?)
         })
         .await
         .unwrap();
-    assert_eq!(network_rows, LOGS_MOST, "at most so many a network");
-    assert!(oldest > Some(now - 60_000), "a week old goes");
+    assert_eq!(kept, ["api", "index.reorg", "index.step", "old.info"]);
+}
+
+/// A job keeps its newest 10 000 entries, the entries of no job each
+/// network's newest 10 000 and no network's newest 10 000; a month-old one
+/// goes however few its job has.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_prune_caps_each_job_and_each_network_outside_a_job() {
+    use diesel::{connection::SimpleConnection as _, prelude::*};
+
+    use crate::{models::schema::log, usecase::workers::prune::Prune};
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    db.write(|connection| {
+        Ok(connection.batch_execute(
+            "INSERT INTO q (id, topic, kind, status, run_at, attempts, reason, input,
+               created_at, updated_at) VALUES
+             (901,'n.a','broadcast',0,0,0,NULL,'{}',0,0),
+             (902,'n.b','broadcast',0,0,0,NULL,'{}',0,0);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 10005)
+             INSERT INTO log (at, level, target, message, fields, chain, network, job_id)
+             SELECT strftime('%s', 'now') * 1000, 'info', 'big', i, '{}', 'bitcoin', 'regtest', 901
+               FROM n
+             UNION ALL SELECT strftime('%s', 'now') * 1000, 'info', 'small', i, '{}', NULL, NULL, 902
+               FROM n WHERE i <= 3
+             UNION ALL SELECT strftime('%s', 'now') * 1000, 'info', 'regtest', i, '{}', 'bitcoin',
+               'regtest', NULL FROM n WHERE i <= 10003
+             UNION ALL SELECT strftime('%s', 'now') * 1000, 'info', 'none', i, '{}', NULL, NULL, NULL
+               FROM n WHERE i <= 10002;
+             INSERT INTO log (at, level, target, message, fields, job_id)
+               VALUES (0, 'info', 'small', 'ancient', '{}', 902);",
+        )?)
+    })
+    .await
+    .expect("seeded");
+    let job = run_once(&queue, Prune::new(db.clone(), container.clone()), &()).await;
+    assert_eq!(job.reason, None, "{job:?}");
+    let kept: Vec<(String, String)> = db
+        .read(|connection| {
+            Ok(log::table
+                .select((log::target, log::message))
+                .load(connection)?)
+        })
+        .await
+        .unwrap();
+    for (target, count, oldest) in [
+        ("big", 10_000, "6"),
+        ("small", 3, "1"),
+        ("regtest", 10_000, "4"),
+        ("none", 10_000, "3"),
+    ] {
+        let messages: Vec<u32> = kept
+            .iter()
+            .filter(|(kept, _)| kept == target)
+            .map(|(_, message)| message.parse().expect("a number: the ancient one is gone"))
+            .collect();
+        assert_eq!(messages.len(), count, "{target}");
+        let least = messages.iter().min().map(ToString::to_string);
+        assert_eq!(least.as_deref(), Some(oldest), "{target}: the oldest go");
+    }
+}
+
+/// A round tells its story: one `trigger.fired` per payment queued (under
+/// that payment's job), a `trigger.skipped` with why, each under its
+/// trigger, and one `trigger.round` with the counts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_round_logs_each_trigger_and_its_counts() {
+    use diesel::connection::SimpleConnection as _;
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::usecase::workers::{index::Target, trigger::Round};
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    // A keyed payer and a watched payee, both indexed through block 0, the
+    // confirmed one.
+    db.write(|connection| {
+        Ok(connection.batch_execute(
+            "INSERT INTO wallet (id, chain, network, address, curve, secret) VALUES
+              ('bitcoin.regtest.payer','bitcoin','regtest','payer','secp256k1',x'01'),
+              ('bitcoin.regtest.payee','bitcoin','regtest','payee',NULL,NULL);
+             INSERT INTO wallet_index (id, wallet_id, asset, requested_from, birthday,
+               indexed_at, state) VALUES
+              ('bitcoin.regtest.payer.native','bitcoin.regtest.payer','native',0,0,0,0),
+              ('bitcoin.regtest.payee.native','bitcoin.regtest.payee','native',0,0,0,0);
+             INSERT INTO network_index (chain, network, tip, confirmed)
+               VALUES ('bitcoin','regtest',0,0)
+               ON CONFLICT (chain, network) DO UPDATE SET tip = 0, confirmed = 0;",
+        )?)
+    })
+    .await
+    .expect("seeded");
+    // Pays while the payer is one index or more; waits for five.
+    let trigger = |id: &str, count: &str| {
+        json!({
+            "id": id,
+            "chain": "bitcoin",
+            "network": "regtest",
+            "selector": {"ids": ["bitcoin.regtest.payer.native"]},
+            "check": {"compare": {
+                "of": {"this": {}},
+                "aggregate": "count",
+                "operator": "at_least",
+                "value": {"value": count},
+            }},
+            "action": {"name": "send", "input": {
+                "source": {"this": {}},
+                "asset": "native",
+                "destination": {"select": {"ids": ["bitcoin.regtest.payee.native"]}},
+                "amount": {"value": "0.00000001"},
+            }},
+        })
+    };
+    let body = json!({"triggers": [trigger("pays", "1"), trigger("waits", "5")]});
+    let (status, created) = call(&router, Method::POST, "/v1/triggers", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let target = Target {
+        chain: "bitcoin".into(),
+        network: "regtest".into(),
+    };
+    let actions = Arc::new(crate::usecase::workers::trigger::actions::registry());
+    let worker = Round::new(container.clone(), db.clone(), queue.clone(), actions);
+    let round = run_once(&queue, worker, &target)
+        .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
+        .await;
+
+    let at = "/v1/logs?target=trigger.round,trigger.fired,trigger.skipped";
+    let logs = kept(&router, at, 3).await;
+    let of = |target: &str| {
+        let found = logs.iter().find(|entry| entry["target"] == target);
+        found
+            .unwrap_or_else(|| panic!("a {target}: {logs:?}"))
+            .clone()
+    };
+    let counted = of("trigger.round");
+    assert_eq!(counted["level"], "info", "one fired");
+    assert_eq!(counted["job_id"], i64::try_from(round.id.0).unwrap());
+    assert_eq!(counted["network"], "regtest");
+    for (count, value) in [
+        ("evaluated", "2"),
+        ("fired", "1"),
+        ("skipped", "1"),
+        ("refused", "0"),
+        ("wallets", "2"),
+    ] {
+        assert_eq!(counted["fields"][count], value, "{count}: {counted}");
+    }
+    assert!(counted["fields"]["ms"].is_string(), "{counted}");
+    let (_, sends) = call(&router, Method::GET, "/v1/jobs?kind=broadcast", None).await;
+    let send = sends["jobs"][0]["id"].as_str().expect("the queued send");
+    let fired = of("trigger.fired");
+    assert_eq!(fired["level"], "info");
+    assert_eq!(fired["trigger_id"], "pays");
+    assert_eq!(fired["job_id"].to_string(), send, "the payment's job");
+    assert_eq!(fired["wallet_id"], "bitcoin.regtest.payer");
+    assert_eq!(
+        (&fired["fields"]["asset"], &fired["fields"]["amount"]),
+        (&json!("native"), &json!("1"))
+    );
+    let skipped = of("trigger.skipped");
+    assert_eq!(skipped["level"], "debug");
+    assert_eq!(skipped["trigger_id"], "waits");
+    assert_eq!(skipped["fields"]["reason"], "check did not hold");
+
+    let (_, waits) = call(&router, Method::GET, "/v1/logs?trigger_id=waits", None).await;
+    let waits = waits["logs"].as_array().expect("entries");
+    assert!(!waits.is_empty());
+    assert!(
+        waits.iter().all(|entry| entry["trigger_id"] == "waits"),
+        "{waits:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1834,7 +2126,7 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
         .with_subscriber(dispatch)
         .await;
 
-    let at = format!("/v1/jobs/{}/logs", job.id);
+    let at = format!("/v1/logs?job_id={}", job.id);
     let listed = super::support::until("the job's entries stored", || async {
         let (_, listed) = call(&router, Method::GET, &at, None).await;
         let targets: Vec<String> = listed["logs"]
@@ -1863,8 +2155,34 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
         .find(|entry| entry["target"] == "rpc.http")
         .unwrap();
     assert_eq!(http["fields"]["method"], "sendrawtransaction");
-    let (status, _) = call(&router, Method::GET, "/v1/jobs/999999/logs", None).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(
+        http["fields"]["purpose"], "send.broadcast",
+        "why it was sent"
+    );
+    let sent = listed["logs"].as_array().unwrap().iter();
+    let sent = sent
+        .clone()
+        .find(|entry| entry["target"] == "send.broadcast");
+    let sent = sent.expect("a send.broadcast");
+    let wallet = sent["wallet_id"].as_str().expect("its wallet").to_owned();
+    assert!(wallet.starts_with("bitcoin.regtest."), "{sent}");
+    let transaction = sent["transaction_id"].as_str().expect("its transaction");
+    assert!(transaction.starts_with("bitcoin.regtest."), "{sent}");
+    for (filter, id) in [
+        ("wallet_id", wallet.as_str()),
+        ("transaction_id", transaction),
+    ] {
+        let (_, listed) = call(
+            &router,
+            Method::GET,
+            &format!("/v1/logs?{filter}={id}"),
+            None,
+        )
+        .await;
+        let entries = listed["logs"].as_array().unwrap();
+        assert!(!entries.is_empty(), "{filter}: {listed}");
+        assert!(entries.iter().all(|entry| entry[filter] == id), "{listed}");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1890,29 +2208,52 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
 
     let uri = "/v1/logs/stream?level=warn&target=index.reorg&network=bitcoin/regtest";
     let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
-    let response = router.oneshot(request).await.expect("a response");
+    let response = router.clone().oneshot(request).await.expect("a response");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let uri = "/v1/logs/stream?level=info&only=true&wallet_id=bitcoin.regtest.w1";
+    let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let wallet = router.clone().oneshot(request).await.expect("a response");
+    assert_eq!(wallet.status(), StatusCode::OK);
+    let uri = "/v1/logs/stream?trigger_id=t1";
+    let request = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let trigger = router.oneshot(request).await.expect("a response");
+    assert_eq!(trigger.status(), StatusCode::OK);
     tracing::dispatcher::with_default(&subscriber(&db, feed), || {
         let span = crate::usecase::network_span(&network());
         span.in_scope(|| {
             tracing::info!(target: "index.reorg", "Too mild");
             tracing::warn!(target: "index.step", "Another event");
+            tracing::warn!(target: "index.leg", wallet = "w1", "Too severe");
+            tracing::info!(target: "index.leg", wallet = "w2", "Another wallet");
         });
         tracing::warn!(target: "index.reorg", "No network's");
         span.in_scope(|| tracing::warn!(target: "index.reorg", from = 3, "Kept blocks reorged"));
+        span.in_scope(|| tracing::info!(target: "index.leg", wallet = "w1", "The wallet's"));
+        tracing::info!(target: "trigger.skipped", trigger_id = "t2", "Another trigger");
+        let trigger = tracing::info_span!("trigger", trigger_id = "t1");
+        trigger.in_scope(|| tracing::debug!(target: "trigger.skipped", "The trigger's"));
     });
-    let mut body = response.into_body();
-    let wait = std::time::Duration::from_secs(5);
-    let frame = tokio::time::timeout(wait, body.frame()).await;
-    let frame = frame
-        .expect("an event")
-        .expect("a frame")
-        .expect("its bytes");
-    let event = String::from_utf8_lossy(frame.data_ref().expect("data")).into_owned();
-    let data = event.strip_prefix("data: ");
-    let data = data.unwrap_or_else(|| panic!("a data line: {event}"));
-    let entry: Value = serde_json::from_str(data.trim_end()).expect("an entry");
+    let first = |response: axum::response::Response| async move {
+        let mut body = response.into_body();
+        let wait = std::time::Duration::from_secs(5);
+        let frame = tokio::time::timeout(wait, body.frame()).await;
+        let frame = frame
+            .expect("an event")
+            .expect("a frame")
+            .expect("its bytes");
+        let event = String::from_utf8_lossy(frame.data_ref().expect("data")).into_owned();
+        let data = event.strip_prefix("data: ");
+        let data = data.unwrap_or_else(|| panic!("a data line: {event}"));
+        serde_json::from_str::<Value>(data.trim_end()).expect("an entry")
+    };
+    let its = first(trigger).await;
+    assert_eq!(its["message"], "The trigger's", "{its}");
+    assert_eq!(its["trigger_id"], "t1");
+    let theirs = first(wallet).await;
+    assert_eq!(theirs["message"], "The wallet's", "{theirs}");
+    assert_eq!(theirs["wallet_id"], "bitcoin.regtest.w1");
+    let entry = first(response).await;
     assert_eq!(
         entry["message"], "Kept blocks reorged",
         "the first it reads"

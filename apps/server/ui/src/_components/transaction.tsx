@@ -5,12 +5,13 @@ import { mono } from '@/theme';
 import { resolve, type Action, type Actions } from './actions';
 import { useExplorer } from './explorers';
 import { Hover } from './hover';
+import { openLogs } from './logs/open';
 import { shorten } from './trim';
 
 /**
  * A transaction of `network`: trimmed unless `trim` is false, opening the
  * network's explorer in a new tab unless `link` is false or none is configured.
- * Hovered, it offers Copy and Explorer; `actions` replaces or extends those.
+ * Hovered, it offers Copy, Logs and Explorer; `actions` replaces or extends those.
  */
 export function Transaction({
   value,
@@ -27,7 +28,13 @@ export function Transaction({
 }) {
   const explorer = useExplorer(network);
   const href = explorer?.transaction.replace('{tx}', encodeURIComponent(value));
-  const defaults: Action[] = [{ label: 'Copy', copy: value }];
+  const defaults: Action[] = [
+    { label: 'Copy', copy: value },
+    {
+      label: 'Logs',
+      onClick: () => openLogs({ transaction_id: `${network.chain}.${network.name}.${value}` }),
+    },
+  ];
   if (href) defaults.push({ label: 'Explorer', icon: <OpenInNew />, href });
   const text = trim ? shorten(value) : value;
   const sx = { fontFamily: mono, fontSize: 'inherit', overflowWrap: 'anywhere' } as const;

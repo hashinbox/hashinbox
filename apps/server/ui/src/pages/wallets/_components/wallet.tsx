@@ -27,6 +27,7 @@ import { Address } from '@/_components/address';
 import { Currencies, Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
 import { Money } from '@/_components/money';
+import { openLogs } from '@/_components/logs/open';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import { When } from '@/_components/when';
@@ -280,6 +281,7 @@ export function Wallet({
                 {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
               </Button>
               <Button onClick={() => setTagOpen(true)}>Add tag</Button>
+              <Button onClick={() => openLogs({ wallet_id: wallet.id })}>Logs</Button>
               {assetsOf(wallet).length > 0 && (
                 <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
               )}

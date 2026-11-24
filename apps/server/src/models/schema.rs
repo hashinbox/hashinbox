@@ -255,6 +255,9 @@ diesel::table! {
         chain -> Nullable<Text>,
         network -> Nullable<Text>,
         job_id -> Nullable<BigInt>,
+        wallet_id -> Nullable<Text>,
+        transaction_id -> Nullable<Text>,
+        trigger_id -> Nullable<Text>,
     }
 }
 

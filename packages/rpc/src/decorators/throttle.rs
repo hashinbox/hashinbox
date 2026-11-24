@@ -48,7 +48,8 @@ fn spacing(rps: f64) -> Option<Duration> {
 /// the tokens taken before it have refilled. An idle node's first request
 /// goes at once. It waits, never fails, for the limit. Clones share the
 /// bucket. `None`: no limit. A wait is logged as `rpc.wait` (`calls
-/// wait_ms`), debug.
+/// wait_ms`), debug, and is what [`crate::Traced`] under it reports as the
+/// request's `wait_ms` ([`waited`]).
 ///
 /// [`crate::node`] puts it under [`crate::Split`], so it paces each request
 /// sent, and over [`crate::Http`], so a wait never counts toward a request's
@@ -87,6 +88,17 @@ impl Bucket {
     }
 }
 
+tokio::task_local! {
+    /// How long the request being sent waited for its rate.
+    static WAITED: Duration;
+}
+
+/// How long the request now sent waited in a [`Throttle`] above; zero
+/// under none.
+pub(crate) fn waited() -> Duration {
+    WAITED.try_with(|waited| *waited).unwrap_or_default()
+}
+
 impl<C> Throttle<C> {
     /// `inner`, sent at most `rps` calls a second.
     #[must_use]
@@ -101,38 +113,39 @@ impl<C> Throttle<C> {
         Self { inner, bucket }
     }
 
-    async fn wait(&self, calls: usize) {
+    /// Waits for `calls` tokens; how long.
+    async fn wait(&self, calls: usize) -> Duration {
         let Some(bucket) = &self.bucket else {
-            return;
+            return Duration::ZERO;
         };
         let waited = bucket.take(calls).await;
-        if waited.is_zero() {
-            return;
+        if !waited.is_zero() {
+            let wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
+            tracing::debug!(target: "rpc.wait", calls, wait_ms, "RPC request waited for its rate");
         }
-        let wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
-        tracing::debug!(target: "rpc.wait", calls, wait_ms, "RPC request waited for its rate");
+        waited
     }
 }
 
 impl<C: Client> Client for Throttle<C> {
     fn request<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<RawJson, Error>> {
         Box::pin(async move {
-            self.wait(1).await;
-            self.inner.request(request).await
+            let waited = self.wait(1).await;
+            WAITED.scope(waited, self.inner.request(request)).await
         })
     }
 
     fn batch<'a>(&'a self, batch: Batch) -> BoxFuture<'a, Result<Vec<Answer>, Error>> {
         Box::pin(async move {
-            self.wait(batch.len()).await;
-            self.inner.batch(batch).await
+            let waited = self.wait(batch.len()).await;
+            WAITED.scope(waited, self.inner.batch(batch)).await
         })
     }
 
     fn broadcast<'a>(&'a self, request: Request) -> BoxFuture<'a, Result<(), Error>> {
         Box::pin(async move {
-            self.wait(1).await;
-            self.inner.broadcast(request).await
+            let waited = self.wait(1).await;
+            WAITED.scope(waited, self.inner.broadcast(request)).await
         })
     }
 

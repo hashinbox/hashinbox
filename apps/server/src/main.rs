@@ -102,8 +102,11 @@ async fn main() -> Result<(), AnyError> {
             actions.clone(),
         ))
         .run();
+    let networks = container.networks().len();
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    let bind = config.bind.to_string();
+    tracing::info!(target: "app.start", networks, bind, "Server started");
     // Handlers in flight drain before `serve` returns; jobs left running
     // resume on the next start.
     let served = axum::serve(listener, router)
@@ -112,5 +115,6 @@ async fn main() -> Result<(), AnyError> {
         })
         .await;
     jobs.stop().await;
+    tracing::info!(target: "app.stop", "Server stopped");
     Ok(served?)
 }

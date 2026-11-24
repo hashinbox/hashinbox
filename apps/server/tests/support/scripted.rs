@@ -176,7 +176,7 @@ impl base::ServiceFactory for Scripted {
             indexer: Arc::new(indexer),
             wallets: WalletFactoryBroadcaster {
                 network: network(),
-                factory: Arc::new(self.script.keys.clone()),
+                factory: Arc::new(Priced(self.script.keys.clone())),
                 broadcaster: if self.script.relay {
                     Arc::new(Relayed {
                         client: client.clone(),
@@ -204,6 +204,42 @@ impl base::ServiceFactory for Scripted {
             tracking: self.script.tracking,
             rates: Arc::new(Unpriced),
         })
+    }
+}
+
+/// The script's keys, every send priced one atomic unit (a round reads
+/// the estimator).
+struct Priced(Keys);
+
+impl base::WalletFactory for Priced {
+    fn generate(&self) -> Future<'_, anyhow::Result<crypto::SecretBytes>> {
+        self.0.generate()
+    }
+
+    fn from_pk(
+        &self,
+        secret: crypto::SecretBytes,
+    ) -> Future<'_, anyhow::Result<Arc<dyn base::Wallet>>> {
+        self.0.from_pk(secret)
+    }
+
+    fn from_pk_text(&self, text: &str) -> Future<'_, anyhow::Result<Arc<dyn base::Wallet>>> {
+        self.0.from_pk_text(text)
+    }
+
+    fn parse_address(&self, text: &str) -> anyhow::Result<base::Address> {
+        self.0.parse_address(text)
+    }
+
+    fn transaction(&self, asset: &Asset) -> Result<Box<dyn base::Builder>, TransactionError> {
+        self.0.transaction(asset)
+    }
+
+    fn fees(&self) -> Arc<dyn base::FeeEstimator> {
+        Arc::new(base::testing::Fees::new(
+            network(),
+            "1".parse().expect("a decimal"),
+        ))
     }
 }
 

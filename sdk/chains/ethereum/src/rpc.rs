@@ -475,8 +475,9 @@ impl Client {
                 continue;
             }
             // Lower halves go first, so every range left is above this one.
-            if let Err(::rpc::Error::Remote(failure)) = &reply
-                && is_ahead(failure)
+            // The node is not at the block asked yet (`rpc::Failure::is_not_ready`).
+            if let Err(error) = &reply
+                && error.is_not_ready()
             {
                 return Ok((transfers, Some(from)));
             }
@@ -665,12 +666,6 @@ fn collect(
         collected.push(receipts);
     }
     Ok(Some(collected))
-}
-
-/// Whether `failure` says the block asked for is past the node's head, as
-/// reth and Erigon word it: the node has not reached it yet.
-fn is_ahead(failure: &Failure) -> bool {
-    failure.message.contains("beyond current head")
 }
 
 /// [`NotServed`] when `reply` says the node keeps no history for block

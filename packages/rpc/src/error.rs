@@ -96,6 +96,13 @@ impl Error {
         }
     }
 
+    /// Whether the node is not at what was asked yet: an error object
+    /// [`Failure::is_not_ready`] says is one. No failure: the node answered.
+    #[must_use]
+    pub fn is_not_ready(&self) -> bool {
+        matches!(self, Self::Remote(failure) if failure.is_not_ready())
+    }
+
     /// Whether the work was refused before sending, so no node was asked.
     #[must_use]
     pub const fn is_local(&self) -> bool {
@@ -128,15 +135,6 @@ impl Error {
             ErrorKind::InvalidResponse => "invalid_response",
         };
         name.to_owned()
-    }
-
-    /// What a log shows: the kind, or the node's code and truncated message;
-    /// never the transport's own message.
-    pub(crate) fn summary(&self) -> String {
-        match self {
-            Self::Transport { kind, .. } => kind.to_string(),
-            Self::Remote(failure) => failure.to_string(),
-        }
     }
 
     /// This error as one nonzero number, for lock-free counters: the kind's
@@ -267,6 +265,14 @@ impl Failure {
             -32_003 => message.contains("rate limit") || message.contains("request limit"),
             _ => false,
         }
+    }
+
+    /// Whether the node has not reached the block asked for yet: `-32602`
+    /// saying the range "extends beyond current head" (reth, Erigon). It
+    /// answered; the block comes later.
+    #[must_use]
+    pub fn is_not_ready(&self) -> bool {
+        self.code == -32_602 && self.message.contains("beyond current head")
     }
 
     /// Whether the node refused because it does not serve the method, so

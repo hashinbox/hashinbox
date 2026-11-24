@@ -727,15 +727,22 @@ impl Broadcast {
             ..progress
         };
         let txid = ended.txid.clone();
+        let versions = ended.replaced.len() + 1;
         let written = self.record(task, ended, move |connection| delete(connection, &ids));
         match written.await {
             Ok(Ok(())) => {
                 let name = serde_json::to_value(outcome).unwrap_or_default();
-                let outcome = name.as_str().unwrap_or("-");
-                if outcome == "final" {
-                    tracing::info!(target: "send.end", txid, outcome, "Payment ended");
-                } else {
-                    tracing::warn!(target: "send.end", txid, outcome, "Payment ended");
+                let shown = name.as_str().unwrap_or("-");
+                match outcome {
+                    Outcome::Final => {
+                        tracing::info!(target: "send.end", txid, outcome = shown, versions, "Payment ended");
+                    }
+                    Outcome::Refused | Outcome::Cancelled => {
+                        tracing::warn!(target: "send.end", txid, outcome = shown, versions, "Payment ended");
+                    }
+                    _ => {
+                        tracing::error!(target: "send.end", txid, outcome = shown, versions, "Payment failed for good");
+                    }
                 }
                 ack
             }
@@ -764,11 +771,16 @@ impl Worker for Broadcast {
         ])
     }
 
-    /// One run, in its network's span (inside the executor's job span):
-    /// see the module.
+    /// One run, in its network's span (inside the executor's job span) and
+    /// its payment's (`wallet`: its sender): see the module.
     async fn run(&self, task: Context<'_, SendIntent, Progress>) -> Ack {
         let span = crate::usecase::network_span(&task.input().sender().network);
-        self.payment(task).instrument(span).await
+        let payment =
+            span.in_scope(|| tracing::info_span!("payment", wallet = %task.input().address));
+        self.payment(task)
+            .instrument(payment)
+            .instrument(span)
+            .await
     }
 }
 
@@ -788,26 +800,31 @@ impl Broadcast {
         // 1. Build: sign, record and watch.
         let mut progress = match task.state().cloned() {
             Some(progress) => progress,
-            None => match self.build(&mut task).await {
+            None => match self
+                .build(&mut task)
+                .instrument(tracing::info_span!("send.sign"))
+                .await
+            {
                 Ok(progress) => {
                     let txid = &progress.txid;
                     tracing::info!(target: "send.sign", txid, "Payment signed");
                     progress
                 }
-                Err(Stop::Retry(why)) => {
-                    tracing::warn!(target: "send.sign", why, "Payment not signed; retried");
-                    return Ack::Retry(why);
+                Err(Stop::Retry(reason)) => {
+                    tracing::warn!(target: "send.sign", reason, "Payment not signed; retried");
+                    return Ack::Retry(reason);
                 }
-                Err(Stop::Fail(why)) => {
-                    tracing::warn!(target: "send.sign", why, "Payment not signed; failed");
-                    return Ack::Fail(why);
+                Err(Stop::Fail(reason)) => {
+                    tracing::error!(target: "send.sign", reason, "Payment not signed; failed for good");
+                    return Ack::Fail(reason);
                 }
             },
         };
 
         // 2. Send, once.
         if !progress.sent {
-            let sent = self.send(&network, &progress.txid).await;
+            let span = tracing::info_span!("send.broadcast", txid = %progress.txid);
+            let sent = self.send(&network, &progress.txid).instrument(span).await;
             let outcome = match &sent {
                 Ok(Sent::Accepted) => "accepted",
                 Ok(Sent::Unsure(_)) => "unsure",
@@ -844,7 +861,9 @@ impl Broadcast {
         }
 
         // 3. Watch it resolve: any version sent.
-        let (outcome, ack) = match self.watch(&network, &progress, tracking).await {
+        let watching = self.watch(&network, &progress, tracking);
+        let watched = watching.instrument(tracing::info_span!("send.watch", txid = %progress.txid));
+        let (outcome, ack) = match watched.await {
             Ok(Watched::Landed(txid)) if progress.cancels.contains(&txid) => {
                 (Outcome::Cancelled, Ack::Fail("cancelled".into()))
             }
@@ -890,20 +909,10 @@ impl Broadcast {
                 };
                 let now = task.state().unwrap_or(&progress);
                 let txid = now.txid.clone();
-                let cancel = now.cancels.contains(&txid);
-                match (cancel, matches!(bumped, Ok(Bumped::Sent(_)))) {
-                    (false, true) => {
-                        tracing::info!(target: "send.bump", txid, outcome, "Payment bumped")
-                    }
-                    (false, false) => {
-                        tracing::warn!(target: "send.bump", txid, outcome, "Payment bumped")
-                    }
-                    (true, true) => {
-                        tracing::info!(target: "send.cancel", txid, outcome, "Payment cancelled")
-                    }
-                    (true, false) => {
-                        tracing::warn!(target: "send.cancel", txid, outcome, "Payment cancelled")
-                    }
+                if now.cancels.contains(&txid) {
+                    tracing::warn!(target: "send.cancel", txid, outcome, "Payment cancelled");
+                } else {
+                    tracing::warn!(target: "send.bump", txid, outcome, "Payment bumped");
                 }
                 let why = match bumped {
                     Ok(Bumped::Sent(why)) => why,

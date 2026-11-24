@@ -3916,3 +3916,69 @@ async fn a_transaction_index_behind_the_depth_line_is_given_up_and_its_payment_f
     assert_eq!(s.unwrap()[0].progress.reason.as_deref(), Some("jump"));
     assert_eq!(rows(&directory, "s"), (vec![], vec![]));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_kept_leg_and_each_settle_are_logged_at_their_levels() {
+    use tracing::{Instrument as _, instrument::WithSubscriber as _};
+
+    let (storage, db, _directory) = seeded().await;
+    let network = network();
+    let alice = address(&network, "alice");
+    watch(&storage, &alice, 0).await;
+    let feed = crate::usecase::logs::feed();
+    let mut heard = feed.subscribe();
+    let dispatch = super::routes::subscriber(&db, feed);
+    let paid = payment(&network, "a", "alice", 7, None);
+    let blocks = run(
+        &network,
+        vec![
+            block(&network, 0, 0, vec![]),
+            block(&network, 1, 0, vec![paid]),
+        ],
+    );
+    async {
+        let span = crate::usecase::network_span(&network);
+        let kept = BlockStore::insert(&storage, &blocks).instrument(span.clone());
+        let kept = kept.await.unwrap();
+        assert_eq!((kept.matched, kept.legs), (1, 1));
+        let index = WalletIndexStore::find_all(&storage, &network)
+            .await
+            .unwrap();
+        // The chain holds what the legs say, then 3 more: a gap.
+        for (position, amount) in [(2, 7_u64), (3, 10)] {
+            let held = Holding {
+                position,
+                amount: Decimal::from(amount),
+            };
+            let settled = WalletIndexStore::settle(&storage, &index[0], &held);
+            assert!(settled.instrument(span.clone()).await.unwrap());
+        }
+    }
+    .with_subscriber(dispatch)
+    .await;
+
+    let mut logs = Vec::new();
+    while let Ok(log) = heard.try_recv() {
+        logs.push(log);
+    }
+    let of = |target: &'static str| logs.iter().filter(move |log| log.target == target);
+    let leg = of("index.leg").next().expect("an index.leg");
+    assert_eq!(leg.level, "info");
+    let fields = &leg.fields.0;
+    let shown = ["wallet", "kind", "amount", "txid", "position", "total"]
+        .map(|key| fields.get(key).map_or("", String::as_str));
+    assert_eq!(shown, ["alice", "received", "7", "a", "1", "7"]);
+    assert_eq!(leg.wallet_id.as_deref(), Some("bitcoin.regtest.alice"));
+    assert_eq!(leg.transaction_id.as_deref(), Some("bitcoin.regtest.a"));
+    let blocks: Vec<_> = of("index.block")
+        .map(|log| (log.level.as_str(), log.fields.0["matched"].as_str()))
+        .collect();
+    assert_eq!(blocks, [("debug", "0"), ("info", "1")]);
+    let settles: Vec<_> = of("index.settle")
+        .map(|log| (log.level.as_str(), log.fields.0["adjustment"].as_str()))
+        .collect();
+    assert_eq!(settles, [("debug", "0"), ("warn", "3")], "{logs:?}");
+    let gap = of("index.settle").next_back().unwrap();
+    assert!(gap.fields.0.contains_key("why"), "{gap:?}");
+    assert_eq!(gap.wallet_id.as_deref(), Some("bitcoin.regtest.alice"));
+}

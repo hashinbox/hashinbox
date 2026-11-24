@@ -113,27 +113,54 @@ impl WalletIndexStore for Stores {
     /// One write, no block kept: the adjustment at `S` (already kept:
     /// `false`; none when it would be zero), the index continuing from
     /// `S + 1`. Its pending sends stay: each one's transaction index settles
-    /// itself.
+    /// itself. Once written, logged as `index.settle` (`wallet asset
+    /// position stored_total chain_balance adjustment`): debug when nothing
+    /// changed, warn with `why` when the balance was adjusted.
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
         holding: &'a Holding,
     ) -> Future<'a, anyhow::Result<bool>> {
-        let (index, holding) = (index.clone(), holding.clone());
-        Box::pin(self.db.write(move |connection| {
-            let id = WalletIndexId::of(&index.address, &index.asset)?;
-            let position = int(holding.position)?;
-            let amount = &holding.amount - &leg::db::find_total(connection, &id, position)?;
-            if amount != base::Decimal::zero() {
-                let adjustment = Leg::adjustment(position, &id, 0, &amount)?;
-                if leg::db::is_kept(connection, &adjustment.id)? {
-                    return Ok(false);
+        let (written, held) = (index.clone(), holding.clone());
+        Box::pin(async move {
+            let settled = self.db.write(move |connection| {
+                let id = WalletIndexId::of(&written.address, &written.asset)?;
+                let position = int(held.position)?;
+                let stored = leg::db::find_total(connection, &id, position)?;
+                let amount = &held.amount - &stored;
+                if amount != base::Decimal::zero() {
+                    let adjustment = Leg::adjustment(position, &id, 0, &amount)?;
+                    if leg::db::is_kept(connection, &adjustment.id)? {
+                        return Ok(None);
+                    }
+                    leg::db::append(connection, &mut Legs::from(vec![adjustment]), position)?;
                 }
-                leg::db::append(connection, &mut Legs::from(vec![adjustment]), position)?;
+                wallet_index::db::settle(connection, &id, position)?;
+                Ok(Some((stored, amount)))
+            });
+            let Some((stored_total, adjustment)) = settled.await? else {
+                return Ok(false);
+            };
+            let (wallet, asset) = (index.address.value.as_str(), index.asset.id.as_str());
+            let (position, chain_balance) = (holding.position, &holding.amount);
+            if adjustment == base::Decimal::zero() {
+                tracing::debug!(
+                    target: "index.settle",
+                    wallet, asset, position,
+                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment,
+                    "Wallet index settled: no change"
+                );
+            } else {
+                let why = "the chain's balance is not the kept legs' total: the history has a gap";
+                tracing::warn!(
+                    target: "index.settle",
+                    wallet, asset, position,
+                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment, why,
+                    "Wallet index settled: balance adjusted"
+                );
             }
-            wallet_index::db::settle(connection, &id, position)?;
             Ok(true)
-        }))
+        })
     }
 
     /// One write: the coins the index still shows unspent archived and

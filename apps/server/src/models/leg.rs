@@ -352,6 +352,23 @@ collection! {
     Legs(Leg)
 }
 
+impl Leg {
+    /// Its kind's name: `received`, `spent`, `burned`, `minted`, `fee`,
+    /// `reward` or `adjustment`.
+    pub(crate) const fn kind_name(&self) -> &'static str {
+        match self.kind {
+            0 => "received",
+            1 => "spent",
+            2 => "burned",
+            3 => "minted",
+            4 => "fee",
+            REWARD => "reward",
+            ADJUSTMENT => "adjustment",
+            _ => "unknown",
+        }
+    }
+}
+
 impl Legs {
     /// The wallet indexes (ids) they are of.
     pub(crate) fn indexes(&self) -> BTreeSet<String> {

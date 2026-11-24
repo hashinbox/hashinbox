@@ -10,7 +10,7 @@ use crypto::SecretBytes;
 
 use crate::{
     Address, Addressed, BlockHeader, BlockStore, Blocks, Confirmed, Future, Holding, Holdings,
-    IndexState, Indexed, InputStore, Inputs, IntoIndex, Leg, Network, Storage, Transaction,
+    IndexState, Indexed, InputStore, Inputs, IntoIndex, Kept, Leg, Network, Storage, Transaction,
     TransactionIndex, TransactionIndexStore, TransactionState, Wallet, WalletFactories,
     WalletIndex, WalletIndexStore, WalletStore,
 };
@@ -135,7 +135,7 @@ fn ready<'a, T: Send + 'a>(value: T) -> Future<'a, Result<T>> {
 }
 
 impl BlockStore for Memory {
-    fn insert<'a>(&'a self, run: &'a Blocks) -> Future<'a, Result<()>> {
+    fn insert<'a>(&'a self, run: &'a Blocks) -> Future<'a, Result<Kept>> {
         let mut state = self.state();
         let state = &mut *state;
         for block in run.iter() {
@@ -169,7 +169,7 @@ impl BlockStore for Memory {
             let kept = state.blocks.entry(network.clone()).or_default();
             kept.insert(at.position, at.clone());
         }
-        ready(())
+        ready(Kept::default())
     }
 
     fn find_last<'a>(&'a self, network: &'a Network) -> Future<'a, Result<Option<BlockHeader>>> {

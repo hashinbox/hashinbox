@@ -586,11 +586,13 @@ pub trait Store: Send + Sync {
     /// to no address and is a no-op, so a retry after an uncertain failure is
     /// harmless.
     ///
+    /// What it kept for the indexes is the answer ([`Kept`]).
+    ///
     /// # Errors
     ///
     /// When a block conflicts (nothing is written), or the store cannot
     /// write.
-    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>>;
+    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<Kept>>;
 
     /// The last kept block of `network`; `None` before the first, or when
     /// every block is taken back.
@@ -620,6 +622,15 @@ pub trait Store: Send + Sync {
     ///
     /// When the store cannot write.
     fn delete<'a>(&'a self, network: &'a Network, from: u64) -> Future<'a, anyhow::Result<()>>;
+}
+
+/// What one [`Store::insert`] kept for the indexes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// Transactions kept: with a leg of an index, or found by one.
+    pub matched: u64,
+    /// Legs kept for the indexes.
+    pub legs: u64,
 }
 
 /// Tells listeners about each run of blocks a [`Store`] kept.
@@ -656,16 +667,16 @@ impl<S: Store> Notifying<S> {
 }
 
 impl<S: Store> Store for Notifying<S> {
-    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<()>> {
+    fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<Kept>> {
         Box::pin(async move {
-            self.inner.insert(blocks).await?;
+            let kept = self.inner.insert(blocks).await?;
             let listeners = self
                 .listeners
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
             listeners.iter().for_each(|listener| listener(blocks));
-            Ok(())
+            Ok(kept)
         })
     }
 
