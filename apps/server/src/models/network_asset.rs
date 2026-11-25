@@ -47,3 +47,82 @@ impl From<&NetworkAsset> for base::AssetConfig {
         }
     }
 }
+
+/// The `network_asset` table's own statements (its rows are read with their
+/// network, `network::db`).
+pub(crate) mod db {
+    use diesel::{prelude::*, sqlite::Sqlite};
+
+    use super::{NetworkAsset, NetworkAssetKind};
+    use crate::models::schema::network_asset;
+
+    /// One `network_asset` row but its network.
+    #[derive(Queryable, Selectable)]
+    #[diesel(table_name = network_asset, check_for_backend(Sqlite))]
+    struct Row {
+        asset: String,
+        kind: String,
+        contract: Option<String>,
+        ticker: String,
+        decimals: i64,
+        display_decimals: Option<i64>,
+    }
+
+    /// One asset of each ticker (the first by network), sorted by ticker:
+    /// what the market job prices.
+    ///
+    /// # Errors
+    ///
+    /// When the read fails, or a row does not decode.
+    pub(crate) fn find_one_per_ticker(
+        connection: &mut SqliteConnection,
+    ) -> anyhow::Result<Vec<NetworkAsset>> {
+        use network_asset::dsl;
+        let rows: Vec<Row> = dsl::network_asset
+            .select(Row::as_select())
+            .order((dsl::ticker, dsl::chain, dsl::network, dsl::asset))
+            .load(connection)?;
+        let mut assets = Vec::with_capacity(rows.len());
+        for row in rows {
+            if assets
+                .last()
+                .is_some_and(|last: &NetworkAsset| last.ticker == row.ticker)
+            {
+                continue;
+            }
+            assets.push(decoded(row)?);
+        }
+        Ok(assets)
+    }
+
+    /// Every asset of network `chain`/`network`.
+    ///
+    /// # Errors
+    ///
+    /// When the read fails, or a row does not decode.
+    pub(crate) fn find_of_network(
+        connection: &mut SqliteConnection,
+        chain: &str,
+        network: &str,
+    ) -> anyhow::Result<Vec<NetworkAsset>> {
+        use network_asset::dsl;
+        let rows: Vec<Row> = dsl::network_asset
+            .filter(dsl::chain.eq(chain))
+            .filter(dsl::network.eq(network))
+            .select(Row::as_select())
+            .load(connection)?;
+        rows.into_iter().map(decoded).collect()
+    }
+
+    /// `row` decoded.
+    fn decoded(row: Row) -> anyhow::Result<NetworkAsset> {
+        Ok(NetworkAsset {
+            asset: row.asset,
+            kind: serde_json::from_value::<NetworkAssetKind>(row.kind.into())?,
+            contract: row.contract,
+            ticker: row.ticker,
+            decimals: u32::try_from(row.decimals)?,
+            display_decimals: row.display_decimals.map(u32::try_from).transpose()?,
+        })
+    }
+}

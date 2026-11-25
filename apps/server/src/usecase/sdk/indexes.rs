@@ -113,9 +113,9 @@ impl WalletIndexStore for Stores {
     /// One write, no block kept: the adjustment at `S` (already kept:
     /// `false`; none when it would be zero), the index continuing from
     /// `S + 1`. Its pending sends stay: each one's transaction index settles
-    /// itself. Once written, logged as `index.settle` (`wallet asset
-    /// position stored_total chain_balance adjustment`): debug when nothing
-    /// changed, warn with `why` when the balance was adjusted.
+    /// itself. Once written, logged (`wallet asset position stored_total
+    /// chain_balance adjustment`) as `index.settle.unchanged` (debug) or,
+    /// when the balance was adjusted, `index.settle.adjusted` (warn).
     fn settle<'a>(
         &'a self,
         index: &'a WalletIndex,
@@ -145,18 +145,15 @@ impl WalletIndexStore for Stores {
             let (position, chain_balance) = (holding.position, &holding.amount);
             if adjustment == base::Decimal::zero() {
                 tracing::debug!(
-                    target: "index.settle",
+                    target: crate::events::INDEX_SETTLE_UNCHANGED,
                     wallet, asset, position,
-                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment,
-                    "Wallet index settled: no change"
+                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment
                 );
             } else {
-                let why = "the chain's balance is not the kept legs' total: the history has a gap";
                 tracing::warn!(
-                    target: "index.settle",
+                    target: crate::events::INDEX_SETTLE_ADJUSTED,
                     wallet, asset, position,
-                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment, why,
-                    "Wallet index settled: balance adjusted"
+                    stored_total = %stored_total, chain_balance = %chain_balance, adjustment = %adjustment
                 );
             }
             Ok(true)

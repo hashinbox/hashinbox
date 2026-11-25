@@ -1,4 +1,4 @@
-//! [`Traced`]: every HTTP request a node is sent, as one `rpc.http` event,
+//! [`Traced`]: every HTTP request a node is sent, as one `rpc.http.*` event,
 //! and `rpc.slow` while one is pending.
 
 use std::{future::Future, time::Duration};
@@ -9,7 +9,7 @@ use tracing::Instrument as _;
 use super::{tally::Tally, throttle::waited};
 use crate::{
     Answer, Batch, BoxFuture, Client, Endpoint, Error, ErrorKind, MakeSpan, Outcome, RawJson,
-    Request,
+    Request, events,
 };
 
 /// When a pending request is first logged as slow.
@@ -18,12 +18,13 @@ const SLOW: Duration = Duration::from_secs(5);
 /// How often a request still pending after that is logged again.
 const SLOW_AGAIN: Duration = Duration::from_secs(15);
 
-/// `C`, each request it sends logged as `rpc.http` (`method batch ms wait_ms
-/// status rpc_errors error`) in its own context (`span`, e.g. the node's
-/// network and id): debug when it succeeded or the node is not at the block
-/// asked yet ([`Error::is_not_ready`]), error when the node answered HTTP
-/// 5xx, warn when anything else failed, an error object inside a 200 batch
-/// too. `ms` is its time on the wire,
+/// `C`, each request it sends logged (`method batch ms wait_ms status rpc_errors
+/// error`) in its own context (`span`, e.g. the node's network and id):
+/// `rpc.http.answered` (debug) when it succeeded, `rpc.http.not_yet` (debug)
+/// when the node is not at the block asked yet ([`Error::is_not_ready`]),
+/// `rpc.http.broken` (error) when the node answered HTTP 5xx,
+/// `rpc.http.failed` (warn) when anything else failed, an error object
+/// inside a 200 batch too. `ms` is its time on the wire,
 /// `wait_ms` its time in a [`crate::Throttle`] above before it was sent; both
 /// go into the [`Tally`] kept, if any. A request still pending after 5 s is
 /// logged as `rpc.slow` (`method waited_ms`), warn, then every 15 s. The
@@ -98,27 +99,23 @@ impl<C> Traced<C> {
         if server_error {
             // The node itself broke (HTTP 5xx).
             tracing::error!(
-                target: "rpc.http",
-                method, batch, ms, wait_ms, status, rpc_errors, error,
-                "RPC request failed"
+                target: events::RPC_HTTP_BROKEN,
+                method, batch, ms, wait_ms, status, rpc_errors, error
             );
         } else if errors.iter().any(|error| !error.is_not_ready()) {
             tracing::warn!(
-                target: "rpc.http",
-                method, batch, ms, wait_ms, status, rpc_errors, error,
-                "RPC request failed"
+                target: events::RPC_HTTP_FAILED,
+                method, batch, ms, wait_ms, status, rpc_errors, error
             );
         } else if errors.is_empty() {
             tracing::debug!(
-                target: "rpc.http",
-                method, batch, ms, wait_ms, status, rpc_errors, error,
-                "RPC request answered"
+                target: events::RPC_HTTP_ANSWERED,
+                method, batch, ms, wait_ms, status, rpc_errors, error
             );
         } else {
             tracing::debug!(
-                target: "rpc.http",
-                method, batch, ms, wait_ms, status, rpc_errors, error,
-                "RPC request answered: the node is not there yet"
+                target: events::RPC_HTTP_NOT_YET,
+                method, batch, ms, wait_ms, status, rpc_errors, error
             );
         }
         outcome
@@ -134,7 +131,7 @@ impl<C> Traced<C> {
                 outcome = &mut sent => return outcome,
                 () = tokio::time::sleep_until(due) => {
                     let waited_ms = millis(started.elapsed());
-                    tracing::warn!(target: "rpc.slow", method, waited_ms, "RPC request still pending");
+                    tracing::warn!(target: events::RPC_SLOW, method, waited_ms);
                     due += self.slow_again;
                 }
             }
@@ -204,7 +201,7 @@ mod tests {
 
     use super::Traced;
     use crate::{
-        Answer, Batch, BoxFuture, Client, Error, RawJson, Request,
+        Answer, Batch, BoxFuture, Client, Error, RawJson, Request, events,
         testing::{Reply, Script},
     };
 
@@ -278,7 +275,9 @@ mod tests {
         let ahead = traced.request(Request::new("eth_getLogs", json!([])));
         assert!(ahead.await.unwrap_err().is_not_ready());
         let heard = heard.0.lock().unwrap().clone();
-        let slow = heard.iter().filter(|(target, _)| target == "rpc.slow");
+        let slow = heard
+            .iter()
+            .filter(|(target, _)| target == events::RPC_SLOW);
         assert!(slow.clone().count() >= 2, "{heard:?}");
         assert!(
             slow.clone()
@@ -286,12 +285,11 @@ mod tests {
         );
         let http: Vec<_> = heard
             .iter()
-            .filter(|(target, _)| target == "rpc.http")
+            .filter(|(target, _)| target.starts_with("rpc.http."))
+            .map(|(target, level)| (target.as_str(), *level))
             .collect();
-        assert_eq!(http.len(), 2, "{heard:?}");
-        assert!(
-            http.iter()
-                .all(|(_, level)| *level == tracing::Level::DEBUG)
-        );
+        let debug = tracing::Level::DEBUG;
+        let codes = [events::RPC_HTTP_ANSWERED, events::RPC_HTTP_NOT_YET];
+        assert_eq!(http, codes.map(|code| (code, debug)), "{heard:?}");
     }
 }

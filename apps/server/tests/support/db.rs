@@ -32,5 +32,5 @@ pub(crate) async fn seeded() -> (Stores, Db, tempfile::TempDir) {
     })
     .await
     .expect("the scripted network is seeded");
-    (Stores::new(db.clone()), db, directory)
+    (Stores::new(db.clone(), Default::default()), db, directory)
 }

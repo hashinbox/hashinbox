@@ -1,6 +1,5 @@
 import WorkHistory from '@mui/icons-material/WorkHistory';
 import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -18,7 +17,7 @@ import { shorten } from '@/_components/trim';
 import { When } from '@/_components/when';
 import { mono } from '@/theme';
 import { Split } from '@/_components/split';
-import { openLogs } from '@/_components/logs/open';
+import { LogsButton } from '@/_components/logs/button';
 import { valueOf, type Tag } from '@/_components/tag';
 import { Tags } from '@/_components/tags';
 import { segments } from '@/route';
@@ -258,9 +257,7 @@ function Detail({ job }: { job: Job }) {
         <Typography variant="h4" component="h2" sx={{ flexGrow: 1 }}>
           {labelOf(job.kind)}
         </Typography>
-        <Button size="small" onClick={() => openLogs({ job_id: Number(job.id) })}>
-          Logs
-        </Button>
+        <LogsButton filter={{ job_id: Number(job.id) }} />
       </Stack>
       <Box
         component="dl"

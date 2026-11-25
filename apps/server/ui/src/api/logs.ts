@@ -4,6 +4,9 @@ import { call, client, events, type StreamEvent } from '@/api/client';
 /** A filter as query text: `level`, `target`, `network`, `job_id`, `before`, `after`… */
 type Query = Record<string, string>;
 
+/** The message templates, read once a session (again after a failed read). */
+let messages: Promise<Record<string, string>> | undefined;
+
 export const logSource = {
   read: (query: Query, cursor: string | undefined) =>
     call(
@@ -14,4 +17,12 @@ export const logSource = {
   listen: (query: Query, onEvent: (event: StreamEvent) => void, signal: AbortSignal) =>
     events(`/v1/logs/stream?${new URLSearchParams(query).toString()}`, onEvent, signal),
   targets: () => call(client.GET('/v1/logs/targets')).then((list) => list.targets),
+  messages: () =>
+    (messages ??= call(client.GET('/v1/logs/messages')).then(
+      (list) => list.messages,
+      (error: unknown) => {
+        messages = undefined;
+        throw error;
+      },
+    )),
 };

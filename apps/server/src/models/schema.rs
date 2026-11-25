@@ -52,6 +52,9 @@ diesel::table! {
         total_received -> Nullable<Text>,
         total_sent -> Nullable<Text>,
         archived_at -> Nullable<BigInt>,
+        amount_usd -> Nullable<Text>,
+        total_received_usd -> Nullable<Text>,
+        total_sent_usd -> Nullable<Text>,
     }
 }
 
@@ -250,7 +253,7 @@ diesel::table! {
         at -> BigInt,
         level -> Text,
         target -> Text,
-        message -> Text,
+        message -> Nullable<Text>,
         fields -> Text,
         chain -> Nullable<Text>,
         network -> Nullable<Text>,
@@ -258,6 +261,7 @@ diesel::table! {
         wallet_id -> Nullable<Text>,
         transaction_id -> Nullable<Text>,
         trigger_id -> Nullable<Text>,
+        market -> Nullable<Text>,
     }
 }
 
@@ -302,6 +306,27 @@ diesel::table! {
         started_at -> BigInt,
         jobs -> Text,
         stats -> Text,
+    }
+}
+
+diesel::table! {
+    market (name) {
+        name -> Text,
+        feed -> Bool,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    market_candle_1h (market, asset, start) {
+        market -> Text,
+        asset -> Text,
+        start -> BigInt,
+        open -> Text,
+        high -> Text,
+        low -> Text,
+        close -> Text,
+        updated_at -> BigInt,
     }
 }
 

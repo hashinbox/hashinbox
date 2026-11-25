@@ -48,7 +48,7 @@ impl<C> Counter<C> {
                 .await;
             if let Err(error) = written {
                 let error = format!("{error:#}");
-                tracing::error!(target: "endpoint.counted", node = id, error, "RPC node call not counted");
+                tracing::error!(target: crate::events::ENDPOINT_UNCOUNTED, node = id, error);
             }
         };
         tokio::spawn(count.instrument(tracing::Span::current()));

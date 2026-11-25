@@ -70,7 +70,10 @@ impl App {
     ) -> Self {
         let (db, directory) = db::fresh().await;
         clear(&db).await;
-        let container = Container::new(usecase::sdk::Stores::storage(db.clone()));
+        let container = Container::new(usecase::sdk::Stores::storage(
+            db.clone(),
+            Default::default(),
+        ));
         for (network, nodes) in networks {
             let urls: Vec<String> = (0..nodes.len())
                 .map(|node| format!("http://{}-{node}.invalid/", network.network.name))
@@ -85,6 +88,7 @@ impl App {
             actions: Arc::new(usecase::workers::trigger::actions::registry()),
             logs: crate::usecase::logs::feed(),
             db: db.clone(),
+            candles: Default::default(),
         });
         let (container, queue, actions) = (&state.container, &state.queue, &state.actions);
         let jobs = Executor::new(queue.clone(), TICK)

@@ -27,7 +27,7 @@ import { Address } from '@/_components/address';
 import { Currencies, Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
 import { Money } from '@/_components/money';
-import { openLogs } from '@/_components/logs/open';
+import { LogsButton } from '@/_components/logs/button';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import { When } from '@/_components/when';
@@ -35,6 +35,7 @@ import type { Shell } from '@/layout';
 import { assetName, assetOf, assetsOf, listingOf, networkOf, tickersOf } from '@/money';
 import { go, href } from '@/route';
 import { mono } from '@/theme';
+import { Balances } from './balances';
 import { Send } from './send';
 import { WatchDialog } from './watch';
 import { haltOf, progressOf } from './watching';
@@ -213,6 +214,8 @@ export function Wallet({
   const halt = haltOf(wallet);
   const index = wallet.indexes[asset];
   const progress = index ? progressOf(index) : null;
+  /** The picked asset's index as last read, with its balances. */
+  const balances = (fresh ?? wallet).indexes[asset];
 
   /** Pauses every index of the wallet, or resumes them when one is stopped. */
   const toggle = () => {
@@ -268,24 +271,26 @@ export function Wallet({
           </Box>
           <Box sx={{ flexGrow: 1 }} />
           <Stack spacing={1} sx={{ alignItems: 'flex-end' }}>
-            <ButtonGroup
-              size="small"
-              variant="outlined"
-              aria-label="Wallet actions"
-              sx={{ flexWrap: 'wrap' }}
-            >
-              {wallet.keyed && assetsOf(wallet).length > 0 && (
-                <Button onClick={() => setSendOpen(true)}>Send</Button>
-              )}
-              <Button onClick={() => setWatchOpen(true)}>
-                {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
-              </Button>
-              <Button onClick={() => setTagOpen(true)}>Add tag</Button>
-              <Button onClick={() => openLogs({ wallet_id: wallet.id })}>Logs</Button>
-              {assetsOf(wallet).length > 0 && (
-                <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
-              )}
-            </ButtonGroup>
+            <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+              <ButtonGroup
+                size="small"
+                variant="outlined"
+                aria-label="Wallet actions"
+                sx={{ flexWrap: 'wrap' }}
+              >
+                {wallet.keyed && assetsOf(wallet).length > 0 && (
+                  <Button onClick={() => setSendOpen(true)}>Send</Button>
+                )}
+                <Button onClick={() => setWatchOpen(true)}>
+                  {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
+                </Button>
+                <Button onClick={() => setTagOpen(true)}>Add tag</Button>
+                {assetsOf(wallet).length > 0 && (
+                  <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
+                )}
+              </ButtonGroup>
+              <LogsButton filter={{ wallet_id: wallet.id }} />
+            </Stack>
             <Tags
               shell={shell}
               wallet={wallet}
@@ -346,7 +351,7 @@ export function Wallet({
           ))}
         </ToggleButtonGroup>
       )}
-      {compact && assetsOf(wallet).length > 0 && <Box sx={{ mt: 1.5 }}>{balanceOf(asset)}</Box>}
+      {balances && <Balances index={balances} units={money} />}
       {claim && claim.color !== 'text.secondary' && (
         <Typography sx={{ fontSize: 12, color: claim.color, mt: 0.5 }}>{claim.text}</Typography>
       )}
@@ -373,6 +378,7 @@ export function Wallet({
               <EmptyRow columns={7} message="No movements yet." />
             ) : (
               legs.map((leg) => {
+                const out = [1, 2, 4].includes(leg.kind) ? '-' : '';
                 const block = [
                   'networks',
                   wallet.chain,
@@ -384,10 +390,12 @@ export function Wallet({
                   <TableRow key={leg.id} hover>
                     <TableCell>{KIND[leg.kind]}</TableCell>
                     <TableCell sx={figures}>
-                      <Money
-                        amount={[1, 2, 4].includes(leg.kind) ? `-${leg.amount}` : leg.amount}
-                        {...money}
-                      />
+                      <Money amount={`${out}${leg.amount}`} {...money} />
+                      {leg.amount_usd != null && (
+                        <Box component="small" sx={{ color: 'text.secondary', ml: 1 }}>
+                          ≈ ${format(leg.amount_usd, { display: 2 })}
+                        </Box>
+                      )}
                     </TableCell>
                     <TableCell sx={figures}>
                       <Money amount={leg.total ?? '0'} {...money} />

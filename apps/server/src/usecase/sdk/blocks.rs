@@ -9,16 +9,17 @@ use crate::usecase::blocks;
 
 impl BlockStore for Stores {
     /// One write ([`blocks::keep`]); once it commits, each block is logged
-    /// as `index.block` (`position transactions matched legs`: debug, info
-    /// when it matched), each leg kept as `index.leg` (`wallet asset kind
-    /// amount txid position total`, info), and each watched transaction
-    /// found as `index.found` (`txid position reverted`, info).
+    /// as `index.block.unmatched` (debug) or `index.block.matched` (info)
+    /// (`position transactions matched legs`), each leg kept as `index.leg`
+    /// (`wallet asset kind amount txid position total`, info), and each
+    /// watched transaction found as `index.found` (`txid position
+    /// reverted`, info).
     fn insert<'a>(&'a self, blocks: &'a Blocks) -> Future<'a, anyhow::Result<Kept>> {
         Box::pin(async move {
-            let run = blocks.to_vec();
+            let (run, candles) = (blocks.to_vec(), self.candles.clone());
             let kept = self
                 .db
-                .write(move |connection| blocks::keep(connection, &run))
+                .write(move |connection| blocks::keep(connection, &run, &candles))
                 .await?;
             let mut summary = Kept::default();
             for block in &kept {
@@ -26,23 +27,22 @@ impl BlockStore for Stores {
                     (block.position, block.transactions, block.matched);
                 let legs = block.legs.len();
                 if matched > 0 {
-                    tracing::info!(target: "index.block", position, transactions, matched, legs, "Block kept");
+                    tracing::info!(target: crate::events::INDEX_BLOCK_MATCHED, position, transactions, matched, legs);
                 } else {
-                    tracing::debug!(target: "index.block", position, transactions, matched, legs, "Block kept");
+                    tracing::debug!(target: crate::events::INDEX_BLOCK_UNMATCHED, position, transactions, matched, legs);
                 }
                 for leg in block.legs.iter() {
                     let txid = leg.transaction.as_ref().map_or("-", |id| id.txid.as_str());
                     let total = leg.total.as_deref().unwrap_or("-");
                     tracing::info!(
-                        target: "index.leg",
+                        target: crate::events::INDEX_LEG,
                         wallet = %leg.address, asset = %leg.asset, kind = leg.kind_name(),
-                        amount = %leg.amount, txid, position, total,
-                        "Wallet leg kept"
+                        amount = %leg.amount, txid, position, total
                     );
                 }
                 for (txid, reverted) in &block.found {
                     let (txid, reverted) = (txid.as_str(), *reverted);
-                    tracing::info!(target: "index.found", txid, position, reverted, "Watched transaction found");
+                    tracing::info!(target: crate::events::INDEX_FOUND, txid, position, reverted);
                 }
                 summary.matched += matched as u64;
                 summary.legs += legs as u64;

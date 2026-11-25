@@ -2,24 +2,20 @@ import Add from '@mui/icons-material/Add';
 import Hub from '@mui/icons-material/Hub';
 import Settings from '@mui/icons-material/Settings';
 import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
 import IconButton from '@mui/material/IconButton';
-import List from '@mui/material/List';
-import ListItemButton from '@mui/material/ListItemButton';
 import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
-import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 import { call, client, type ConfiguredNetwork } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
-import { mono } from '@/theme';
 import { Nodes } from './_components/nodes';
 import { Chain } from './_components/chain';
 import { AddNodes } from './_components/add';
 import { Split } from '@/_components/split';
-import { openLogs } from '@/_components/logs/open';
+import { Side, SideItem } from '@/_components/side';
+import { LogsButton } from '@/_components/logs/button';
 
 const BEAT_MS = 4000;
 /** How far behind its tip (in time) a network still counts as live. */
@@ -96,22 +92,9 @@ export function Networks({ shell }: { shell: Shell }) {
         open={current !== null}
         onClose={() => go(['networks'])}
         list={
-          <Box
-            component="aside"
-            sx={(t) => ({
-              p: 2.5,
-              minWidth: 0,
-              borderBottom: `1px solid ${t.palette.divider}`,
-              [t.breakpoints.up('md')]: {
-                borderBottom: 0,
-                borderRight: `1px solid ${t.palette.divider}`,
-              },
-            })}
-          >
-            <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5 }}>
-              <Typography variant="h3" sx={{ flexGrow: 1 }}>
-                Networks
-              </Typography>
+          <Side
+            title="Networks"
+            actions={
               <Tooltip title="Add a provider to every network">
                 <IconButton
                   size="small"
@@ -124,75 +107,50 @@ export function Networks({ shell }: { shell: Shell }) {
                   <Add fontSize="small" />
                 </IconButton>
               </Tooltip>
-            </Stack>
-            <List disablePadding aria-label="Networks">
-              {networks.map((n) => (
-                <ListItemButton
-                  key={nameOf(n)}
-                  selected={current !== null && nameOf(n) === nameOf(current)}
-                  onClick={() => go(['networks', n.chain, n.network])}
-                  sx={{ py: 1.25, px: 1, display: 'block' }}
-                >
-                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                    <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
-                      {nameOf(n)}
-                    </Typography>
-                    <Box sx={{ width: 20, mr: -0.5, display: 'flex', justifyContent: 'center' }}>
-                      <Dot sync={syncOf(n)} />
-                    </Box>
-                  </Stack>
-                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                    <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary', flexGrow: 1 }}>
-                      {enabledOf(n)}/{n.endpoints.length} node
-                      {n.endpoints.length === 1 ? '' : 's'} enabled · indexed #
-                      {n.index?.indexed ?? '—'} · tip #{n.tip.live ?? '—'}
-                    </Typography>
-                    <Tooltip title="Settings">
-                      <IconButton
-                        size="small"
-                        aria-label={`${nameOf(n)} settings`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          go(['networks', n.chain, n.network, 'settings']);
-                        }}
-                        sx={{
-                          p: 0.25,
-                          mr: -0.5,
-                          color:
-                            settings && current !== null && nameOf(n) === nameOf(current)
-                              ? 'text.primary'
-                              : 'text.secondary',
-                        }}
-                      >
-                        <Settings sx={{ fontSize: 16 }} />
-                      </IconButton>
-                    </Tooltip>
-                  </Stack>
-                  {n.index?.job_reason && (
-                    <Typography sx={{ fontFamily: mono, fontSize: 11, color: 'error.main' }}>
-                      {n.index.job_reason}
-                    </Typography>
-                  )}
-                </ListItemButton>
-              ))}
-              {networks.length === 0 && (
-                <Typography color="text.secondary" sx={{ py: 2, fontSize: 13 }}>
-                  No network is configured.
-                </Typography>
-              )}
-            </List>
-          </Box>
+            }
+            empty={networks.length === 0 && 'No network is configured.'}
+          >
+            {networks.map((n) => (
+              <SideItem
+                key={nameOf(n)}
+                name={nameOf(n)}
+                dot={syncOf(n)}
+                selected={current !== null && nameOf(n) === nameOf(current)}
+                onClick={() => go(['networks', n.chain, n.network])}
+                detail={`${String(enabledOf(n))}/${String(n.endpoints.length)} node${n.endpoints.length === 1 ? '' : 's'} enabled · indexed #${String(n.index?.indexed ?? '—')} · tip #${String(n.tip.live ?? '—')}`}
+                extra={
+                  <Tooltip title="Settings">
+                    <IconButton
+                      size="small"
+                      aria-label={`${nameOf(n)} settings`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        go(['networks', n.chain, n.network, 'settings']);
+                      }}
+                      sx={{
+                        p: 0.25,
+                        mr: -0.5,
+                        color:
+                          settings && current !== null && nameOf(n) === nameOf(current)
+                            ? 'text.primary'
+                            : 'text.secondary',
+                      }}
+                    >
+                      <Settings sx={{ fontSize: 16 }} />
+                    </IconButton>
+                  </Tooltip>
+                }
+                problem={n.index?.job_reason}
+              />
+            ))}
+          </Side>
         }
         detail={
           <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
             {current && !settings && (
-              <Button
-                size="small"
-                onClick={() => openLogs({ network: nameOf(current) })}
-                sx={{ mb: 2 }}
-              >
-                Logs
-              </Button>
+              <Stack direction="row" sx={{ justifyContent: 'flex-end', mb: 2 }}>
+                <LogsButton filter={{ network: nameOf(current) }} />
+              </Stack>
             )}
             {current && settings ? (
               <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
@@ -230,40 +188,5 @@ export function Networks({ shell }: { shell: Shell }) {
         }}
       />
     </>
-  );
-}
-
-/** A network's sync state as a dot; live, it pulses. Named on hover. */
-function Dot({ sync }: { sync: { label: string; color: string; live: boolean } }) {
-  return (
-    <Box
-      component="span"
-      role="img"
-      aria-label={sync.label}
-      title={sync.label}
-      sx={{
-        position: 'relative',
-        width: 8,
-        height: 8,
-        borderRadius: '50%',
-        flex: 'none',
-        bgcolor: sync.color,
-        '@keyframes pulse': {
-          from: { transform: 'scale(1)', opacity: 0.6 },
-          to: { transform: 'scale(2.6)', opacity: 0 },
-        },
-        '&::after': sync.live
-          ? {
-              content: '""',
-              position: 'absolute',
-              inset: 0,
-              borderRadius: '50%',
-              bgcolor: 'inherit',
-              animation: 'pulse 2s ease-out infinite',
-              '@media (prefers-reduced-motion: reduce)': { animation: 'none' },
-            }
-          : undefined,
-      }}
-    />
   );
 }

@@ -17,4 +17,6 @@ pub(crate) struct AppState {
     pub(crate) actions: Arc<trigger::actions::Registry<tasks::Job>>,
     /// The live feed of kept log entries, streamed.
     pub(crate) logs: crate::usecase::logs::Feed,
+    /// The markets' newest candles, in memory (the market job's).
+    pub(crate) candles: crate::models::market_candle_1h::MarketCandles1hExchangeAssetMapCached,
 }

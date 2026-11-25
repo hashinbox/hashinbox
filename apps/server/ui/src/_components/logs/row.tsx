@@ -4,10 +4,9 @@ import TableCell from '@mui/material/TableCell';
 import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import { useState, type ReactNode, type Ref } from 'react';
-import type { Shell } from '@/layout';
 import type { Row } from './entries';
 import { tagOf, type Filter, type Group } from './filter';
-import { cell, COLUMNS, failedCall, figures, summarize, TONE } from './render';
+import { cell, COLUMNS, failedCall, figures, summarize, TONE, type Messages } from './render';
 
 /** The columns' widths; the summary takes the rest. */
 const WIDTHS = [180, 64, 170, 150, 260, undefined];
@@ -104,11 +103,11 @@ function TagChip({
 /** One entry as one row; clicked, its fields fold out below as `key=val`. */
 export function LogRow({
   row,
-  listings,
+  messages,
   onTag,
 }: {
   row: Row;
-  listings: Shell['listings'];
+  messages: Messages;
   onTag: (tag: Filter) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -153,7 +152,7 @@ export function LogRow({
           <TagChip group="trigger_id" value={entry.trigger_id} onTag={onTag} />
         </TableCell>
         <TableCell sx={{ ...cell, color: failedCall(entry) ? 'error.main' : undefined }}>
-          {summarize(entry, listings)}
+          {summarize(entry, messages)}
         </TableCell>
       </TableRow>
       {open && fields.length > 0 && (

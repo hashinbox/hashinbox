@@ -8,7 +8,8 @@ export interface Entry {
   at: number;
   level: string;
   target: string;
-  message: string;
+  /** Its own message; null: its event's template, filled. */
+  message: string | null;
   fields: Record<string, string>;
   chain: string | null;
   network: string | null;
@@ -33,11 +34,12 @@ export interface Heard {
 /** A filter of `/v1/logs` and its stream, as query text: `level`, `job_id`, `before`… */
 export type Query = Record<string, string>;
 
-/** Where entries come from: a page of them, the live stream, the events kept. */
+/** Where entries come from: a page of them, the live stream, the events kept, their templates. */
 export interface LogSource {
   read: (query: Query, cursor: string | undefined) => Promise<Page>;
   listen: (query: Query, onEvent: (heard: Heard) => void, signal: AbortSignal) => Promise<void>;
   targets: () => Promise<string[]>;
+  messages: () => Promise<Record<string, string>>;
 }
 
 /** An entry as shown, with a key of its own (a live one has no id); `fresh` while just heard. */

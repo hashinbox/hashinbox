@@ -11,7 +11,7 @@ import { useEntries, type LogSource } from './entries';
 import { queryOf, tagsOf, withTag, type Filter, type LogFilter } from './filter';
 import { Filters } from './filters';
 import { itemsOf, type Item } from './items';
-import { COLUMNS, ROW_PX } from './render';
+import { COLUMNS, ROW_PX, type Messages } from './render';
 import { Head, Item as Measured, LogRow, Pad } from './row';
 import { Calls, RunHead } from './runs';
 import { useVirtual } from './virtual';
@@ -42,6 +42,10 @@ export function Logs({
     setReads((n) => n + 1);
   }, []);
   const addTag = useCallback((tag: Filter) => setTags((was) => withTag(was, tag)), []);
+  const [messages, setMessages] = useState<Messages>({});
+  useEffect(() => {
+    source.messages().then(setMessages).catch(shell.fail);
+  }, [source, shell.fail]);
   return (
     <Stack spacing={1} sx={{ minHeight: 0, flexGrow: 1 }}>
       <Filters
@@ -57,6 +61,7 @@ export function Logs({
         shell={shell}
         source={source}
         search={search}
+        messages={messages}
         onTag={addTag}
         onLive={live}
       />
@@ -74,12 +79,14 @@ function View({
   shell,
   source,
   search,
+  messages,
   onTag,
   onLive,
 }: {
   shell: Shell;
   source: LogSource;
   search: string;
+  messages: Messages;
   onTag: (tag: Filter) => void;
   onLive: () => void;
 }) {
@@ -143,7 +150,7 @@ function View({
           <Pad px={virtual.before} />
           {items.slice(virtual.start, virtual.end).map((item) => (
             <Measured key={item.key} itemKey={item.key} measure={virtual.measure}>
-              <Shown item={item} shell={shell} onTag={onTag} />
+              <Shown item={item} messages={messages} onTag={onTag} />
             </Measured>
           ))}
           <Pad px={virtual.after} />
@@ -154,8 +161,16 @@ function View({
 }
 
 /** One item's rows: an entry, a run's header, or a run's calls. */
-function Shown({ item, shell, onTag }: { item: Item; shell: Shell; onTag: (tag: Filter) => void }) {
+function Shown({
+  item,
+  messages,
+  onTag,
+}: {
+  item: Item;
+  messages: Messages;
+  onTag: (tag: Filter) => void;
+}) {
   if (item.kind === 'run') return <RunHead attempt={item.attempt} end={item.end} />;
   if (item.kind === 'calls') return <Calls calls={item.calls} />;
-  return <LogRow row={item.row} listings={shell.listings} onTag={onTag} />;
+  return <LogRow row={item.row} messages={messages} onTag={onTag} />;
 }

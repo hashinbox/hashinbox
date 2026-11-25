@@ -8,6 +8,7 @@ mod cache;
 mod chain;
 mod config;
 pub mod container;
+pub mod events;
 mod fee;
 mod index;
 mod indexer;

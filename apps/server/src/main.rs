@@ -12,6 +12,7 @@
 mod api;
 mod config;
 mod db;
+mod events;
 mod models;
 mod ui;
 mod usecase;
@@ -26,7 +27,7 @@ use api::AppState;
 use base::Container;
 use config::{AnyError, Cli, Command};
 use tasks::Executor;
-use usecase::workers;
+use usecase::{market, workers};
 
 /// How often due jobs are looked for without a write.
 const TICK: Duration = Duration::from_secs(1);
@@ -59,12 +60,15 @@ async fn main() -> Result<(), AnyError> {
     let logs = usecase::logs::feed();
     tracing::subscriber::set_global_default(config.subscriber(&db, logs.clone())?)?;
 
+    // The markets' newest candles, in memory: the market job adds to them,
+    // the kept legs are valued by them, the markets route shows them.
+    let candles = models::market_candle_1h::MarketCandles1hExchangeAssetMapCached::default();
     // Every `enabled` network, each over its stored nodes and built by its
     // chain; a node that cannot recover disabled in the database, every
     // node's calls counted there. A network that does not build, or whose
     // nodes do not answer, only fails its own jobs, with why.
     let container = Arc::new(Container::<usecase::Transport>::new(
-        usecase::sdk::Stores::storage(db.clone()),
+        usecase::sdk::Stores::storage(db.clone(), candles.clone()),
     ));
     usecase::Networks::new(db.clone())
         .await?
@@ -77,13 +81,14 @@ async fn main() -> Result<(), AnyError> {
         actions: Arc::new(usecase::workers::trigger::actions::registry()),
         db,
         logs,
+        candles: candles.clone(),
     });
 
     let (container, db, queue, actions) =
         (&state.container, &state.db, &state.queue, &state.actions);
     // Each recurring worker seeds its own jobs when the queue starts: the index job per
-    // network (queueing trigger rounds at the tip, whose sends become broadcast jobs)
-    // and one prune job.
+    // network (queueing trigger rounds at the tip, whose sends become broadcast jobs),
+    // one prune job and one market job.
     let jobs = Executor::new(queue.clone(), TICK)
         .add(workers::index::Index::new(
             container.clone(),
@@ -100,13 +105,28 @@ async fn main() -> Result<(), AnyError> {
             db.clone(),
             queue.clone(),
             actions.clone(),
+        ));
+    // The market job: every 10 s, each market's quotes into its hourly
+    // candles.
+    let http = market::client()?;
+    let jobs = jobs
+        .add(workers::market::Candles::new(
+            db.clone(),
+            vec![
+                Box::new(market::Binance::new(http.clone())),
+                Box::new(market::Bitstamp::new(http.clone())),
+                Box::new(market::Coinbase::new(http.clone())),
+                Box::new(market::CoinGecko::new(http.clone())),
+                Box::new(market::Kraken::new(http)),
+            ],
+            candles,
         ))
         .run();
     let networks = container.networks().len();
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let bind = config.bind.to_string();
-    tracing::info!(target: "app.start", networks, bind, "Server started");
+    tracing::info!(target: events::APP_START, networks, bind);
     // Handlers in flight drain before `serve` returns; jobs left running
     // resume on the next start.
     let served = axum::serve(listener, router)
@@ -115,6 +135,6 @@ async fn main() -> Result<(), AnyError> {
         })
         .await;
     jobs.stop().await;
-    tracing::info!(target: "app.stop", "Server stopped");
+    tracing::event!(target: events::APP_STOP, tracing::Level::INFO, {});
     Ok(served?)
 }

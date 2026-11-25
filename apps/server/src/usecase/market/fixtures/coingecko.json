@@ -1,0 +1,20 @@
+{
+  "bitcoin": {
+    "usd": 60191
+  },
+  "ethereum": {
+    "usd": 1694.1
+  },
+  "solana": {
+    "usd": 71.36
+  },
+  "tether": {
+    "usd": 0.999051
+  },
+  "usd-coin": {
+    "usd": 0.999586
+  },
+  "dai": {
+    "usd": 1.0
+  }
+}

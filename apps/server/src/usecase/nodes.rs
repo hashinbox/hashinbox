@@ -237,7 +237,7 @@ impl Node {
                 let health = std::mem::take(&mut *lock(&self.health));
                 if health.demoted.is_some() {
                     let node = self.label();
-                    tracing::info!(target: "node.restored", node, "RPC node restored");
+                    tracing::info!(target: crate::events::NODE_RESTORED, node);
                 }
             }
             Some(error) if error.is_retryable() => {
@@ -284,7 +284,7 @@ impl Node {
         drop(health);
         if demoted.is_none() {
             let node = self.label();
-            tracing::warn!(target: "node.demoted", node, reason, streak, "RPC node demoted");
+            tracing::warn!(target: crate::events::NODE_DEMOTED, node, reason, streak);
         }
     }
 }
@@ -431,10 +431,10 @@ impl NodeSwitch {
             .write(move |connection| Ok(endpoint_failure::db::insert(connection, &failure)?))
             .await;
         let Err(error) = stored else {
-            tracing::warn!(target: "endpoint.disabled", node, kind, reason, "RPC node disabled");
+            tracing::warn!(target: crate::events::ENDPOINT_DISABLED, node, kind, reason);
             return;
         };
         let error = format!("{error:#}");
-        tracing::error!(target: "endpoint.disabled", node, error, "RPC node disable not stored");
+        tracing::error!(target: crate::events::ENDPOINT_DISABLE_FAILED, node, error);
     }
 }

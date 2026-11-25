@@ -11,8 +11,6 @@ import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
 import IconButton from '@mui/material/IconButton';
-import List from '@mui/material/List';
-import ListItemButton from '@mui/material/ListItemButton';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Tooltip from '@mui/material/Tooltip';
@@ -29,6 +27,7 @@ import { mono } from '@/theme';
 import { WatchFields } from './watch';
 import { WATCH_NOTHING, haltOf, watch, type Watching } from './watching';
 import { NetworkSelect } from '@/_components/network-select';
+import { Side, SideItem } from '@/_components/side';
 
 interface Props {
   shell: Shell;
@@ -134,173 +133,144 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
   ];
 
   return (
-    <Box
-      component="aside"
-      sx={(t) => ({
-        p: 2.5,
-        minWidth: 0,
-        // Each side named in full: a responsive border shorthand would reset its colour.
-        borderBottom: `1px solid ${t.palette.divider}`,
-        [t.breakpoints.up('md')]: {
-          borderBottom: 0,
-          borderRight: `1px solid ${t.palette.divider}`,
-        },
-      })}
-    >
-      <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5 }}>
-        <Typography variant="h3" sx={{ flexGrow: 1 }}>
-          Wallets{' '}
-          <Typography
-            component="span"
-            color="text.secondary"
-            sx={{ fontFamily: mono, fontSize: 12 }}
-          >
-            {shown.length === wallets.length ? wallets.length : `${shown.length}/${wallets.length}`}
-          </Typography>
-        </Typography>
-        <Tooltip title="Filter">
-          <IconButton
-            size="small"
-            aria-label="Filter wallets"
-            aria-pressed={filtering}
-            onClick={() => setFiltering(!filtering)}
-            sx={{ color: filtering ? 'text.primary' : 'text.secondary' }}
-          >
-            <FilterList fontSize="small" />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="New wallet">
-          <IconButton
-            size="small"
-            aria-label="New wallet"
-            onClick={(e) => {
-              e.currentTarget.blur();
-              setCreating(true);
-            }}
-          >
-            <Add fontSize="small" />
-          </IconButton>
-        </Tooltip>
-      </Stack>
-
-      <Collapse in={filtering}>
-        <Stack spacing={1.25} sx={{ pb: 2 }}>
-          <Autocomplete
-            multiple
-            freeSolo
-            autoHighlight
-            size="small"
-            options={options}
-            value={filters}
-            groupBy={(o) => o.group}
-            getOptionLabel={(o) => (typeof o === 'string' ? o : o.label)}
-            isOptionEqualToValue={(o, v) =>
-              typeof v !== 'string' && o.group === v.group && o.value === v.value
-            }
-            filterOptions={(all, state) => {
-              // `> 100` offers itself as a balance comparison.
-              const [, op, bound] = COMPARISON.exec(state.inputValue.trim()) ?? [];
-              const compared: Filter[] =
-                op && bound
-                  ? [{ group: 'balance', value: `${op} ${bound}`, label: `${op} ${bound}` }]
-                  : [];
-              return [...compared, ...listed(all, state)];
-            }}
-            onChange={(_, next) => {
-              // Free text that matched no option filters by address or id.
-              const picked = next
-                .map((t): Filter =>
-                  typeof t === 'string'
-                    ? { group: 'address', value: t.trim(), label: t.trim() }
-                    : t,
-                )
-                .filter((t) => t.group !== 'address' || t.value !== '');
-              const first = (t: Filter, i: number) =>
-                picked.findIndex((u) => u.group === t.group && u.value === t.value) === i;
-              setFilters(picked.filter(first));
-            }}
-            renderValue={(_, getItemProps) =>
-              filters.map((t, index) => (
-                <Chip
-                  {...getItemProps({ index })}
-                  key={`${t.group}:${t.value}`}
-                  size="small"
-                  label={
-                    <>
-                      <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
-                        {t.group}
-                      </Box>
-                      {t.label}
-                    </>
-                  }
-                  sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
-                />
-              ))
-            }
-            renderInput={(params) => (
-              <TextField
-                {...params}
-                placeholder={filters.length === 0 ? 'Filter by tag, balance, address…' : ''}
-                slotProps={{
-                  ...params.slotProps,
-                  input: {
-                    ...params.slotProps.input,
-                    startAdornment: (
-                      <>
-                        <FilterList
-                          fontSize="small"
-                          aria-hidden
-                          sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
-                        />
-                        {params.slotProps.input.startAdornment}
-                      </>
-                    ),
-                  },
-                  htmlInput: {
-                    ...params.slotProps.htmlInput,
-                    'aria-label': 'Filter wallets',
-                    spellCheck: false,
-                  },
+    <>
+      <Side
+        title="Wallets"
+        count={
+          shown.length === wallets.length
+            ? String(wallets.length)
+            : `${String(shown.length)}/${String(wallets.length)}`
+        }
+        actions={
+          <>
+            <Tooltip title="Filter">
+              <IconButton
+                size="small"
+                aria-label="Filter wallets"
+                aria-pressed={filtering}
+                onClick={() => setFiltering(!filtering)}
+                sx={{ color: filtering ? 'text.primary' : 'text.secondary' }}
+              >
+                <FilterList fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="New wallet">
+              <IconButton
+                size="small"
+                aria-label="New wallet"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  setCreating(true);
                 }}
-                sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
+              >
+                <Add fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </>
+        }
+        tools={
+          <Collapse in={filtering}>
+            <Stack spacing={1.25} sx={{ pb: 2 }}>
+              <Autocomplete
+                multiple
+                freeSolo
+                autoHighlight
+                size="small"
+                options={options}
+                value={filters}
+                groupBy={(o) => o.group}
+                getOptionLabel={(o) => (typeof o === 'string' ? o : o.label)}
+                isOptionEqualToValue={(o, v) =>
+                  typeof v !== 'string' && o.group === v.group && o.value === v.value
+                }
+                filterOptions={(all, state) => {
+                  // `> 100` offers itself as a balance comparison.
+                  const [, op, bound] = COMPARISON.exec(state.inputValue.trim()) ?? [];
+                  const compared: Filter[] =
+                    op && bound
+                      ? [{ group: 'balance', value: `${op} ${bound}`, label: `${op} ${bound}` }]
+                      : [];
+                  return [...compared, ...listed(all, state)];
+                }}
+                onChange={(_, next) => {
+                  // Free text that matched no option filters by address or id.
+                  const picked = next
+                    .map((t): Filter =>
+                      typeof t === 'string'
+                        ? { group: 'address', value: t.trim(), label: t.trim() }
+                        : t,
+                    )
+                    .filter((t) => t.group !== 'address' || t.value !== '');
+                  const first = (t: Filter, i: number) =>
+                    picked.findIndex((u) => u.group === t.group && u.value === t.value) === i;
+                  setFilters(picked.filter(first));
+                }}
+                renderValue={(_, getItemProps) =>
+                  filters.map((t, index) => (
+                    <Chip
+                      {...getItemProps({ index })}
+                      key={`${t.group}:${t.value}`}
+                      size="small"
+                      label={
+                        <>
+                          <Box component="span" sx={{ color: 'text.secondary', mr: 0.5 }}>
+                            {t.group}
+                          </Box>
+                          {t.label}
+                        </>
+                      }
+                      sx={{ borderRadius: '6px', bgcolor: 'grey.100', fontSize: 12 }}
+                    />
+                  ))
+                }
+                renderInput={(params) => (
+                  <TextField
+                    {...params}
+                    placeholder={filters.length === 0 ? 'Filter by tag, balance, address…' : ''}
+                    slotProps={{
+                      ...params.slotProps,
+                      input: {
+                        ...params.slotProps.input,
+                        startAdornment: (
+                          <>
+                            <FilterList
+                              fontSize="small"
+                              aria-hidden
+                              sx={{ color: 'text.secondary', ml: 0.5, mr: 0.25 }}
+                            />
+                            {params.slotProps.input.startAdornment}
+                          </>
+                        ),
+                      },
+                      htmlInput: {
+                        ...params.slotProps.htmlInput,
+                        'aria-label': 'Filter wallets',
+                        spellCheck: false,
+                      },
+                    }}
+                    sx={{ '& .MuiOutlinedInput-root': { gap: 0.5, fontSize: 13 } }}
+                  />
+                )}
               />
-            )}
-          />
-        </Stack>
-      </Collapse>
-
-      <List disablePadding aria-label="Wallets" sx={{ borderBottom: 1, borderColor: 'divider' }}>
+            </Stack>
+          </Collapse>
+        }
+        empty={
+          shown.length === 0 && (wallets.length === 0 ? 'No wallets yet.' : 'Nothing matches.')
+        }
+      >
         {shown.map((w) => (
-          <ListItemButton
+          <SideItem
             key={w.id}
+            icon={<Currencies chain={w.chain} tickers={tickersOf(w, shell.listings)} />}
+            name={middle(w.address)}
+            dot={dotOf(w)}
             selected={w.id === selected}
             onClick={() => onSelect(w.id)}
-            sx={{ gap: 1.5, py: 1.25, px: 1 }}
-          >
-            <Box sx={{ display: 'flex', fontSize: 22 }}>
-              <Currencies chain={w.chain} tickers={tickersOf(w, shell.listings)} />
-            </Box>
-            <Box sx={{ minWidth: 0, flexGrow: 1 }}>
-              <Typography noWrap sx={{ fontFamily: mono, fontSize: 12.5 }}>
-                {middle(w.address)}
-              </Typography>
-              <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                {w.chain}/{w.network}
-                {(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}
-                <Halted wallet={w} />
-              </Typography>
-            </Box>
-          </ListItemButton>
+            detail={`${w.chain}/${w.network}${(tags.get(w.id) ?? []).map((t) => ` · #${t}`).join('')}`}
+          />
         ))}
-        {shown.length === 0 && (
-          <Typography
-            color="text.secondary"
-            sx={{ py: 2, fontSize: 13, borderTop: 1, borderColor: 'divider' }}
-          >
-            {wallets.length === 0 ? 'No wallets yet.' : 'Nothing matches.'}
-          </Typography>
-        )}
-      </List>
+      </Side>
 
       <CreateDialog
         shell={shell}
@@ -312,7 +282,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
           shell.notify('Wallet added.');
         }}
       />
-    </Box>
+    </>
   );
 }
 
@@ -503,14 +473,11 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
   );
 }
 
-/** ` · paused` or ` · no data`, colored, once the wallet's indexing stopped. */
-function Halted({ wallet }: { wallet: Wallet }) {
+/** A wallet's state as its dot: indexing stopped (paused, no data), not watched, or watching. */
+function dotOf(wallet: Wallet): { color: string; label: string } {
   const halt = haltOf(wallet);
-  return (
-    halt && (
-      <Box component="span" sx={{ color: halt.color }}>
-        {` · ${halt.text}`}
-      </Box>
-    )
-  );
+  if (halt) return { color: halt.color, label: halt.text };
+  if (Object.keys(wallet.indexes).length === 0)
+    return { color: 'text.disabled', label: 'not watched' };
+  return { color: 'success.main', label: 'watching' };
 }

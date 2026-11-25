@@ -4,6 +4,7 @@ mod client;
 mod decorators;
 mod endpoint;
 mod error;
+pub mod events;
 mod http;
 mod node;
 #[cfg(feature = "testing")]

@@ -195,7 +195,7 @@ async fn a_transient_failure_counts_as_sent_and_its_check_sends_the_same_bytes()
     assert_eq!(fixture.sent(), [vec![1]]);
     let network = network();
     let first = run(&network, vec![block(&network, 0, 0, Vec::new())]);
-    let stores = Stores::new(fixture.db.clone());
+    let stores = Stores::new(fixture.db.clone(), Default::default());
     base::BlockStore::insert(&stores, &first)
         .await
         .expect("kept");

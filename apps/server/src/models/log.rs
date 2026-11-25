@@ -5,8 +5,9 @@
 //! executor's span) its job, a wallet's (a `wallet_id` field, or a
 //! `wallet` address of its network) its wallet, a transaction's (a
 //! `transaction_id` field, or a `txid` of its network) its transaction, a
-//! trigger's (a `trigger_id` or `trigger` field) its trigger; any other
-//! names none.
+//! trigger's (a `trigger_id` or `trigger` field) its trigger, a market's
+//! (a `market` field, the market job's span) its market; any other names
+//! none.
 
 use std::collections::BTreeMap;
 
@@ -32,9 +33,13 @@ pub(crate) struct Log {
     pub(crate) at: i64,
     /// `error`, `warn`, `info`, `debug` or `trace`.
     pub(crate) level: String,
-    /// The event: `rpc.http`, `index.step`, `send.broadcast`, …
+    /// The event's code: `rpc.http.failed`, `index.step`, … Its message is
+    /// its template (`GET /v1/logs/messages`) filled from `fields`.
     pub(crate) target: String,
-    pub(crate) message: String,
+    /// The event's own message, in place of its template; always present,
+    /// null: none, the template's.
+    #[schema(required)]
+    pub(crate) message: Option<String>,
     /// Its fields and its spans' (`network`, `node`, …), as text.
     #[schema(value_type = BTreeMap<String, String>)]
     pub(crate) fields: Json<BTreeMap<String, String>>,
@@ -58,6 +63,9 @@ pub(crate) struct Log {
     /// The trigger it concerns; always present, null: none.
     #[schema(required)]
     pub(crate) trigger_id: Option<String>,
+    /// The market it concerns (`binance`, …); always present, null: none.
+    #[schema(required)]
+    pub(crate) market: Option<String>,
 }
 
 /// Which entries a page reads; each filter unset reads all.
@@ -73,6 +81,8 @@ pub(crate) struct LogFilter {
     pub(crate) transaction_id: Option<String>,
     /// Of this trigger only.
     pub(crate) trigger_id: Option<String>,
+    /// Of this market only.
+    pub(crate) market: Option<String>,
     /// At this level or more severe; exactly it when `only`.
     pub(crate) level: Option<tracing::Level>,
     /// `level` alone, none more severe.
@@ -86,17 +96,19 @@ pub(crate) struct LogFilter {
 }
 
 impl Log {
-    /// Event `target` at `level`, read at `at` (Unix ms), with `message`
+    /// Event `target` at `level`, read at `at` (Unix ms), with its own
+    /// `message`, if any,
     /// and `fields` (its own and its spans'): its network from a `network`
     /// field (`chain/name`), its job from a `job_id` one, its wallet from a
     /// `wallet_id` one or a `wallet` address of its network, its
     /// transaction from a `transaction_id` one or a `txid` of its network,
-    /// its trigger from a `trigger_id` or a `trigger` one.
+    /// its trigger from a `trigger_id` or a `trigger` one, its market from
+    /// a `market` one.
     pub(crate) fn new(
         at: i64,
         level: tracing::Level,
         target: String,
-        message: String,
+        message: Option<String>,
         fields: BTreeMap<String, String>,
     ) -> Self {
         let named = fields
@@ -115,6 +127,7 @@ impl Log {
         let transaction_id = fields.get("transaction_id").cloned();
         let trigger_id = fields.get("trigger_id").or_else(|| fields.get("trigger"));
         let trigger_id = trigger_id.cloned();
+        let market = fields.get("market").cloned();
         Self {
             id: 0,
             at,
@@ -128,6 +141,7 @@ impl Log {
             wallet_id: wallet_id.or_else(|| wallet.map(String::from)),
             transaction_id: transaction_id.or_else(|| transaction.map(String::from)),
             trigger_id,
+            market,
         }
     }
 }
@@ -156,6 +170,7 @@ impl LogFilter {
             && same(self.wallet_id.as_ref(), log.wallet_id.as_ref())
             && same(self.transaction_id.as_ref(), log.transaction_id.as_ref())
             && same(self.trigger_id.as_ref(), log.trigger_id.as_ref())
+            && same(self.market.as_ref(), log.market.as_ref())
             && (self.targets.is_empty() || self.targets.contains(&log.target))
             && self.before.is_none_or(|before| log.at < before)
             && self.after.is_none_or(|after| log.at >= after)
@@ -244,6 +259,9 @@ pub(crate) mod db {
         }
         if let Some(trigger_id) = &filter.trigger_id {
             query = query.filter(log::trigger_id.eq(trigger_id.clone()));
+        }
+        if let Some(market) = &filter.market {
+            query = query.filter(log::market.eq(market.clone()));
         }
         if filter.level.is_some() {
             query = query.filter(log::level.eq_any(filter.level_names()));

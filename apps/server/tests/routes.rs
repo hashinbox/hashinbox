@@ -111,6 +111,7 @@ async fn wallets_balance_legs_and_sends() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -163,7 +164,7 @@ async fn wallets_balance_legs_and_sends() {
     assert_eq!(list["wallets"].as_array().map(Vec::len), Some(2));
 
     BlockStore::insert(
-        &crate::usecase::sdk::Stores::new(db.clone()),
+        &crate::usecase::sdk::Stores::new(db.clone(), Default::default()),
         &paid("alice", 150_000_000),
     )
     .await
@@ -393,6 +394,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -519,6 +521,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -628,6 +631,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -852,6 +856,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         queue,
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -905,6 +910,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -941,6 +947,7 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         queue: crate::usecase::tasks::queue(db),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1034,6 +1041,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1157,6 +1165,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1165,7 +1174,11 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         http_server::RequestLimits::default(),
     );
     let router = api::router(state, &config).expect("a router");
-    super::storage::jumped(&crate::usecase::sdk::Stores::new(db.clone())).await;
+    super::storage::jumped(&crate::usecase::sdk::Stores::new(
+        db.clone(),
+        Default::default(),
+    ))
+    .await;
     let legs = "/v1/wallets/bitcoin.regtest.alice/indexes/native/legs";
     let (status, page) = call(&router, Method::GET, legs, None).await;
     assert_eq!(status, StatusCode::OK, "{page}");
@@ -1209,6 +1222,7 @@ fn app(
         queue: queue.clone(),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1662,7 +1676,7 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
     .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
     .await;
 
-    let at = "/v1/logs?network=bitcoin/regtest&target=rpc.http";
+    let at = "/v1/logs?network=bitcoin/regtest&target=rpc.http.answered,rpc.http.failed";
     let mut http = kept(&router, at, 3).await;
     http.reverse();
     assert_eq!(http.len(), 3, "{http:?}");
@@ -1682,13 +1696,14 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
     let keys = ["method", "batch", "status", "rpc_errors", "error"];
     let shown = |at: usize| keys.map(|key| http[at]["fields"][key].as_str().unwrap().to_owned());
     assert_eq!(
-        (&http[0]["level"], &http[0]["message"]),
-        (&json!("debug"), &json!("RPC request answered"))
+        (&http[0]["level"], &http[0]["target"], &http[0]["message"]),
+        (&json!("debug"), &json!("rpc.http.answered"), &json!(null)),
+        "no message: the template's"
     );
     assert_eq!(shown(0), ["fine", "-", "200", "-", "-"].map(str::to_owned));
     assert_eq!(
-        (&http[1]["level"], &http[1]["message"]),
-        (&json!("warn"), &json!("RPC request failed"))
+        (&http[1]["level"], &http[1]["target"]),
+        (&json!("warn"), &json!("rpc.http.failed"))
     );
     assert_eq!(
         shown(1),
@@ -1732,7 +1747,7 @@ async fn a_range_beyond_the_head_is_debug_and_not_a_failure() {
     .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
     .await;
 
-    let at = "/v1/logs?target=rpc.http";
+    let at = "/v1/logs?target=rpc.http.not_yet";
     let http = kept(&router, at, 1).await;
     assert_eq!(http[0]["level"], "debug", "{http:?}");
     assert_eq!(http[0]["fields"]["rpc_errors"], "-32602");
@@ -1946,7 +1961,7 @@ async fn the_prune_caps_each_job_and_each_network_outside_a_job() {
     .expect("seeded");
     let job = run_once(&queue, Prune::new(db.clone(), container.clone()), &()).await;
     assert_eq!(job.reason, None, "{job:?}");
-    let kept: Vec<(String, String)> = db
+    let kept: Vec<(String, Option<String>)> = db
         .read(|connection| {
             Ok(log::table
                 .select((log::target, log::message))
@@ -1963,7 +1978,10 @@ async fn the_prune_caps_each_job_and_each_network_outside_a_job() {
         let messages: Vec<u32> = kept
             .iter()
             .filter(|(kept, _)| kept == target)
-            .map(|(_, message)| message.parse().expect("a number: the ancient one is gone"))
+            .map(|(_, message)| {
+                let message = message.as_deref().unwrap_or_default();
+                message.parse().expect("a number: the ancient one is gone")
+            })
             .collect();
         assert_eq!(messages.len(), count, "{target}");
         let least = messages.iter().min().map(ToString::to_string);
@@ -1973,7 +1991,7 @@ async fn the_prune_caps_each_job_and_each_network_outside_a_job() {
 
 /// A round tells its story: one `trigger.fired` per payment queued (under
 /// that payment's job), a `trigger.skipped` with why, each under its
-/// trigger, and one `trigger.round` with the counts.
+/// trigger, and one `trigger.round.acted` with the counts.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_trigger_round_logs_each_trigger_and_its_counts() {
     use diesel::connection::SimpleConnection as _;
@@ -2037,7 +2055,7 @@ async fn a_trigger_round_logs_each_trigger_and_its_counts() {
         .with_subscriber(subscriber(&db, crate::usecase::logs::feed()))
         .await;
 
-    let at = "/v1/logs?target=trigger.round,trigger.fired,trigger.skipped";
+    let at = "/v1/logs?target=trigger.round.acted,trigger.fired,trigger.skipped";
     let logs = kept(&router, at, 3).await;
     let of = |target: &str| {
         let found = logs.iter().find(|entry| entry["target"] == target);
@@ -2045,7 +2063,7 @@ async fn a_trigger_round_logs_each_trigger_and_its_counts() {
             .unwrap_or_else(|| panic!("a {target}: {logs:?}"))
             .clone()
     };
-    let counted = of("trigger.round");
+    let counted = of("trigger.round.acted");
     assert_eq!(counted["level"], "info", "one fired");
     assert_eq!(counted["job_id"], i64::try_from(round.id.0).unwrap());
     assert_eq!(counted["network"], "regtest");
@@ -2135,8 +2153,8 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
             .flatten()
             .filter_map(|entry| entry["target"].as_str().map(str::to_owned))
             .collect();
-        let found = targets.iter().any(|t| t == "rpc.http")
-            && targets.iter().any(|t| t == "send.broadcast");
+        let found = targets.iter().any(|t| t == "rpc.http.answered")
+            && targets.iter().any(|t| t == "send.broadcast.accepted");
         found.then(|| listed.clone()).ok_or(listed.to_string())
     })
     .await;
@@ -2152,7 +2170,7 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["target"] == "rpc.http")
+        .find(|entry| entry["target"] == "rpc.http.answered")
         .unwrap();
     assert_eq!(http["fields"]["method"], "sendrawtransaction");
     assert_eq!(
@@ -2162,8 +2180,8 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
     let sent = listed["logs"].as_array().unwrap().iter();
     let sent = sent
         .clone()
-        .find(|entry| entry["target"] == "send.broadcast");
-    let sent = sent.expect("a send.broadcast");
+        .find(|entry| entry["target"] == "send.broadcast.accepted");
+    let sent = sent.expect("a send.broadcast.accepted");
     let wallet = sent["wallet_id"].as_str().expect("its wallet").to_owned();
     assert!(wallet.starts_with("bitcoin.regtest."), "{sent}");
     let transaction = sent["transaction_id"].as_str().expect("its transaction");
@@ -2195,6 +2213,7 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         queue: crate::usecase::tasks::queue(db.clone()),
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: feed.clone(),
+        candles: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2288,4 +2307,142 @@ async fn an_index_step_that_never_answers_times_out_and_retries() {
     assert_eq!(reason, "an index step timed out after 0.05 s", "{job:?}");
     assert_eq!(job.status, tasks::Status::Pending, "{job:?}");
     assert_eq!(job.attempts, 1, "retried: {job:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_messages_are_the_catalog() {
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let router = app(&container, &db, &queue);
+    let (status, listed) = call(&router, Method::GET, "/v1/logs/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let catalog = serde_json::to_value(&*crate::events::MESSAGES).unwrap();
+    assert_eq!(listed["messages"], catalog);
+}
+
+/// The markets list each market with its last quote and the latest prices
+/// from memory; a feed is turned off by name (logged in its market); a
+/// market's hourly candles read; each market's requests are logged in it,
+/// read by `market=`.
+#[tokio::test(flavor = "multi_thread")]
+async fn markets_list_set_read_candles_and_log() {
+    use tracing::instrument::WithSubscriber as _;
+
+    use crate::{
+        models::market_candle_1h::MarketCandles1hExchangeAssetMapCached,
+        usecase::{market::tests::Fixed, workers::market::Candles},
+    };
+
+    let (_, db, _directory) = seeded().await;
+    let container = container(&db, Arc::new(Script::default()));
+    let queue = crate::usecase::tasks::queue(db.clone());
+    let (feed, candles) = (
+        crate::usecase::logs::feed(),
+        MarketCandles1hExchangeAssetMapCached::default(),
+    );
+    let state = Arc::new(AppState {
+        container: container.clone(),
+        db: db.clone(),
+        queue: queue.clone(),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: feed.clone(),
+        candles: candles.clone(),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = api::router(state, &config).expect("a router");
+    let markets: Vec<Box<dyn crate::usecase::market::Market>> = vec![
+        Box::new(Fixed::new("binance", Some("100"))),
+        Box::new(Fixed::new("kraken", None)),
+    ];
+    Candles::new(db.clone(), markets, candles)
+        .tick(tasks::now())
+        .with_subscriber(subscriber(&db, feed.clone()))
+        .await
+        .unwrap();
+
+    let (status, listed) = call(&router, Method::GET, "/v1/markets", None).await;
+    assert_eq!(status, StatusCode::OK, "{listed}");
+    let names: Vec<&str> = listed["markets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|market| market["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        ["binance", "bitstamp", "coinbase", "coingecko", "kraken"]
+    );
+    assert!(listed["markets"][0]["last_at"].is_i64(), "{listed}");
+    assert_eq!(listed["markets"][0]["feed"], true);
+    assert!(listed["markets"][4]["last_at"].is_null(), "kraken failed");
+    assert_eq!(listed["prices"]["BTC"], "100");
+
+    let off = Some(json!({"feed": false}));
+    let (status, set) = call(&router, Method::PATCH, "/v1/markets/binance", off.clone())
+        .with_subscriber(subscriber(&db, feed.clone()))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{set}");
+    assert_eq!(set["feed"], false);
+    let (status, _) = call(&router, Method::PATCH, "/v1/markets/nope", off).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let set = kept(&router, "/v1/logs?market=binance&target=market.feed.set", 1).await;
+    assert_eq!(set[0]["fields"]["feed"], "false");
+
+    let at = "/v1/markets/binance/candles?asset=BTC";
+    let (status, read) = call(&router, Method::GET, at, None).await;
+    assert_eq!(status, StatusCode::OK, "{read}");
+    let candles = read["candles"].as_array().unwrap();
+    assert_eq!(candles.len(), 1, "{read}");
+    assert_eq!(candles[0]["market"], "binance");
+    assert_eq!(candles[0]["open"], "100");
+    assert_eq!(candles[0]["close"], "100");
+    let start = candles[0]["start"].as_i64().unwrap();
+    let later = format!("{at}&after={}", start + 3600);
+    let (_, read) = call(&router, Method::GET, &later, None).await;
+    assert_eq!(read["candles"], json!([]), "none from a later hour");
+    let (_, read) = call(
+        &router,
+        Method::GET,
+        "/v1/markets/kraken/candles?asset=BTC",
+        None,
+    )
+    .await;
+    assert_eq!(read["candles"], json!([]), "kraken failed: none");
+    let (status, _) = call(
+        &router,
+        Method::GET,
+        "/v1/markets/nope/candles?asset=BTC",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let failed = kept(
+        &router,
+        "/v1/logs?market=kraken&target=market.feed.failed",
+        1,
+    )
+    .await;
+    assert_eq!(failed[0]["market"], "kraken");
+    assert_eq!(failed[0]["fields"]["status"], "-", "no HTTP answer");
+    let answered = kept(
+        &router,
+        "/v1/logs?market=binance&target=market.feed.answered",
+        1,
+    )
+    .await;
+    assert_eq!(answered[0]["level"], "debug");
+    assert_eq!(answered[0]["fields"]["assets"], "5", "every seeded ticker");
+    let (_, all) = call(&router, Method::GET, "/v1/logs?market=kraken", None).await;
+    let all = all["logs"].as_array().unwrap();
+    assert!(
+        all.iter().all(|entry| entry["market"] == "kraken"),
+        "{all:?}"
+    );
 }

@@ -9,8 +9,8 @@
 //! cannot recover off through its `nodes::NodeSwitch`, and counted), `logs` keeps the
 //! events (`DbLayer`) and reads them back, `sdk` puts
 //! `base`'s store traits on the models, `tasks` is the job queue, `trigger`
-//! the trigger package's store, and `workers` are the background jobs with
-//! their executor.
+//! the trigger package's store, `market` the markets' USD quotes, and
+//! `workers` are the background jobs with their executor.
 
 pub(crate) mod blocks;
 mod decorators;
@@ -18,6 +18,8 @@ mod error;
 pub(crate) mod indexes;
 pub(crate) mod jobs;
 pub(crate) mod logs;
+pub(crate) mod market;
+pub(crate) mod markets;
 pub(crate) mod networks;
 mod nodes;
 pub(crate) mod sdk;

@@ -60,6 +60,8 @@ pub(crate) mod id;
 mod json;
 pub(crate) mod leg;
 pub(crate) mod log;
+pub(crate) mod market;
+pub(crate) mod market_candle_1h;
 pub(crate) mod network;
 pub(crate) mod network_asset;
 pub(crate) mod network_index;

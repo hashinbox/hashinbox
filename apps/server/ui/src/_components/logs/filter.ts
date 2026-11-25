@@ -7,13 +7,23 @@ import { walletOf } from './render';
 
 /** The query parameters a tag sets. */
 export type Group =
-  'level' | 'target' | 'network' | 'wallet_id' | 'job_id' | 'transaction_id' | 'trigger_id';
+  | 'level'
+  | 'target'
+  | 'network'
+  | 'wallet_id'
+  | 'job_id'
+  | 'transaction_id'
+  | 'trigger_id'
+  | 'market';
 
 export type Filter = Tag<Group>;
 
-/** What the log view is opened on: a network (`chain/name`), job, wallet, transaction or trigger. */
+/** What the log view is opened on: a network (`chain/name`), job, wallet, transaction, trigger or market. */
 export type LogFilter = Partial<
-  Record<'network' | 'job_id' | 'wallet_id' | 'transaction_id' | 'trigger_id', string | number>
+  Record<
+    'network' | 'job_id' | 'wallet_id' | 'transaction_id' | 'trigger_id' | 'market',
+    string | number
+  >
 >;
 
 export const LEVELS = ['error', 'warn', 'info', 'debug', 'trace'] as const;

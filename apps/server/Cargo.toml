@@ -24,9 +24,11 @@ crypto = { path = "../../packages/crypto" }
 chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
-# The stream of `GET .../tip/search` (axum's SSE takes a `Stream`).
-futures-util = { version = "0.3", default-features = false }
+# The stream of `GET .../tip/search` (axum's SSE takes a `Stream`); the market feeds asked at once (`join_all`).
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex.workspace = true
+# The market feeds' public HTTP APIs (`usecase::market`).
+reqwest.workspace = true
 # Parses the RFC 3339 time `GET .../tip?at=` finds a block by.
 jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 http-server = { path = "../../packages/http-server" }
@@ -67,7 +69,6 @@ http-body-util = "=0.1.4"
 rpc = { path = "../../packages/rpc", features = ["testing"] }
 # The store contract the SQLite queue runs.
 tasks = { path = "../../packages/tasks", features = ["runner", "testing"] }
-reqwest.workspace = true
 sha2.workspace = true
 tempfile = "=3.27.0"
 # A fixed-price fee estimator for `send` over the SQLite store (`tests/pipe.rs`).

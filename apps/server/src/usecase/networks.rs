@@ -309,9 +309,9 @@ pub(crate) async fn set_endpoint_state(
     db.write(move |connection| Ok(endpoint_failure::db::insert(connection, &record)?))
         .await?;
     if enabled {
-        tracing::info!(target: "endpoint.enabled", node = id, reason, "RPC node enabled");
+        tracing::info!(target: crate::events::ENDPOINT_ENABLED, node = id, reason);
     } else {
-        tracing::info!(target: "endpoint.disabled", node = id, kind = "manual", reason, "RPC node disabled");
+        tracing::info!(target: crate::events::ENDPOINT_DISABLED, node = id, kind = "manual", reason);
     }
     connected(container, db, queue, network).await
 }

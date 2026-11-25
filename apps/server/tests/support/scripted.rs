@@ -273,7 +273,10 @@ pub(crate) fn limited(
     script: Arc<Script>,
     max_depth: Option<u64>,
 ) -> Arc<base::Container<crate::usecase::Transport>> {
-    let container = base::Container::new(crate::usecase::sdk::Stores::storage(db.clone()));
+    let container = base::Container::new(crate::usecase::sdk::Stores::storage(
+        db.clone(),
+        Default::default(),
+    ));
     let config = config(max_depth);
     let node: Arc<dyn rpc::Client> = Arc::new(rpc::testing::Script::default());
 

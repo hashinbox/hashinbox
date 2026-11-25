@@ -17,8 +17,9 @@ use diesel::{
 };
 
 use super::{
-    Id, IdError, Json, block::BlockId, int, schema::leg, transaction::TransactionId, uint,
-    wallet_index::WalletIndexId,
+    Id, IdError, Json, NetworkAsset, block::BlockId, int,
+    market_candle_1h::MarketCandles1hExchangeAssetMapCached, schema::leg,
+    transaction::TransactionId, uint, wallet_index::WalletIndexId,
 };
 
 /// A leg's id: under its transaction, `{transaction}.{index}`; a block
@@ -112,6 +113,22 @@ pub(crate) struct Leg {
     /// A received coin a jump wrote off: that jump's position; never
     /// spendable again. Null otherwise.
     pub(crate) archived_at: Option<i64>,
+    /// Its value in USD, exact decimal, signed as it adds to the balance
+    /// (negative for a spent, burned or fee leg): `amount` in display units
+    /// times its asset's USD price at its hour (its block's
+    /// time, else when its transaction was recorded) when it was mined;
+    /// null when there was none, while pending, and for an adjustment.
+    /// Never filled later.
+    #[schema(required)]
+    pub(crate) amount_usd: Option<String>,
+    /// `total_received` in USD: each received leg's `amount_usd` (null: 0)
+    /// added; `None` while pending.
+    #[schema(required)]
+    pub(crate) total_received_usd: Option<String>,
+    /// `total_sent` in USD: each sent leg's `amount_usd` (null: 0) added;
+    /// `None` while pending.
+    #[schema(required)]
+    pub(crate) total_sent_usd: Option<String>,
 }
 
 /// Legs parsed from a JSON column (an array SQLite built).
@@ -157,6 +174,9 @@ impl TryFrom<(&TransactionId, u32, &base::Leg)> for Leg {
             total_received: None,
             total_sent: None,
             archived_at: None,
+            amount_usd: None,
+            total_received_usd: None,
+            total_sent_usd: None,
         })
     }
 }
@@ -186,6 +206,9 @@ impl TryFrom<(&BlockId, &Reward)> for Leg {
             total_received: None,
             total_sent: None,
             archived_at: None,
+            amount_usd: None,
+            total_received_usd: None,
+            total_sent_usd: None,
         })
     }
 }
@@ -197,13 +220,19 @@ impl Networked for Leg {
 }
 
 /// Where an index's legs continue from (`db::find_running`): its highest
-/// seq ever kept, and its last mined leg's total, received and sent.
+/// seq ever kept, and its last mined leg's total, received and sent, in
+/// units and in USD.
 pub(crate) struct Running {
     pub(crate) seq: i64,
     pub(crate) total: Decimal,
     pub(crate) received: Decimal,
     pub(crate) sent: Decimal,
+    pub(crate) received_usd: Decimal,
+    pub(crate) sent_usd: Decimal,
 }
+
+/// Fractional digits a USD value keeps, cut toward zero.
+const USD_DIGITS: u32 = 8;
 
 impl Leg {
     /// Adjustment `leg_index` (0: a settle, 1: a write-off) of index
@@ -239,6 +268,9 @@ impl Leg {
             total_received: None,
             total_sent: None,
             archived_at: None,
+            amount_usd: None,
+            total_received_usd: None,
+            total_sent_usd: None,
         })
     }
 
@@ -246,24 +278,53 @@ impl Leg {
     /// far (`db::find_running`), and moves them on to it: it takes the
     /// next seq and adds its signed amount to the total; a received,
     /// minted or reward leg counts as received, a spent, burned or fee leg
-    /// as sent, an adjustment as neither.
+    /// as sent, an adjustment as neither. Its `amount_usd` ([`Self::price`])
+    /// counts in the USD totals the same way; null counts 0.
     ///
     /// # Errors
     ///
-    /// When its amount or kind does not decode.
+    /// When its amount, kind or `amount_usd` does not decode.
     pub(crate) fn follow(&mut self, running: &mut Running) -> anyhow::Result<()> {
         let signed = self.signed()?;
+        let counted = match &self.amount_usd {
+            Some(usd) => usd.parse().context("a stored USD value does not decode")?,
+            None => Decimal::zero(),
+        };
         running.total += &signed;
         match self.kind {
             ADJUSTMENT => {}
-            0 | 3 | REWARD => running.received += signed,
-            _ => running.sent -= signed,
+            0 | 3 | REWARD => {
+                running.received += signed;
+                running.received_usd += counted;
+            }
+            _ => {
+                running.sent -= signed;
+                running.sent_usd -= counted;
+            }
         }
         running.seq += 1;
         self.seq = Some(running.seq);
         self.total = Some(running.total.to_string());
         self.total_received = Some(running.received.to_string());
         self.total_sent = Some(running.sent.to_string());
+        self.total_received_usd = Some(running.received_usd.to_string());
+        self.total_sent_usd = Some(running.sent_usd.to_string());
+        Ok(())
+    }
+
+    /// Values it at `usd`, the USD price of one display unit of `asset`
+    /// (its own): `amount_usd` is its signed amount in USD, cut toward
+    /// zero to [`USD_DIGITS`] digits.
+    ///
+    /// # Errors
+    ///
+    /// When its amount or kind does not decode.
+    pub(crate) fn price(&mut self, asset: &NetworkAsset, usd: &Decimal) -> anyhow::Result<()> {
+        let unit =
+            (0..asset.decimals).fold(Decimal::from(1_u64), |unit, _| unit * Decimal::from(10_u64));
+        let value = (self.signed()? * usd.clone()).checked_div(&unit);
+        let value = value.unwrap_or_else(Decimal::zero).truncate(USD_DIGITS);
+        self.amount_usd = Some(value.to_string());
         Ok(())
     }
 
@@ -370,6 +431,30 @@ impl Leg {
 }
 
 impl Legs {
+    /// Values each at its asset's latest price in `candles`, its asset
+    /// (ticker, decimals) found in `assets` (its network's); a leg of an
+    /// asset not there or with no price stays unvalued.
+    ///
+    /// # Errors
+    ///
+    /// When an amount or kind does not decode.
+    pub(crate) fn price(
+        &mut self,
+        assets: &[NetworkAsset],
+        candles: &MarketCandles1hExchangeAssetMapCached,
+    ) -> anyhow::Result<()> {
+        for leg in &mut self.0 {
+            let Some(asset) = assets.iter().find(|asset| asset.asset == leg.asset) else {
+                continue;
+            };
+            let Some(usd) = candles.close(&asset.ticker) else {
+                continue;
+            };
+            leg.price(asset, &usd)?;
+        }
+        Ok(())
+    }
+
     /// The wallet indexes (ids) they are of.
     pub(crate) fn indexes(&self) -> BTreeSet<String> {
         self.0
@@ -509,11 +594,15 @@ pub(crate) mod db {
             total_received: String,
             #[diesel(sql_type = Text)]
             total_sent: String,
+            #[diesel(sql_type = Text)]
+            total_received_usd: String,
+            #[diesel(sql_type = Text)]
+            total_sent_usd: String,
         }
         // Where each wallet index of `?1` (a JSON list of ids) continues from
         // at position `?2`: the highest seq it has ever kept (0: none) and the
         // totals of its last mined leg (or adjustment) at or below `?2`
-        // (`last`; '0': none).
+        // (`last`; '0': none, or USD totals of a leg kept before they were).
         let rows: Vec<Row> = diesel::sql_query(
             "
             SELECT
@@ -525,7 +614,9 @@ pub(crate) mod db {
                 ) AS seq,
                 COALESCE(last.total, '0') AS total,
                 COALESCE(last.total_received, '0') AS total_received,
-                COALESCE(last.total_sent, '0') AS total_sent
+                COALESCE(last.total_sent, '0') AS total_sent,
+                COALESCE(last.total_received_usd, '0') AS total_received_usd,
+                COALESCE(last.total_sent_usd, '0') AS total_sent_usd
             FROM json_each(?1) i
             LEFT JOIN leg last ON last.id = (
                 SELECT l.id
@@ -549,6 +640,8 @@ pub(crate) mod db {
                     total: parse(&row.total)?,
                     received: parse(&row.total_received)?,
                     sent: parse(&row.total_sent)?,
+                    received_usd: parse(&row.total_received_usd)?,
+                    sent_usd: parse(&row.total_sent_usd)?,
                 };
                 Ok((row.id, running))
             })
@@ -718,6 +811,8 @@ pub(crate) mod db {
                 leg::total.eq(None::<String>),
                 leg::total_received.eq(None::<String>),
                 leg::total_sent.eq(None::<String>),
+                leg::total_received_usd.eq(None::<String>),
+                leg::total_sent_usd.eq(None::<String>),
             ))
             .execute(connection)
     }
@@ -847,5 +942,97 @@ pub(crate) mod db {
                 }
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use base::{Address, Asset, Chain, Decimal, Network};
+
+    use super::{ADJUSTMENT, Leg, Running};
+    use crate::models::wallet_index::WalletIndexId;
+    use crate::models::{NetworkAsset, network_asset::NetworkAssetKind};
+
+    /// A leg of `kind` of `amount` satoshi, unnumbered.
+    fn leg(kind: i32, amount: u64) -> Leg {
+        let network = Network::new(Chain::new("bitcoin"), "regtest");
+        let asset = Asset {
+            network: network.clone(),
+            id: "native".to_owned(),
+        };
+        let index = WalletIndexId::of(&Address::new(network, "alice"), &asset).unwrap();
+        let mut leg = Leg::adjustment(0, &index, 0, &Decimal::from(amount)).unwrap();
+        leg.kind = kind;
+        leg
+    }
+
+    /// Nothing kept yet.
+    fn start() -> Running {
+        Running {
+            seq: 0,
+            total: Decimal::zero(),
+            received: Decimal::zero(),
+            sent: Decimal::zero(),
+            received_usd: Decimal::zero(),
+            sent_usd: Decimal::zero(),
+        }
+    }
+
+    /// `leg` valued at BTC's `usd`, then numbered after `running`.
+    fn follow_at(leg: &mut Leg, running: &mut Running, usd: &str) {
+        let btc = NetworkAsset {
+            asset: "native".to_owned(),
+            kind: NetworkAssetKind::Native,
+            contract: None,
+            ticker: "BTC".to_owned(),
+            decimals: 8,
+            display_decimals: None,
+        };
+        leg.price(&btc, &usd.parse().unwrap()).unwrap();
+        leg.follow(running).unwrap();
+    }
+
+    /// `leg`'s amount_usd and USD totals.
+    fn usd(leg: &Leg) -> [Option<&str>; 3] {
+        [
+            leg.amount_usd.as_deref(),
+            leg.total_received_usd.as_deref(),
+            leg.total_sent_usd.as_deref(),
+        ]
+    }
+
+    #[test]
+    fn follow_counts_usd_as_received_and_sent_move() {
+        let mut running = start();
+        let mut received = leg(0, 150_000_000);
+        follow_at(&mut received, &mut running, "64000.5");
+        assert_eq!(
+            usd(&received),
+            [Some("96000.75"), Some("96000.75"), Some("0")]
+        );
+        let mut spent = leg(1, 1);
+        follow_at(&mut spent, &mut running, "64000");
+        assert_eq!(
+            usd(&spent),
+            [Some("-0.00064"), Some("96000.75"), Some("0.00064")],
+            "signed; cut to 8 digits"
+        );
+        let mut adjusted = leg(ADJUSTMENT, 5);
+        follow_at(&mut adjusted, &mut running, "1");
+        assert_eq!(
+            usd(&adjusted)[1..],
+            [Some("96000.75"), Some("0.00064")],
+            "an adjustment counts as neither"
+        );
+        let mut unpriced = leg(0, 100_000_000);
+        unpriced.follow(&mut running).unwrap();
+        assert_eq!(
+            usd(&unpriced),
+            [None, Some("96000.75"), Some("0.00064")],
+            "no price: null, counts 0"
+        );
+        let mut tiny = leg(0, 1);
+        follow_at(&mut tiny, &mut running, "3000");
+        assert_eq!(tiny.amount_usd.as_deref(), Some("0.00003"));
     }
 }

@@ -350,6 +350,8 @@ pub(crate) mod db {
                             'balance_confirmed', wi.balance_confirmed,
                             'balance_confirmed_received', wi.balance_confirmed_received,
                             'balance_confirmed_sent', wi.balance_confirmed_sent,
+                            'balance_confirmed_received_usd', wi.balance_confirmed_received_usd,
+                            'balance_confirmed_sent_usd', wi.balance_confirmed_sent_usd,
                             'balance_pending', wi.balance_pending,
                             'keyed', json(iif(wi.keyed, 'true', 'false')),
                             'balance_confirmed_spendable', wi.balance_confirmed_spendable
@@ -407,6 +409,8 @@ pub(crate) mod db {
                             'balance_confirmed', wi.balance_confirmed,
                             'balance_confirmed_received', wi.balance_confirmed_received,
                             'balance_confirmed_sent', wi.balance_confirmed_sent,
+                            'balance_confirmed_received_usd', wi.balance_confirmed_received_usd,
+                            'balance_confirmed_sent_usd', wi.balance_confirmed_sent_usd,
                             'balance_pending', wi.balance_pending,
                             'keyed', json(iif(wi.keyed, 'true', 'false')),
                             'balance_confirmed_spendable', wi.balance_confirmed_spendable

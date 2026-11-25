@@ -677,7 +677,7 @@ pub(super) async fn forget(db: &Db, txid: &str, why: Why) -> usize {
         .unwrap()
 }
 
-fn pending(network: &Network, txid: &str, to: &str, amount: u64) -> Transaction {
+pub(super) fn pending(network: &Network, txid: &str, to: &str, amount: u64) -> Transaction {
     let mut transaction = payment(network, txid, to, amount, None);
     transaction.state = TransactionState::Pending;
     transaction.order = None;
@@ -2087,7 +2087,10 @@ async fn reads(
 
 /// Prunes the test network as the prune job does.
 async fn prune(db: &Db) {
-    let container = Arc::new(base::Container::new(Stores::storage(db.clone())));
+    let container = Arc::new(base::Container::new(Stores::storage(
+        db.clone(),
+        Default::default(),
+    )));
     crate::usecase::workers::prune::Prune::new(db.clone(), container)
         .blocks()
         .await
@@ -3970,15 +3973,33 @@ async fn a_kept_leg_and_each_settle_are_logged_at_their_levels() {
     assert_eq!(shown, ["alice", "received", "7", "a", "1", "7"]);
     assert_eq!(leg.wallet_id.as_deref(), Some("bitcoin.regtest.alice"));
     assert_eq!(leg.transaction_id.as_deref(), Some("bitcoin.regtest.a"));
-    let blocks: Vec<_> = of("index.block")
-        .map(|log| (log.level.as_str(), log.fields.0["matched"].as_str()))
-        .collect();
-    assert_eq!(blocks, [("debug", "0"), ("info", "1")]);
-    let settles: Vec<_> = of("index.settle")
-        .map(|log| (log.level.as_str(), log.fields.0["adjustment"].as_str()))
-        .collect();
-    assert_eq!(settles, [("debug", "0"), ("warn", "3")], "{logs:?}");
-    let gap = of("index.settle").next_back().unwrap();
-    assert!(gap.fields.0.contains_key("why"), "{gap:?}");
+    /// Each event of `prefix`: its code, level and field `key`.
+    fn logged<'a>(logs: &'a [crate::models::Log], prefix: &str, key: &str) -> Vec<[&'a str; 3]> {
+        let of = logs.iter().filter(|log| log.target.starts_with(prefix));
+        of.map(|log| {
+            [
+                log.target.as_str(),
+                log.level.as_str(),
+                log.fields.0[key].as_str(),
+            ]
+        })
+        .collect()
+    }
+    assert_eq!(
+        logged(&logs, "index.block.", "matched"),
+        [
+            ["index.block.unmatched", "debug", "0"],
+            ["index.block.matched", "info", "1"]
+        ]
+    );
+    assert_eq!(
+        logged(&logs, "index.settle.", "adjustment"),
+        [
+            ["index.settle.unchanged", "debug", "0"],
+            ["index.settle.adjusted", "warn", "3"]
+        ],
+        "{logs:?}"
+    );
+    let gap = of("index.settle.adjusted").next_back().unwrap();
     assert_eq!(gap.wallet_id.as_deref(), Some("bitcoin.regtest.alice"));
 }

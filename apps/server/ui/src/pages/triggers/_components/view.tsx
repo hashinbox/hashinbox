@@ -1,7 +1,8 @@
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
-import Chip from '@mui/material/Chip';
+import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
+import Switch from '@mui/material/Switch';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
 import TableCell from '@mui/material/TableCell';
@@ -11,6 +12,7 @@ import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode } from 'react';
 import { call, client, type Trigger, type TriggerRun } from '@/api/client';
 import { EmptyRow } from '@/_components/table';
+import { LogsButton } from '@/_components/logs/button';
 import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
 import { assetName } from '@/money';
@@ -39,10 +41,15 @@ export function View({
   shell,
   initial,
   onEdit,
+  onDelete,
+  onChanged,
 }: {
   shell: Shell;
   initial: Trigger;
   onEdit: () => void;
+  onDelete: () => void;
+  /** After it was turned on or off. */
+  onChanged: () => void;
 }) {
   const [trigger, setTrigger] = useState<Trigger>(initial);
   const [runs, setRuns] = useState<TriggerRun[]>([]);
@@ -65,20 +72,35 @@ export function View({
   const name = (asset: string) => assetName(shell.listings, trigger.chain, trigger.network, asset);
   const last = trigger.last_round;
 
+  // Turns it on or off: the same trigger kept again with `enabled` flipped.
+  const toggle = () => {
+    const { chain, network, selector, filter, check, action } = parts;
+    const body = { chain, network, selector, filter, check, action, enabled: !trigger.enabled };
+    call(client.PUT('/v1/triggers/{id}', { params: { path: { id } }, body: body as never }))
+      .then((saved) => {
+        setTrigger(saved);
+        onChanged();
+      })
+      .catch(shell.fail);
+  };
+
   return (
     <Box component="article" sx={{ maxWidth: 900 }}>
       <Stack direction="row" spacing={1.5} sx={{ alignItems: 'center', mb: 0.5 }}>
         <Typography variant="h2" component="h1" sx={{ fontFamily: mono, flexGrow: 1 }}>
           {trigger.id}
         </Typography>
-        <Chip
-          size="small"
-          label={trigger.enabled ? 'on' : 'off'}
-          color={trigger.enabled ? 'success' : 'default'}
+        <FormControlLabel
+          control={<Switch checked={trigger.enabled} onChange={toggle} />}
+          label={trigger.enabled ? 'On' : 'Off'}
         />
         <Button variant="outlined" size="small" onClick={onEdit}>
           Edit
         </Button>
+        <Button variant="outlined" size="small" color="error" onClick={onDelete}>
+          Delete
+        </Button>
+        <LogsButton filter={{ trigger_id: trigger.id }} />
       </Stack>
       <Typography variant="overline" component="p" sx={{ mb: 2 }}>
         {trigger.chain}/{trigger.network}

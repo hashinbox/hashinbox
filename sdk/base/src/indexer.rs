@@ -216,9 +216,8 @@ impl Indexer {
             fetched.kept.legs,
         );
         tracing::debug!(
-            target: "index.step",
-            start, end, blocks, ms, outcome, calls, rpc_ms, wait_ms, transactions, matched, legs, lag,
-            "Index step finished"
+            target: crate::events::INDEX_STEP,
+            start, end, blocks, ms, outcome, calls, rpc_ms, wait_ms, transactions, matched, legs, lag
         );
         next
     }
@@ -377,7 +376,7 @@ impl Indexer {
     async fn reorg(&self, last: &BlockHeader) -> anyhow::Result<Next> {
         self.blocks.delete(self.network(), last.position).await?;
         self.stats.get().reorgs += 1;
-        tracing::info!(target: "index.reorg", position = last.position, "Kept blocks reorged");
+        tracing::info!(target: crate::events::INDEX_REORG, position = last.position);
         Ok(Next::Reorged(last.position))
     }
 }

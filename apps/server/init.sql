@@ -143,6 +143,17 @@ CREATE TABLE leg (
     total_received TEXT,            -- Exact decimal; NULL while pending.
     total_sent    TEXT,             -- Exact decimal; NULL while pending.
     archived_at   INTEGER,          -- A received coin: the jump line that wrote it off.
+    -- Exact decimal USD, signed as the leg adds to its balance (negative
+    -- for a spend, burn or fee): amount (in display units) times
+    -- its asset's latest USD price when it was kept: the median close of
+    -- the markets' newest hour of the asset (the market job's, in
+    -- memory). NULL when there was none, and for a pending leg or an
+    -- adjustment; never filled later.
+    amount_usd    TEXT,
+    -- As total_received and total_sent, in USD: each leg's amount_usd (none:
+    -- 0) added. NULL while pending.
+    total_received_usd TEXT,
+    total_sent_usd TEXT,
     CHECK (kind BETWEEN 0 AND 6),
     CHECK (("transaction" IS NULL) = (kind IN (5, 6))),
     CHECK (kind <> 6 OR leg_index IN (0, 1)),
@@ -185,7 +196,10 @@ SELECT
                 'total', l.total,
                 'total_received', l.total_received,
                 'total_sent', l.total_sent,
-                'archived_at', l.archived_at
+                'archived_at', l.archived_at,
+                'amount_usd', l.amount_usd,
+                'total_received_usd', l.total_received_usd,
+                'total_sent_usd', l.total_sent_usd
             )
             ORDER BY l.leg_index
         )
@@ -279,7 +293,9 @@ CREATE INDEX transaction_index_progress ON transaction_index (indexed_at);
 -- Its confirmed balances, NULL while that is unknown
 -- (no `network_index` confirmed position): `balance_confirmed`,
 -- `balance_confirmed_received`, `balance_confirmed_sent`, the totals of its
--- last mined leg at or below `finality_at` (`c`; '0': none);
+-- last mined leg at or below `finality_at` (`c`; '0': none), and
+-- `balance_confirmed_received_usd`, `balance_confirmed_sent_usd`, that
+-- leg's `total_received_usd` and `total_sent_usd`;
 -- `balance_confirmed_spendable`, `balance_confirmed` less its outgoing legs
 -- (spent, burned, fee) not yet in it: pending (no block), or mined in a
 -- block above `finality_at`. `balance_pending`: what it will hold once
@@ -302,6 +318,8 @@ SELECT
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total, '0')) AS balance_confirmed,
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total_received, '0')) AS balance_confirmed_received,
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total_sent, '0')) AS balance_confirmed_sent,
+    IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total_received_usd, '0')) AS balance_confirmed_received_usd,
+    IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, COALESCE(c.total_sent_usd, '0')) AS balance_confirmed_sent_usd,
     IIF(i.confirmed IS NULL OR wi.indexed_at IS NULL, NULL, (
         SELECT SUM_DECIMAL(v)
         FROM (
@@ -403,6 +421,39 @@ CREATE TABLE network_asset (
     PRIMARY KEY (chain, network, asset),
     FOREIGN KEY (chain, network) REFERENCES network (chain, network)
 );
+
+-- A source of market data, and later of swaps: one row per implementation
+-- (`usecase::market`: binance, kraken, coinbase, bitstamp, coingecko),
+-- seeded (`seed.sql`). feed: the market job asks it for quotes
+-- (market_candle_1h); the user can turn one off. updated_at: Unix ms it was
+-- last changed.
+CREATE TABLE market (
+    name       TEXT    PRIMARY KEY,
+    feed       INTEGER NOT NULL DEFAULT 1 CHECK (feed IN (0, 1)),
+    updated_at INTEGER NOT NULL
+);
+
+-- One market's hour of one asset's USD price (the market job, asking
+-- every 10 s): asset, a `network_asset` ticker (`BTC`); start, the hour,
+-- Unix seconds, hour-aligned; open, high, low, close, exact decimal USD:
+-- the hour's first quote, its extremes and its latest; updated_at, Unix ms
+-- its last quote answered. What an asset was worth in an hour is the
+-- median close of its candles. A USDT quote counts as USD 1:1 for a
+-- non-stable asset; a stablecoin is quoted in USD only.
+CREATE TABLE market_candle_1h (
+    market     TEXT    NOT NULL REFERENCES market (name),
+    asset      TEXT    NOT NULL,
+    start      INTEGER NOT NULL,
+    open       TEXT    NOT NULL,
+    high       TEXT    NOT NULL,
+    low        TEXT    NOT NULL,
+    close      TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (market, asset, start),
+    CHECK (start % 3600 = 0)
+);
+-- Every market's candles of an hour (and asset): one seek.
+CREATE INDEX market_candle_1h_start ON market_candle_1h (start, asset);
 
 -- What each network's indexer last wrote, written the first time its tip is
 -- known (no row: no tip yet; the server indexes every `enabled` network):
@@ -609,16 +660,19 @@ LEFT JOIN index_job j ON j.topic = 'index:' || n.chain || ':' || n.network;
 
 
 -- One event the server kept (`usecase::logs::DbLayer`, `--log-db`): at: Unix
--- ms; level: error, warn, info, debug or trace; target: the event
--- (`rpc.http`, `index.step`, ...); fields: its and its spans' key=vals as a
--- JSON object of text; chain, network: its network (a `network` field),
--- both NULL for one of no network; job_id: the job it ran in (a `job_id`
--- field), NULL outside a job, its logs deleted with it; wallet_id,
+-- ms; level: error, warn, info, debug or trace; target: the event's code
+-- (`rpc.http.failed`, `index.step`, ...); message: its own text, NULL for
+-- its code's template (`apps/server/logs.json`); fields: its and its
+-- spans' key=vals as a JSON object of text; chain, network: its network
+-- (a `network` field), both NULL for one of no network; job_id: the job
+-- it ran in (a `job_id` field), NULL outside a job, its logs deleted with
+-- it; wallet_id,
 -- transaction_id: the wallet (`{chain}.{network}.{address}`) and the
 -- transaction (`{chain}.{network}.{txid}`) it concerns (a `wallet_id` or
 -- `wallet` field, a `transaction_id` or `txid` field), NULL for none;
 -- trigger_id: the trigger it concerns (a `trigger_id` or `trigger` field),
--- NULL for none. Written in batches; the prune job keeps debug and trace
+-- NULL for none; market: the market it concerns (a `market` field), NULL
+-- for none. Written in batches; the prune job keeps debug and trace
 -- 24 hours, the rest 30 days, and at most the newest 10 000 of each job,
 -- and of each network's (and no network's) entries outside a job.
 CREATE TABLE log (
@@ -626,7 +680,7 @@ CREATE TABLE log (
     at             INTEGER NOT NULL,
     level          TEXT    NOT NULL,
     target         TEXT    NOT NULL,
-    message        TEXT    NOT NULL,
+    message        TEXT,
     fields         TEXT    NOT NULL CHECK (json_valid(fields)),
     chain          TEXT,
     network        TEXT,
@@ -634,6 +688,7 @@ CREATE TABLE log (
     wallet_id      TEXT,
     transaction_id TEXT,
     trigger_id     TEXT,
+    market         TEXT,
     CHECK ((chain IS NULL) = (network IS NULL)),
     FOREIGN KEY (chain, network) REFERENCES network (chain, network) ON DELETE CASCADE
 );
@@ -649,6 +704,8 @@ CREATE INDEX log_wallet ON log (wallet_id, id);
 CREATE INDEX log_transaction ON log (transaction_id, id);
 -- A trigger's entries, newest first.
 CREATE INDEX log_trigger ON log (trigger_id, id);
+-- A market's entries, newest first.
+CREATE INDEX log_market ON log (market, id);
 -- Entries by time: a jump to a moment, and the prune.
 CREATE INDEX log_at ON log (at);
 

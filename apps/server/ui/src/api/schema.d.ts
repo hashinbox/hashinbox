@@ -110,9 +110,29 @@ export interface paths {
         };
         /**
          * List the kept log entries
-         * @description The kept entries the filters read, newest first, a page at a time: its level, event (`target`), message and fields, and its network, job, wallet, transaction and trigger when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.
+         * @description The kept entries the filters read, newest first, a page at a time: its level, event (`target`), own message (null: its template's, `/v1/logs/messages`) and fields, and its network, job, wallet, transaction, trigger and market when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.
          */
         get: operations["list_logs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/logs/messages": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the log message templates
+         * @description Every event's (`target`) message template, by which a log entry with no `message` of its own reads: each `{key}` filled from its field `key`. An event without a template reads as its code and its fields. They change only with the server, so the answer may be cached.
+         */
+        get: operations["list_log_messages"];
         put?: never;
         post?: never;
         delete?: never;
@@ -153,6 +173,66 @@ export interface paths {
          * @description Every event (`target`) a kept entry has, each once, in order: the values the `target` filter of the log lists and the stream takes.
          */
         get: operations["list_log_targets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/markets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the markets and the latest prices
+         * @description Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+         */
+        get: operations["list_markets"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/markets/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Turn a market's feed on or off
+         * @description Stores whether the market is asked for quotes; the market job reads it on its next tick (within 10 s).
+         */
+        patch: operations["set_market"];
+        trace?: never;
+    };
+    "/v1/markets/{name}/candles": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a market's hourly candles of an asset
+         * @description The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+         */
+        get: operations["list_market_candles"];
         put?: never;
         post?: never;
         delete?: never;
@@ -944,6 +1024,15 @@ export interface components {
             /** @description Exact atomic decimal text; signed for a reward or an adjustment. */
             amount: string;
             /**
+             * @description Its value in USD, exact decimal, signed as it adds to the balance
+             *     (negative for a spent, burned or fee leg): `amount` in display units
+             *     times its asset's USD price at its hour (its block's
+             *     time, else when its transaction was recorded) when it was mined;
+             *     null when there was none, while pending, and for an adjustment.
+             *     Never filled later.
+             */
+            amount_usd: string | null;
+            /**
              * Format: int64
              * @description A received coin a jump wrote off: that jump's position; never
              *     spendable again. Null otherwise.
@@ -985,11 +1074,21 @@ export interface components {
              */
             total_received?: string | null;
             /**
+             * @description `total_received` in USD: each received leg's `amount_usd` (null: 0)
+             *     added; `None` while pending.
+             */
+            total_received_usd: string | null;
+            /**
              * @description What its index has sent (spent, burned, fee) through it; `None` while
              *     pending. `total` is `total_received - total_sent` plus its index's
              *     adjustments so far.
              */
             total_sent?: string | null;
+            /**
+             * @description `total_sent` in USD: each sent leg's `amount_usd` (null: 0) added;
+             *     `None` while pending.
+             */
+            total_sent_usd: string | null;
             /** @description Its transaction; null for a reward or an adjustment. */
             transaction?: string | null;
             /** @description The wallet index it is kept for: its address's index in its asset. */
@@ -1056,10 +1155,19 @@ export interface components {
             job_id: number | null;
             /** @description `error`, `warn`, `info`, `debug` or `trace`. */
             level: string;
-            message: string;
+            /** @description The market it concerns (`binance`, …); always present, null: none. */
+            market: string | null;
+            /**
+             * @description The event's own message, in place of its template; always present,
+             *     null: none, the template's.
+             */
+            message: string | null;
             /** @description Its network's name; always present, null: no network's. */
             network: string | null;
-            /** @description The event: `rpc.http`, `index.step`, `send.broadcast`, … */
+            /**
+             * @description The event's code: `rpc.http.failed`, `index.step`, … Its message is
+             *     its template (`GET /v1/logs/messages`) filled from `fields`.
+             */
             target: string;
             /**
              * @description The transaction it concerns (`{chain}.{network}.{txid}`); always
@@ -1084,6 +1192,18 @@ export interface components {
              */
             next_cursor: string | null;
         };
+        /** @description Every event's message template. */
+        LogMessages: {
+            /**
+             * @description Each event (`target`) and its template: lower case text with
+             *     `{key}` placeholders, each filled from the entry's field `key`; a
+             *     placeholder of a field the entry lacks stays as it is. An entry's
+             *     own `message` takes the place of its template.
+             */
+            messages: {
+                [key: string]: string;
+            };
+        };
         /** @description The events log entries are kept of. */
         LogTargets: {
             /**
@@ -1091,6 +1211,72 @@ export interface components {
              *     filter takes.
              */
             targets: string[];
+        };
+        /** @description One `market` row. */
+        Market: {
+            /** @description Whether it is asked for quotes. */
+            feed: boolean;
+            /**
+             * @description Its implementation: `binance`, `kraken`, `coinbase`, `bitstamp` or
+             *     `coingecko`.
+             */
+            name: string;
+            /**
+             * Format: int64
+             * @description Unix ms it was last changed.
+             */
+            updated_at: number;
+        };
+        /**
+         * @description One `market_candle_1h` row: open, high, low and close are exact decimal
+         *     USD.
+         */
+        MarketCandle1h: {
+            /** @description A `network_asset` ticker: `BTC`. */
+            asset: string;
+            close: string;
+            high: string;
+            low: string;
+            /** @description The market (`market.name`) it is of. */
+            market: string;
+            open: string;
+            /**
+             * Format: int64
+             * @description The hour, Unix seconds, hour-aligned.
+             */
+            start: number;
+            /**
+             * Format: int64
+             * @description When its last quote answered, Unix ms.
+             */
+            updated_at: number;
+        };
+        /** @description `GET /v1/markets/{name}/candles`. */
+        MarketCandles: {
+            /** @description The market's hourly candles of the asset, oldest first. */
+            candles: components["schemas"]["MarketCandle1h"][];
+        };
+        /** @description `GET /v1/markets`. */
+        MarketList: {
+            /** @description Every market, by name. */
+            markets: components["schemas"]["MarketListing"][];
+            /**
+             * @description Each asset's latest USD price, exact decimal, by ticker: the median
+             *     close of the markets' candles of the current hour; empty until the
+             *     market job's first tick after a start.
+             */
+            prices: {
+                [key: string]: string;
+            };
+        };
+        /** @description A market and when it last answered. */
+        MarketListing: components["schemas"]["Market"] & {
+            /**
+             * Format: int64
+             * @description When its last quote answered, Unix ms; always present, null: no
+             *     candle kept.
+             */
+            last_at: number | null;
         };
         /**
          * @description A mined leg with its transaction's txid and state (null for a reward or
@@ -1429,6 +1615,11 @@ export interface components {
              * @description Jobs that succeeded in it.
              */
             succeeded: number;
+        };
+        /** @description `PATCH /v1/markets/{name}` body. */
+        SetMarket: {
+            /** @description Whether it is asked for quotes. */
+            feed: boolean;
         };
         /** @description `PUT /v1/networks/{chain}/{network}/endpoints/{id}/state` body. */
         SetRpcNodeState: {
@@ -1803,8 +1994,15 @@ export interface components {
              *     balance_confirmed_sent` plus its adjustments.
              */
             balance_confirmed_received?: string | null;
+            /**
+             * @description What it had received by then in USD, each leg at its price when
+             *     mined (that leg's `total_received_usd`; a leg without one adds 0).
+             */
+            balance_confirmed_received_usd?: string | null;
             /** @description What it had sent by then (fees included), the same way. */
             balance_confirmed_sent?: string | null;
+            /** @description What it had sent by then in USD, the same way (`total_sent_usd`). */
+            balance_confirmed_sent_usd?: string | null;
             /**
              * @description What it can spend: `balance_confirmed` less its outgoing legs not yet
              *     in it (pending, or mined above `finality_at`); null while
@@ -2083,6 +2281,8 @@ export interface operations {
                 transaction_id?: string;
                 /** @description Only entries of this trigger, its id. */
                 trigger_id?: string;
+                /** @description Only entries of this market, its name (`binance`). */
+                market?: string;
                 /**
                  * @description Only entries at this level or more severe: `error`, `warn`, `info`,
                  *     `debug` or `trace`.
@@ -2145,6 +2345,35 @@ export interface operations {
             };
         };
     };
+    list_log_messages: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The templates */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogMessages"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     stream_logs: {
         parameters: {
             query?: {
@@ -2158,6 +2387,8 @@ export interface operations {
                 transaction_id?: string;
                 /** @description Only entries of this trigger, its id. */
                 trigger_id?: string;
+                /** @description Only entries of this market, its name (`binance`). */
+                market?: string;
                 /**
                  * @description Only entries at this level or more severe: `error`, `warn`, `info`,
                  *     `debug` or `trace`.
@@ -2227,6 +2458,174 @@ export interface operations {
             };
             /** @description Missing or invalid bearer token */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_markets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The markets */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketList"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    set_market: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Its name, as `GET /v1/markets` lists it. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetMarket"];
+            };
+        };
+        responses: {
+            /** @description Stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketListing"];
+                };
+            };
+            /** @description Malformed body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such market */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_market_candles: {
+        parameters: {
+            query: {
+                /** @description The asset's ticker (`BTC`). */
+                asset: string;
+                /**
+                 * @description Only the hours starting at or after this, Unix seconds; at most the
+                 *     last 7 days.
+                 */
+                after?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Its name, as `GET /v1/markets` lists it. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The candles */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MarketCandles"];
+                };
+            };
+            /** @description Malformed query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description No such market */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

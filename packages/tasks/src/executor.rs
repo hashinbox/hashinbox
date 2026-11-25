@@ -144,9 +144,9 @@ impl<W: Worker> Task<W> {
             Ack::Done | Ack::Idle | Ack::Again(_, None) => "-",
         };
         if ack.failed() {
-            tracing::warn!(target: "job.run", ms, ack = ack.as_str(), reason, "Job ran");
+            tracing::warn!(target: crate::events::JOB_RUN, ms, ack = ack.as_str(), reason);
         } else {
-            tracing::debug!(target: "job.run", ms, ack = ack.as_str(), reason, "Job ran");
+            tracing::debug!(target: crate::events::JOB_RUN, ms, ack = ack.as_str(), reason);
         }
         drop(entered);
         self.job = self.job.clone().settle(ack, &W::POLICY, now());

@@ -1,34 +1,21 @@
 import Add from '@mui/icons-material/Add';
 import Bolt from '@mui/icons-material/Bolt';
-import DeleteOutlined from '@mui/icons-material/DeleteOutlined';
-import Edit from '@mui/icons-material/Edit';
-import Notes from '@mui/icons-material/Notes';
-import Settings from '@mui/icons-material/Settings';
 import Box from '@mui/material/Box';
-import Chip from '@mui/material/Chip';
 import IconButton from '@mui/material/IconButton';
-import List from '@mui/material/List';
-import ListItemButton from '@mui/material/ListItemButton';
-import ListItemIcon from '@mui/material/ListItemIcon';
-import Menu from '@mui/material/Menu';
-import MenuItem from '@mui/material/MenuItem';
-import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
-import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
 import { call, client, type Listing, type Trigger, type Wallet } from '@/api/client';
 import { assetName } from '@/money';
 import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
-import { mono } from '@/theme';
 import { Confirm } from '@/_components/confirm';
-import { openLogs } from '@/_components/logs/open';
 import { Editor } from './_components/editor';
 import { View } from './_components/view';
 import { Compose } from './_components/compose';
 import { Start } from './_components/start';
 import type { Definition } from './_components/forms';
 import { Split } from '@/_components/split';
+import { Side, SideItem } from '@/_components/side';
 
 /** What the right side shows: a stored trigger read or edited, new ones being written, or nothing. */
 type Open =
@@ -68,8 +55,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
   const [open, setOpen] = useState<Open>(null);
   const [choosing, setChoosing] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
-  // The trigger whose cog menu is open, and where; the one being deleted.
-  const [menu, setMenu] = useState<{ anchor: HTMLElement; trigger: Trigger } | null>(null);
+  // The trigger being deleted.
   const [deleting, setDeleting] = useState<Trigger | null>(null);
 
   const remove = (trigger: Trigger) => {
@@ -105,22 +91,9 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
         open={open !== null}
         onClose={() => setOpen(null)}
         list={
-          <Box
-            component="aside"
-            sx={(t) => ({
-              p: 2.5,
-              minWidth: 0,
-              borderBottom: `1px solid ${t.palette.divider}`,
-              [t.breakpoints.up('md')]: {
-                borderBottom: 0,
-                borderRight: `1px solid ${t.palette.divider}`,
-              },
-            })}
-          >
-            <Stack direction="row" sx={{ alignItems: 'center', mb: 1.5 }}>
-              <Typography variant="h3" sx={{ flexGrow: 1 }}>
-                Triggers
-              </Typography>
+          <Side
+            title="Triggers"
+            actions={
               <Tooltip title="New trigger">
                 <IconButton
                   size="small"
@@ -133,49 +106,23 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                   <Add fontSize="small" />
                 </IconButton>
               </Tooltip>
-            </Stack>
-            <List disablePadding aria-label="Triggers">
-              {triggers.map((t) => (
-                <ListItemButton
-                  key={t.id}
-                  selected={t.id === selected}
-                  onClick={() => setOpen({ view: t })}
-                  sx={{ py: 1.25, px: 1, display: 'block' }}
-                >
-                  <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
-                    <Typography noWrap sx={{ fontFamily: mono, fontSize: 13, flexGrow: 1 }}>
-                      {t.id}
-                    </Typography>
-                    <Chip
-                      size="small"
-                      label={t.enabled ? 'on' : 'off'}
-                      color={t.enabled ? 'success' : 'default'}
-                    />
-                    <IconButton
-                      size="small"
-                      aria-label={`Settings of ${t.id}`}
-                      onClick={(e) => {
-                        // The row stays as it is: the cog only opens its menu.
-                        e.stopPropagation();
-                        setMenu({ anchor: e.currentTarget, trigger: t });
-                      }}
-                      sx={{ mr: -0.5 }}
-                    >
-                      <Settings fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                  <Typography noWrap sx={{ fontSize: 11, color: 'text.secondary' }}>
-                    {t.chain}/{t.network} · {summary(t, shell.listings)}
-                  </Typography>
-                </ListItemButton>
-              ))}
-              {triggers.length === 0 && (
-                <Typography color="text.secondary" sx={{ py: 2, fontSize: 13 }}>
-                  No triggers yet. Start with +.
-                </Typography>
-              )}
-            </List>
-          </Box>
+            }
+            empty={triggers.length === 0 && 'No triggers yet. Start with +.'}
+          >
+            {triggers.map((t) => (
+              <SideItem
+                key={t.id}
+                name={t.id}
+                dot={{
+                  color: t.enabled ? 'success.main' : 'error.main',
+                  label: t.enabled ? 'On' : 'Off',
+                }}
+                selected={t.id === selected}
+                onClick={() => setOpen({ view: t })}
+                detail={`${t.chain}/${t.network} · ${summary(t, shell.listings)}`}
+              />
+            ))}
+          </Side>
         }
         detail={
           <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
@@ -186,6 +133,8 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                   shell={shell}
                   initial={open.view}
                   onEdit={() => setOpen({ edit: open.view })}
+                  onDelete={() => setDeleting(open.view)}
+                  onChanged={refresh}
                 />
               ) : 'edit' in open ? (
                 <Editor
@@ -221,48 +170,12 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
               <Empty icon={<Bolt />} title="Triggers">
                 A trigger watches wallets and sends money on its own when a rule is met, like a
                 balance going over a limit. Pick one to see what it does and how its rounds went;
-                edit or delete it from its cog. Add new ones with +.
+                edit or delete it there. Add new ones with +.
               </Empty>
             )}
           </Box>
         }
       />
-      <Menu anchorEl={menu?.anchor} open={menu !== null} onClose={() => setMenu(null)}>
-        <MenuItem
-          onClick={() => {
-            if (menu) setOpen({ edit: menu.trigger });
-            setMenu(null);
-          }}
-        >
-          <ListItemIcon>
-            <Edit fontSize="small" />
-          </ListItemIcon>
-          Edit
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            if (menu) openLogs({ trigger_id: menu.trigger.id });
-            setMenu(null);
-          }}
-        >
-          <ListItemIcon>
-            <Notes fontSize="small" />
-          </ListItemIcon>
-          Logs
-        </MenuItem>
-        <MenuItem
-          onClick={() => {
-            setDeleting(menu?.trigger ?? null);
-            setMenu(null);
-          }}
-          sx={{ color: 'error.main' }}
-        >
-          <ListItemIcon>
-            <DeleteOutlined fontSize="small" color="error" />
-          </ListItemIcon>
-          Delete
-        </MenuItem>
-      </Menu>
       <Confirm
         open={deleting !== null}
         title={`Delete ${deleting?.id ?? ''}`}

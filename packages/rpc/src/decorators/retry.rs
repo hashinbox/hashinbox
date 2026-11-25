@@ -105,7 +105,7 @@ impl<C: Client> Retry<C> {
             }
             if let Err(error) = &outcome {
                 let reason = error.label();
-                tracing::debug!(target: "rpc.retry", method, attempt, reason, "RPC call repeated");
+                tracing::debug!(target: crate::events::RPC_RETRY, method, attempt, reason);
             }
             tokio::time::sleep(self.backoff.delay(attempt)).await;
             attempt += 1;

@@ -51,3 +51,12 @@ VALUES
     ('ethereum', 'mainnet', 'https://ethereum-rpc.publicnode.com', 0),
     ('solana', 'devnet', 'https://api.devnet.solana.com', 0),
     ('solana', 'mainnet', 'https://api.mainnet-beta.solana.com', 0);
+
+-- Every market implementation, its price feed on.
+INSERT INTO market (name, feed, updated_at)
+VALUES
+    ('binance', 1, 0),
+    ('bitstamp', 1, 0),
+    ('coinbase', 1, 0),
+    ('coingecko', 1, 0),
+    ('kraken', 1, 0);

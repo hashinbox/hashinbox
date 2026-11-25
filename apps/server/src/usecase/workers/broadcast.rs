@@ -735,13 +735,13 @@ impl Broadcast {
                 let shown = name.as_str().unwrap_or("-");
                 match outcome {
                     Outcome::Final => {
-                        tracing::info!(target: "send.end", txid, outcome = shown, versions, "Payment ended");
+                        tracing::info!(target: crate::events::SEND_END_FINAL, txid, outcome = shown, versions);
                     }
                     Outcome::Refused | Outcome::Cancelled => {
-                        tracing::warn!(target: "send.end", txid, outcome = shown, versions, "Payment ended");
+                        tracing::warn!(target: crate::events::SEND_END_STOPPED, txid, outcome = shown, versions);
                     }
                     _ => {
-                        tracing::error!(target: "send.end", txid, outcome = shown, versions, "Payment failed for good");
+                        tracing::error!(target: crate::events::SEND_END_FAILED, txid, outcome = shown, versions);
                     }
                 }
                 ack
@@ -807,15 +807,15 @@ impl Broadcast {
             {
                 Ok(progress) => {
                     let txid = &progress.txid;
-                    tracing::info!(target: "send.sign", txid, "Payment signed");
+                    tracing::info!(target: crate::events::SEND_SIGN_SIGNED, txid);
                     progress
                 }
                 Err(Stop::Retry(reason)) => {
-                    tracing::warn!(target: "send.sign", reason, "Payment not signed; retried");
+                    tracing::warn!(target: crate::events::SEND_SIGN_RETRIED, reason);
                     return Ack::Retry(reason);
                 }
                 Err(Stop::Fail(reason)) => {
-                    tracing::error!(target: "send.sign", reason, "Payment not signed; failed for good");
+                    tracing::error!(target: crate::events::SEND_SIGN_FAILED, reason);
                     return Ack::Fail(reason);
                 }
             },
@@ -834,10 +834,16 @@ impl Broadcast {
                 Err(_) => "retry",
             };
             let txid = &progress.txid;
-            if matches!(sent, Ok(Sent::Accepted | Sent::Mined)) {
-                tracing::info!(target: "send.broadcast", txid, outcome, "Payment broadcast");
-            } else {
-                tracing::warn!(target: "send.broadcast", txid, outcome, "Payment broadcast");
+            match &sent {
+                Ok(Sent::Accepted | Sent::Mined) => {
+                    tracing::info!(target: crate::events::SEND_BROADCAST_ACCEPTED, txid, outcome);
+                }
+                Ok(Sent::Refused(_) | Sent::Forgotten) => {
+                    tracing::warn!(target: crate::events::SEND_BROADCAST_REFUSED, txid, outcome);
+                }
+                Ok(Sent::Unsure(_)) | Err(_) => {
+                    tracing::warn!(target: crate::events::SEND_BROADCAST_UNSURE, txid, outcome);
+                }
             }
             let why = match sent {
                 Ok(Sent::Accepted | Sent::Mined) => None,
@@ -910,9 +916,9 @@ impl Broadcast {
                 let now = task.state().unwrap_or(&progress);
                 let txid = now.txid.clone();
                 if now.cancels.contains(&txid) {
-                    tracing::warn!(target: "send.cancel", txid, outcome, "Payment cancelled");
+                    tracing::warn!(target: crate::events::SEND_CANCEL, txid, outcome);
                 } else {
-                    tracing::warn!(target: "send.bump", txid, outcome, "Payment bumped");
+                    tracing::warn!(target: crate::events::SEND_BUMP, txid, outcome);
                 }
                 let why = match bumped {
                     Ok(Bumped::Sent(why)) => why,

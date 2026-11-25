@@ -306,7 +306,7 @@
           "logs"
         ],
         "summary": "List the kept log entries",
-        "description": "The kept entries the filters read, newest first, a page at a time: its level, event (`target`), message and fields, and its network, job, wallet, transaction and trigger when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.",
+        "description": "The kept entries the filters read, newest first, a page at a time: its level, event (`target`), own message (null: its template's, `/v1/logs/messages`) and fields, and its network, job, wallet, transaction, trigger and market when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.",
         "operationId": "list_logs",
         "parameters": [
           {
@@ -350,6 +350,15 @@
             "name": "trigger_id",
             "in": "query",
             "description": "Only entries of this trigger, its id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "market",
+            "in": "query",
+            "description": "Only entries of this market, its name (`binance`).",
             "required": false,
             "schema": {
               "type": "string"
@@ -474,6 +483,43 @@
         ]
       }
     },
+    "/v1/logs/messages": {
+      "get": {
+        "tags": [
+          "logs"
+        ],
+        "summary": "List the log message templates",
+        "description": "Every event's (`target`) message template, by which a log entry with no `message` of its own reads: each `{key}` filled from its field `key`. An event without a template reads as its code and its fields. They change only with the server, so the answer may be cached.",
+        "operationId": "list_log_messages",
+        "responses": {
+          "200": {
+            "description": "The templates",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogMessages"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/v1/logs/stream": {
       "get": {
         "tags": [
@@ -524,6 +570,15 @@
             "name": "trigger_id",
             "in": "query",
             "description": "Only entries of this trigger, its id.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "market",
+            "in": "query",
+            "description": "Only entries of this market, its name (`binance`).",
             "required": false,
             "schema": {
               "type": "string"
@@ -637,6 +692,238 @@
           },
           "401": {
             "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/markets": {
+      "get": {
+        "tags": [
+          "markets"
+        ],
+        "summary": "List the markets and the latest prices",
+        "description": "Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.",
+        "operationId": "list_markets",
+        "responses": {
+          "200": {
+            "description": "The markets",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/markets/{name}": {
+      "patch": {
+        "tags": [
+          "markets"
+        ],
+        "summary": "Turn a market's feed on or off",
+        "description": "Stores whether the market is asked for quotes; the market job reads it on its next tick (within 10 s).",
+        "operationId": "set_market",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Its name, as `GET /v1/markets` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMarket"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketListing"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such market",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/v1/markets/{name}/candles": {
+      "get": {
+        "tags": [
+          "markets"
+        ],
+        "summary": "List a market's hourly candles of an asset",
+        "description": "The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.",
+        "operationId": "list_market_candles",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Its name, as `GET /v1/markets` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "asset",
+            "in": "query",
+            "description": "The asset's ticker (`BTC`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Only the hours starting at or after this, Unix seconds; at most the\nlast 7 days.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The candles",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketCandles"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such market",
             "content": {
               "application/json": {
                 "schema": {
@@ -4159,7 +4446,10 @@
           "address",
           "asset",
           "amount",
-          "wallet_index_id"
+          "wallet_index_id",
+          "amount_usd",
+          "total_received_usd",
+          "total_sent_usd"
         ],
         "properties": {
           "address": {
@@ -4168,6 +4458,13 @@
           "amount": {
             "type": "string",
             "description": "Exact atomic decimal text; signed for a reward or an adjustment."
+          },
+          "amount_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its value in USD, exact decimal, signed as it adds to the balance\n(negative for a spent, burned or fee leg): `amount` in display units\ntimes its asset's USD price at its hour (its block's\ntime, else when its transaction was recorded) when it was mined;\nnull when there was none, while pending, and for an adjustment.\nNever filled later."
           },
           "archived_at": {
             "type": [
@@ -4242,12 +4539,26 @@
             ],
             "description": "What its index has received (received, minted, reward) through it;\n`None` while pending. No adjustment counts."
           },
+          "total_received_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`total_received` in USD: each received leg's `amount_usd` (null: 0)\nadded; `None` while pending."
+          },
           "total_sent": {
             "type": [
               "string",
               "null"
             ],
             "description": "What its index has sent (spent, burned, fee) through it; `None` while\npending. `total` is `total_received - total_sent` plus its index's\nadjustments so far."
+          },
+          "total_sent_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`total_sent` in USD: each sent leg's `amount_usd` (null: 0) added;\n`None` while pending."
           },
           "transaction": {
             "type": [
@@ -4342,7 +4653,8 @@
           "job_id",
           "wallet_id",
           "transaction_id",
-          "trigger_id"
+          "trigger_id",
+          "market"
         ],
         "properties": {
           "at": {
@@ -4384,8 +4696,19 @@
             "type": "string",
             "description": "`error`, `warn`, `info`, `debug` or `trace`."
           },
+          "market": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The market it concerns (`binance`, …); always present, null: none."
+          },
           "message": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The event's own message, in place of its template; always present,\nnull: none, the template's."
           },
           "network": {
             "type": [
@@ -4396,7 +4719,7 @@
           },
           "target": {
             "type": "string",
-            "description": "The event: `rpc.http`, `index.step`, `send.broadcast`, …"
+            "description": "The event's code: `rpc.http.failed`, `index.step`, … Its message is\nits template (`GET /v1/logs/messages`) filled from `fields`."
           },
           "transaction_id": {
             "type": [
@@ -4445,6 +4768,25 @@
           }
         }
       },
+      "LogMessages": {
+        "type": "object",
+        "description": "Every event's message template.",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "object",
+            "description": "Each event (`target`) and its template: lower case text with\n`{key}` placeholders, each filled from the entry's field `key`; a\nplaceholder of a field the entry lacks stays as it is. An entry's\nown `message` takes the place of its template.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
       "LogTargets": {
         "type": "object",
         "description": "The events log entries are kept of.",
@@ -4460,6 +4802,143 @@
             "description": "Each event (`target`) once, in order: what a log list's `target`\nfilter takes."
           }
         }
+      },
+      "Market": {
+        "type": "object",
+        "description": "One `market` row.",
+        "required": [
+          "name",
+          "feed",
+          "updated_at"
+        ],
+        "properties": {
+          "feed": {
+            "type": "boolean",
+            "description": "Whether it is asked for quotes."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its implementation: `binance`, `kraken`, `coinbase`, `bitstamp` or\n`coingecko`."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms it was last changed."
+          }
+        }
+      },
+      "MarketCandle1h": {
+        "type": "object",
+        "description": "One `market_candle_1h` row: open, high, low and close are exact decimal\nUSD.",
+        "required": [
+          "market",
+          "asset",
+          "start",
+          "open",
+          "high",
+          "low",
+          "close",
+          "updated_at"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "A `network_asset` ticker: `BTC`."
+          },
+          "close": {
+            "type": "string"
+          },
+          "high": {
+            "type": "string"
+          },
+          "low": {
+            "type": "string"
+          },
+          "market": {
+            "type": "string",
+            "description": "The market (`market.name`) it is of."
+          },
+          "open": {
+            "type": "string"
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The hour, Unix seconds, hour-aligned."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When its last quote answered, Unix ms."
+          }
+        }
+      },
+      "MarketCandles": {
+        "type": "object",
+        "description": "`GET /v1/markets/{name}/candles`.",
+        "required": [
+          "candles"
+        ],
+        "properties": {
+          "candles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarketCandle1h"
+            },
+            "description": "The market's hourly candles of the asset, oldest first."
+          }
+        }
+      },
+      "MarketList": {
+        "type": "object",
+        "description": "`GET /v1/markets`.",
+        "required": [
+          "markets",
+          "prices"
+        ],
+        "properties": {
+          "markets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MarketListing"
+            },
+            "description": "Every market, by name."
+          },
+          "prices": {
+            "type": "object",
+            "description": "Each asset's latest USD price, exact decimal, by ticker: the median\nclose of the markets' candles of the current hour; empty until the\nmarket job's first tick after a start.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "MarketListing": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Market"
+          },
+          {
+            "type": "object",
+            "required": [
+              "last_at"
+            ],
+            "properties": {
+              "last_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "When its last quote answered, Unix ms; always present, null: no\ncandle kept."
+              }
+            }
+          }
+        ],
+        "description": "A market and when it last answered."
       },
       "Movement": {
         "allOf": [
@@ -5148,6 +5627,20 @@
             "minimum": 0
           }
         }
+      },
+      "SetMarket": {
+        "type": "object",
+        "description": "`PATCH /v1/markets/{name}` body.",
+        "required": [
+          "feed"
+        ],
+        "properties": {
+          "feed": {
+            "type": "boolean",
+            "description": "Whether it is asked for quotes."
+          }
+        },
+        "additionalProperties": false
       },
       "SetRpcNodeState": {
         "type": "object",
@@ -5865,12 +6358,26 @@
             ],
             "description": "What it had received by then (that leg's `total_received`):\n`balance_confirmed` is `balance_confirmed_received -\nbalance_confirmed_sent` plus its adjustments."
           },
+          "balance_confirmed_received_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it had received by then in USD, each leg at its price when\nmined (that leg's `total_received_usd`; a leg without one adds 0)."
+          },
           "balance_confirmed_sent": {
             "type": [
               "string",
               "null"
             ],
             "description": "What it had sent by then (fees included), the same way."
+          },
+          "balance_confirmed_sent_usd": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it had sent by then in USD, the same way (`total_sent_usd`)."
           },
           "balance_confirmed_spendable": {
             "type": [
@@ -5994,6 +6501,10 @@
     {
       "name": "logs",
       "description": "The kept log entries: every one, a network's, a job's"
+    },
+    {
+      "name": "markets",
+      "description": "Market data sources, their price feeds and hourly candles"
     },
     {
       "name": "stats",

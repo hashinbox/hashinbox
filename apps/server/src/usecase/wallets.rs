@@ -420,9 +420,8 @@ pub(crate) async fn send(
     let network = super::network_label(&from.network);
     let (wallet, asset, amount) = (&intent.address, &intent.asset, &intent.amount);
     tracing::info!(
-        target: "send.queued",
-        network, job_id = id.0, wallet, asset, amount,
-        "Payment queued"
+        target: crate::events::SEND_QUEUED,
+        network, job_id = id.0, wallet, asset, amount
     );
     Ok(id)
 }

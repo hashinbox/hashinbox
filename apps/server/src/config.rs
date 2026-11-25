@@ -19,7 +19,7 @@ use tracing_subscriber::{
 
 use crate::{
     db::Db,
-    usecase::logs::{DbLayer, Feed},
+    usecase::logs::{DbLayer, Feed, Line},
 };
 
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
@@ -80,7 +80,7 @@ pub(crate) struct Serve {
     #[arg(long = "log", value_parser = target_level)]
     log: Vec<(String, LevelFilter)>,
     /// One event's level in the `log` table, `TARGET=LEVEL`; repeatable.
-    /// The rest are kept from `debug`; a failed `rpc.http` always is.
+    /// The rest are kept from `debug`; a failed or broken `rpc.http.*` always is.
     #[arg(long = "log-db", value_parser = target_level)]
     log_db: Vec<(String, LevelFilter)>,
 }
@@ -145,10 +145,10 @@ impl Serve {
     }
 
     /// The one subscriber, two layers, each with its own filter: every
-    /// event at `--log-level` (or its `--log` level) as a line on stdout;
-    /// and every event from `debug` (or its `--log-db` level), and every
-    /// failed `rpc.http`, to the `log` table of `db` and to `feed`
-    /// ([`DbLayer`]).
+    /// event at `--log-level` (or its `--log` level) as a line on stdout
+    /// ([`Line`]); and every event from `debug` (or its `--log-db` level),
+    /// and every failed or broken `rpc.http.*`, to the `log` table of `db`
+    /// and to `feed` ([`DbLayer`]).
     ///
     /// # Errors
     ///
@@ -159,12 +159,14 @@ impl Serve {
         feed: Feed,
     ) -> Result<impl Subscriber + use<>, AnyError> {
         let stdout = tracing_subscriber::fmt::layer()
+            .event_format(Line)
             .with_writer(std::io::stdout)
             .with_filter(filter(self.log_level, &self.log)?);
         let failed_http = filter_fn(|metadata| {
-            metadata.target() == "rpc.http" && *metadata.level() <= Level::WARN
+            [rpc::events::RPC_HTTP_FAILED, rpc::events::RPC_HTTP_BROKEN]
+                .contains(&metadata.target())
         });
-        // Our events are named (`rpc.http`, `index.step`); a library's are
+        // Our events are named (`rpc.http.failed`, `index.step`); a library's are
         // its module path (`hyper_util::client`): kept from warn only, so
         // its connection chatter never fills the table.
         let ours = filter_fn(|metadata| {

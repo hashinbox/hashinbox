@@ -1,14 +1,18 @@
 //! The kept log entries (the `log` table), a page at a time (`/v1/logs`),
 //! and each new one, live (`/v1/logs/stream`), both read by the same
-//! filters: network, job, wallet, transaction, trigger, level, event and
-//! time.
+//! filters: network, job, wallet, transaction, trigger, market, level,
+//! event and time; and every event's message template (`/v1/logs/messages`).
 
-use std::{convert::Infallible, sync::Arc};
+use std::{collections::BTreeMap, convert::Infallible, sync::Arc};
 
 use axum::{
     Json,
     extract::{Query, State, rejection::QueryRejection},
-    response::sse::{Event, KeepAlive, Sse},
+    http::header,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
 };
 use futures_util::{Stream, StreamExt as _};
 use serde::{Deserialize, Serialize};
@@ -19,6 +23,7 @@ use super::{Error, ErrorBody, IndexParams};
 use crate::{
     api::AppState,
     db::{Page, Paged as _},
+    events,
     models::{Log, LogFilter},
     usecase::logs::{self, Heard},
 };
@@ -28,6 +33,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
         .routes(routes!(list))
         .routes(routes!(stream))
         .routes(routes!(list_targets))
+        .routes(routes!(list_messages))
 }
 
 /// A page of log entries.
@@ -66,6 +72,8 @@ struct LogQuery {
     transaction_id: Option<String>,
     /// Only entries of this trigger, its id.
     trigger_id: Option<String>,
+    /// Only entries of this market, its name (`binance`).
+    market: Option<String>,
     /// Only entries at this level or more severe: `error`, `warn`, `info`,
     /// `debug` or `trace`.
     level: Option<String>,
@@ -106,6 +114,7 @@ impl LogQuery {
             wallet_id: self.wallet_id,
             transaction_id: self.transaction_id,
             trigger_id: self.trigger_id,
+            market: self.market,
             level,
             only: self.only.unwrap_or(false),
             targets: targets.map(str::to_owned).collect(),
@@ -127,8 +136,9 @@ fn page(index: Result<Query<IndexParams>, QueryRejection>) -> Result<Page<i64>, 
     operation_id = "list_logs",
     summary = "List the kept log entries",
     description = "The kept entries the filters read, newest first, a page at a time: its \
-        level, event (`target`), message and fields, and its network, job, wallet, \
-        transaction and trigger when it has them. With `after`, oldest first from that \
+        level, event (`target`), own message (null: its template's, \
+        `/v1/logs/messages`) and fields, and its network, job, wallet, \
+        transaction, trigger and market when it has them. With `after`, oldest first from that \
         moment, so a reader can page forward from a time. Debug and trace entries are kept \
         24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's \
         (or no network's) entries outside a job.",
@@ -181,6 +191,43 @@ struct TargetsResponse {
 async fn list_targets(State(state): State<Arc<AppState>>) -> Result<Json<TargetsResponse>, Error> {
     let targets = logs::targets(&state.db).await?;
     Ok(Json(TargetsResponse { targets }))
+}
+
+/// Every event's message template.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = LogMessages)]
+struct MessagesResponse {
+    /// Each event (`target`) and its template: lower case text with
+    /// `{key}` placeholders, each filled from the entry's field `key`; a
+    /// placeholder of a field the entry lacks stays as it is. An entry's
+    /// own `message` takes the place of its template.
+    messages: BTreeMap<String, String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/v1/logs/messages",
+    operation_id = "list_log_messages",
+    summary = "List the log message templates",
+    description = "Every event's (`target`) message template, by which a log entry with no \
+        `message` of its own reads: each `{key}` filled from its field `key`. An event \
+        without a template reads as its code and its fields. They change only with the \
+        server, so the answer may be cached.",
+    security(("bearerAuth" = [])),
+    responses(
+        (status = 200, description = "The templates", body = MessagesResponse),
+        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody)
+    ),
+    tag = "logs"
+)]
+async fn list_messages() -> impl IntoResponse {
+    let messages = MessagesResponse {
+        messages: events::MESSAGES.clone(),
+    };
+    (
+        [(header::CACHE_CONTROL, "private, max-age=3600")],
+        Json(messages),
+    )
 }
 
 /// A `missed` event.

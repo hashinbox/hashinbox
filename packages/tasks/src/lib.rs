@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 
+pub mod events;
 #[cfg(feature = "runner")]
 mod executor;
 mod job;

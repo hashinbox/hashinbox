@@ -8,6 +8,7 @@ import LockIcon from '@mui/icons-material/Lock';
 import MenuIcon from '@mui/icons-material/Menu';
 import MenuBook from '@mui/icons-material/MenuBook';
 import Notes from '@mui/icons-material/Notes';
+import ShowChart from '@mui/icons-material/ShowChart';
 import WorkHistory from '@mui/icons-material/WorkHistory';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -44,6 +45,7 @@ import { Explorers, type Explorer } from '@/_components/explorers';
 import { Dashboard } from '@/pages/dashboard/page';
 import { Jobs } from '@/pages/jobs/page';
 import { Logs } from '@/pages/logs/page';
+import { Markets } from '@/pages/markets/page';
 import { Networks as Configured } from '@/pages/networks/page';
 import { Triggers } from '@/pages/triggers/page';
 import { Wallets } from '@/pages/wallets/page';
@@ -51,11 +53,21 @@ import { go, segments } from '@/route';
 import { settings } from '@/settings';
 import { display } from '@/theme';
 
-type View = 'dashboard' | 'wallets' | 'triggers' | 'networks' | 'jobs' | 'logs' | 'docs';
+type View =
+  'dashboard' | 'wallets' | 'triggers' | 'networks' | 'markets' | 'jobs' | 'logs' | 'docs';
 /** Whether the server wants a token: not asked yet, no, or yes. */
 type Door = 'unknown' | 'open' | 'locked';
 const TOKEN_KEY = 'tally.token';
-const VIEWS: View[] = ['dashboard', 'wallets', 'triggers', 'networks', 'jobs', 'logs', 'docs'];
+const VIEWS: View[] = [
+  'dashboard',
+  'wallets',
+  'triggers',
+  'networks',
+  'markets',
+  'jobs',
+  'logs',
+  'docs',
+];
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
@@ -226,6 +238,7 @@ export function Layout() {
           },
           { view: 'triggers' as const, label: 'Triggers', icon: <Bolt fontSize="small" /> },
           { view: 'networks' as const, label: 'Networks', icon: <Hub fontSize="small" /> },
+          { view: 'markets' as const, label: 'Markets', icon: <ShowChart fontSize="small" /> },
           { view: 'jobs' as const, label: 'Jobs', icon: <WorkHistory fontSize="small" /> },
           { view: 'logs' as const, label: 'Logs', icon: <Notes fontSize="small" /> },
         ]
@@ -353,6 +366,7 @@ export function Layout() {
             )}
             {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
             {view === 'networks' && <Configured shell={shell} />}
+            {view === 'markets' && <Markets shell={shell} />}
             {view === 'jobs' && <Jobs shell={shell} />}
             {view === 'logs' && <Logs shell={shell} />}
             {view === 'docs' && <Docs shell={shell} secured={token !== null} />}

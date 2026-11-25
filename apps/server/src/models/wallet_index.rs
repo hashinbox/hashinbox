@@ -148,6 +148,11 @@ pub(crate) struct WalletIndex {
     pub(crate) balance_confirmed_received: Option<String>,
     /// What it had sent by then (fees included), the same way.
     pub(crate) balance_confirmed_sent: Option<String>,
+    /// What it had received by then in USD, each leg at its price when
+    /// mined (that leg's `total_received_usd`; a leg without one adds 0).
+    pub(crate) balance_confirmed_received_usd: Option<String>,
+    /// What it had sent by then in USD, the same way (`total_sent_usd`).
+    pub(crate) balance_confirmed_sent_usd: Option<String>,
     /// What it can spend: `balance_confirmed` less its outgoing legs not yet
     /// in it (pending, or mined above `finality_at`); null while
     /// `balance_confirmed` is.
@@ -281,6 +286,10 @@ pub(crate) mod db {
         balance_confirmed: Option<String>,
         balance_confirmed_received: Option<String>,
         balance_confirmed_sent: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        balance_confirmed_received_usd: Option<String>,
+        #[diesel(sql_type = Nullable<Text>)]
+        balance_confirmed_sent_usd: Option<String>,
         balance_confirmed_spendable: Option<String>,
         balance_pending: Option<String>,
         keyed: bool,
@@ -308,6 +317,8 @@ pub(crate) mod db {
                 balance_confirmed: row.balance_confirmed,
                 balance_confirmed_received: row.balance_confirmed_received,
                 balance_confirmed_sent: row.balance_confirmed_sent,
+                balance_confirmed_received_usd: row.balance_confirmed_received_usd,
+                balance_confirmed_sent_usd: row.balance_confirmed_sent_usd,
                 balance_confirmed_spendable: row.balance_confirmed_spendable,
                 balance_pending: row.balance_pending,
                 keyed: row.keyed,
@@ -929,6 +940,8 @@ pub(crate) mod db {
                 wi.balance_confirmed,
                 wi.balance_confirmed_received,
                 wi.balance_confirmed_sent,
+                wi.balance_confirmed_received_usd,
+                wi.balance_confirmed_sent_usd,
                 wi.balance_confirmed_spendable,
                 wi.balance_pending
             FROM wallet_index_with_balance wi

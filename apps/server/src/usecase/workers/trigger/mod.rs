@@ -13,8 +13,9 @@
 //! A round runs in its network's span, each trigger in a `trigger` one
 //! (`trigger_id`), and tells what it did: per trigger `trigger.fired` (info,
 //! one per payment queued, under that payment's `job_id`), `trigger.skipped`
-//! (debug, why) or `trigger.refused` (warn); then `trigger.round` (info when
-//! one fired or was refused, else debug) with its counts.
+//! (debug, why) or `trigger.refused` (warn); then `trigger.round.acted` (info,
+//! when one fired or was refused) or `trigger.round.idle` (debug) with its
+//! counts.
 
 pub(crate) mod actions;
 
@@ -128,7 +129,7 @@ impl Worker for Round {
                 wallets += stats.selected;
                 if let Some(reason) = &one.last.refused {
                     refused += 1;
-                    tracing::warn!(target: "trigger.refused", trigger_id, reason, "Trigger refused");
+                    tracing::warn!(target: crate::events::TRIGGER_REFUSED, trigger_id, reason);
                     continue;
                 }
                 if one.effects.is_empty() {
@@ -141,7 +142,7 @@ impl Worker for Round {
                     } else {
                         "action queued nothing"
                     };
-                    tracing::debug!(target: "trigger.skipped", trigger_id, reason, "Trigger skipped");
+                    tracing::debug!(target: crate::events::TRIGGER_SKIPPED, trigger_id, reason);
                     continue;
                 }
                 fired += 1;
@@ -168,28 +169,25 @@ impl Worker for Round {
                     .map(|send| (send.address, send.asset, send.amount))
                     .unwrap_or_default();
                 tracing::info!(
-                    target: "trigger.fired",
+                    target: crate::events::TRIGGER_FIRED,
                     trigger_id,
                     wallet,
                     asset,
                     amount,
-                    job_id,
-                    "Trigger queued a payment"
+                    job_id
                 );
             }
             let skipped = evaluated - fired - refused;
             let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             if fired + refused > 0 {
                 tracing::info!(
-                    target: "trigger.round",
-                    evaluated, fired, skipped, refused, wallets, ms,
-                    "Trigger round finished"
+                    target: crate::events::TRIGGER_ROUND_ACTED,
+                    evaluated, fired, skipped, refused, wallets, ms
                 );
             } else {
                 tracing::debug!(
-                    target: "trigger.round",
-                    evaluated, fired, skipped, refused, wallets, ms,
-                    "Trigger round finished"
+                    target: crate::events::TRIGGER_ROUND_IDLE,
+                    evaluated, fired, skipped, refused, wallets, ms
                 );
             }
             if jobs.is_empty() {

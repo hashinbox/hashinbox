@@ -121,7 +121,7 @@ impl<C> Throttle<C> {
         let waited = bucket.take(calls).await;
         if !waited.is_zero() {
             let wait_ms = u64::try_from(waited.as_millis()).unwrap_or(u64::MAX);
-            tracing::debug!(target: "rpc.wait", calls, wait_ms, "RPC request waited for its rate");
+            tracing::debug!(target: crate::events::RPC_WAIT, calls, wait_ms);
         }
         waited
     }

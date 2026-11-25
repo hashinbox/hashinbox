@@ -1,11 +1,15 @@
 //! Kept blocks over the `block`, `wallet_index`, `transaction_index`,
-//! `transaction` and `leg` models: each model writes its own table, the
-//! order lives here.
+//! `transaction` and `leg` models, its legs valued by the `network_asset`
+//! model and the market candles in memory: each model writes its own
+//! table, the order lives here.
 
 use base::{Block as BaseBlock, Network};
 use diesel::SqliteConnection;
 
-use crate::models::{Block, block, leg, transaction, transaction_index, wallet_index};
+use crate::models::{
+    Block, block, leg, market_candle_1h::MarketCandles1hExchangeAssetMapCached, network_asset,
+    transaction, transaction_index, wallet_index,
+};
 
 /// One block as [`keep`] kept it: what its events (`index.block`,
 /// `index.leg`, `index.found`) tell once the write commits.
@@ -23,7 +27,8 @@ pub(crate) struct Kept {
 }
 
 /// Keeps `run` (one network, linked): each block's row, then applies it
-/// ([`apply`]); what each block kept. A block conflicting with a kept one at
+/// ([`apply`]), its legs valued by `candles`; what each
+/// block kept. A block conflicting with a kept one at
 /// its position fails the write ([`block::db::save`]); links need no check:
 /// the run is linked, and the indexer reads forward from the last kept
 /// block.
@@ -34,12 +39,13 @@ pub(crate) struct Kept {
 pub(crate) fn keep(
     connection: &mut SqliteConnection,
     run: &[BaseBlock],
+    candles: &MarketCandles1hExchangeAssetMapCached,
 ) -> anyhow::Result<Vec<Kept>> {
     let mut kept = Vec::with_capacity(run.len());
     for base in run {
         let mut block = Block::try_from(base)?;
         block::db::save(connection, &mut block)?;
-        kept.push(apply(connection, block)?);
+        kept.push(apply(connection, block, candles)?);
     }
     Ok(kept)
 }
@@ -53,12 +59,18 @@ pub(crate) fn keep(
 ///    kept again writes them again);
 /// 3. each transaction's row is upserted and its legs of no block or
 ///    another one (pending, or mined before a reorg) deleted; then the legs
-///    are appended to their indexes' ([`leg::db::append`]).
+///    are valued at their assets' latest prices in `candles`
+///    ([`leg::Legs::price`]) and appended to their indexes'
+///    ([`leg::db::append`]).
 ///
 /// # Errors
 ///
 /// When a value does not decode or a write fails (a seq an index holds).
-fn apply(connection: &mut SqliteConnection, mut block: Block) -> anyhow::Result<Kept> {
+fn apply(
+    connection: &mut SqliteConnection,
+    mut block: Block,
+    candles: &MarketCandles1hExchangeAssetMapCached,
+) -> anyhow::Result<Kept> {
     let transactions = block.transactions.len();
     let ours = wallet_index::db::advance(connection, &block)?;
     transaction_index::db::set_indexed_at(connection, &block)?;
@@ -77,6 +89,8 @@ fn apply(connection: &mut SqliteConnection, mut block: Block) -> anyhow::Result<
         transaction::db::upsert(connection, transaction)?;
         leg::db::delete_moved(connection, &block.id, &transaction.id)?;
     }
+    let assets = network_asset::db::find_of_network(connection, &block.chain, &block.network)?;
+    legs.price(&assets, candles)?;
     leg::db::append(connection, &mut legs, block.position)?;
     Ok(Kept {
         position: block.position,

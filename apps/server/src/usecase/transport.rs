@@ -260,9 +260,9 @@ impl Transport {
         }
         let network = &self.0.factory.label;
         if served {
-            tracing::info!(target: "network.served", network, "Network has an RPC node again");
+            tracing::info!(target: crate::events::NETWORK_SERVED, network);
         } else {
-            tracing::error!(target: "network.unserved", network, "Network has no enabled RPC node");
+            tracing::error!(target: crate::events::NETWORK_UNSERVED, network);
         }
     }
 
@@ -337,9 +337,8 @@ impl Transport {
     fn failover(&self, method: &str, from: &Node, to: &Node, error: &Error) {
         let (from, to, reason) = (from.label(), to.label(), error.label());
         tracing::debug!(
-            target: "rpc.failover",
-            method, from, to, reason,
-            "RPC call moved on to the next node"
+            target: crate::events::RPC_FAILOVER,
+            method, from, to, reason
         );
     }
 
