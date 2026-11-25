@@ -39,6 +39,7 @@ import {
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
 import { LogsDrawer } from '@/_components/logs/drawer';
+import { HashinboxLogo, HashinboxMark } from '@/_components/logo';
 import { logSource } from '@/api/logs';
 import { Docs } from '@/pages/docs/page';
 import { Explorers, type Explorer } from '@/_components/explorers';
@@ -281,6 +282,16 @@ export function Layout() {
               Lock
             </Button>
           )}
+          <Box
+            sx={{ display: 'flex', flexShrink: 0, pointerEvents: 'none', color: 'text.primary' }}
+          >
+            <Box sx={{ display: { xs: 'none', md: 'flex' } }}>
+              <HashinboxLogo height={26} opacity={0.18} />
+            </Box>
+            <Box sx={{ display: { xs: 'flex', md: 'none' } }}>
+              <HashinboxMark height={26} opacity={0.18} />
+            </Box>
+          </Box>
         </Toolbar>
       </AppBar>
       <Drawer

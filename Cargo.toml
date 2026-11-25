@@ -11,6 +11,7 @@ members = [
     "packages/rpc",
     "packages/http-server",
     "packages/tasks",
+    "packages/scope",
 ]
 exclude = ["old", "reference"]
 resolver = "3"
