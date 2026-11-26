@@ -5,7 +5,13 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, type Schemas } from '@/api/client';
+import {
+  twoFactorConfirm,
+  twoFactorStart,
+  twoFactorStop,
+  type TwoFactor as State,
+} from '@hashinbox/client';
+import { ApiError, api } from '@/api/client';
 import { Copy } from '@/_components/copy';
 import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
@@ -39,7 +45,7 @@ export function TwoFactor({
   onSignedOut,
 }: {
   shell: Shell;
-  state: Schemas['TwoFactor'] | null;
+  state: State | null;
   onChanged: () => void;
   onSignedOut: () => void;
 }) {
@@ -50,7 +56,7 @@ export function TwoFactor({
 
   const start = () => {
     setProblem(null);
-    call(client.POST('/v1/user/2fa'))
+    twoFactorStart(api)
       .then((started) => {
         setUri(started.uri);
         onChanged();
@@ -63,7 +69,7 @@ export function TwoFactor({
     setProblem(null);
     const body = { code: code.trim() };
     if (on) {
-      call(client.DELETE('/v1/user/2fa', { body }))
+      twoFactorStop(api, { body })
         .then(() => {
           shell.notify('Two-factor off: every session ended. Log in again.');
           onSignedOut();
@@ -71,7 +77,7 @@ export function TwoFactor({
         .catch((error: unknown) => setProblem(problemOf(error)));
       return;
     }
-    call(client.POST('/v1/user/2fa/confirm', { body }))
+    twoFactorConfirm(api, { body })
       .then(() => {
         setUri(null);
         setCode('');

@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Hashinbox;
 
-use Generator;
+use Closure;
 use JsonException;
 use RuntimeException;
 use UnexpectedValueException;
@@ -24,6 +24,8 @@ use UnexpectedValueException;
  *   `session_expired` (retried once). This machine's clock must be within
  *   60 s of the server's: keep it on NTP.
  * - `$timeout`: seconds a call may take (a stream: to connect).
+ * - `$backoff`, `$backoffMax`: seconds a stream waits before reconnecting
+ *   after an error, doubling from the first up to the second.
  * - `$checkScopes`: refuse locally (`MissingScope`) a call the session's
  *   scopes do not cover.
  */
@@ -45,6 +47,8 @@ final class Client
         private readonly float $timeout = 30.0,
         private readonly bool $checkScopes = true,
         ?Transport $transport = null,
+        private readonly float $backoff = 0.5,
+        private readonly float $backoffMax = 8.0,
     ) {
         $this->baseUrl = rtrim($baseUrl, '/');
         $this->transport = $transport ?? new CurlTransport();
@@ -79,51 +83,33 @@ final class Client
     }
 
     /**
-     * `$request`'s server-sent events, as read, until the stream ends; sent on
-     * the first iteration. A stream's reads wait as long as it takes.
+     * `$request`'s server-sent events, as read, or each as `$decode` makes it
+     * (null: skipped): a handle reconnecting across the server's windows
+     * until `stop()` (see `Stream`); sent on the first iteration. A stream's
+     * reads wait as long as it takes.
      *
-     * @return Generator<int, RawEvent, mixed, void>
+     * @template T
+     * @param (Closure(RawEvent): (T|null))|null $decode
+     * @return ($decode is null ? Stream<RawEvent> : Stream<T>)
      */
-    public function open(Request $request): Generator
+    public function open(Request $request, ?Closure $decode = null): Stream
     {
-        $event = null;
-        $id = null;
-        $data = [];
-        $buffer = '';
-        foreach ($this->exchange($request, stream: true)->chunks() as $chunk) {
-            $buffer .= $chunk;
-            while (($end = strpos($buffer, "\n")) !== false) {
-                $line = rtrim(substr($buffer, 0, $end), "\r");
-                $buffer = substr($buffer, $end + 1);
-                if ($line === '') {
-                    if ($data !== []) {
-                        yield new RawEvent($event ?? 'message', implode("\n", $data), $id);
-                    }
-                    [$event, $data] = [null, []];
-                    continue;
-                }
-                [$name, $value] = array_pad(explode(':', $line, 2), 2, '');
-                $value = str_starts_with($value, ' ') ? substr($value, 1) : $value;
-                match ($name) {
-                    'event' => $event = $value === '' ? null : $value,
-                    'data' => $data[] = $value,
-                    'id' => $id = $value,
-                    default => null,
-                };
-            }
+        $connect = fn(?string $cursor): Reply => $this->exchange($request, stream: true, cursor: $cursor);
+        if ($decode === null) {
+            return new Stream($connect, static fn(RawEvent $raw): RawEvent => $raw, $this->backoff, $this->backoffMax);
         }
+        return new Stream($connect, $decode, $this->backoff, $this->backoffMax);
     }
 
     /**
-     * `$request`'s server-sent events, their data decoded from JSON.
+     * `$request`'s server-sent events, their data decoded from JSON: a handle,
+     * as `open`'s.
      *
-     * @return Generator<int, Event<mixed>, mixed, void>
+     * @return Stream<Event<mixed>>
      */
-    public function stream(Request $request): Generator
+    public function stream(Request $request): Stream
     {
-        foreach ($this->open($request) as $raw) {
-            yield new Event($raw->event, Json::decode($raw->data), $raw->id);
-        }
+        return $this->open($request, static fn(RawEvent $raw): Event => new Event($raw->event, Json::decode($raw->data), $raw->id));
     }
 
     /**
@@ -166,7 +152,7 @@ final class Client
      *
      * @throws ApiError
      */
-    private function exchange(Request $request, bool $stream = false, bool $anonymous = false): Reply
+    private function exchange(Request $request, bool $stream = false, bool $anonymous = false, ?string $cursor = null): Reply
     {
         $retry = $this->secret !== null && !$anonymous;
         while (true) {
@@ -178,7 +164,7 @@ final class Client
                     }
                 }
             }
-            $reply = $this->fetch($request, $session, $stream);
+            $reply = $this->fetch($request, $session, $stream, $cursor);
             if ($reply->ok()) {
                 return $reply;
             }
@@ -195,13 +181,18 @@ final class Client
      * One request: its path filled (each parameter URL-escaped), its query,
      * its JSON body and the bearer.
      */
-    private function fetch(Request $request, ?Session $session, bool $stream): Reply
+    private function fetch(Request $request, ?Session $session, bool $stream, ?string $cursor = null): Reply
     {
         $operation = $request->operation();
         $url = $this->baseUrl . Scope::fill($operation->path, $request->params(), rawurlencode(...));
+        $query = $request->query();
+        if ($cursor !== null) {
+            $query = array_values(array_filter($query, static fn(array $pair): bool => $pair[0] !== 'cursor'));
+            $query[] = ['cursor', $cursor];
+        }
         $pairs = array_map(
             static fn(array $pair): string => rawurlencode($pair[0]) . '=' . rawurlencode($pair[1]),
-            $request->query(),
+            $query,
         );
         if ($pairs !== []) {
             $url .= '?' . implode('&', $pairs);

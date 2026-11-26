@@ -4,7 +4,13 @@ import Button from '@mui/material/Button';
 import Link from '@mui/material/Link';
 import Typography from '@mui/material/Typography';
 import { useEffect, useRef, useState } from 'react';
-import { call, client, type Schemas } from '@/api/client';
+import {
+  recoveryCreate,
+  recoveryDelete,
+  recoveryGet,
+  type Recovery as State,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import type { Shell } from '@/layout';
 import { go, href } from '@/route';
@@ -21,7 +27,7 @@ const DISMISSED_KEY = 'hashinbox.recovery.dismissed';
  * and create, replace or remove it. Shown to a holder of `recovery.$write`.
  */
 export function Recovery({ shell }: { shell: Shell }) {
-  const [state, setState] = useState<Schemas['Recovery'] | null>(null);
+  const [state, setState] = useState<State | null>(null);
   const [busy, setBusy] = useState(false);
   const [replacing, setReplacing] = useState(false);
   const [removing, setRemoving] = useState(false);
@@ -29,7 +35,7 @@ export function Recovery({ shell }: { shell: Shell }) {
   const anchor = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    call(client.GET('/v1/recovery')).then(setState).catch(shell.fail);
+    recoveryGet(api).then(setState).catch(shell.fail);
   }, [shell.fail]);
 
   // Linked from the dashboard's banner: scrolled to once shown.
@@ -41,7 +47,7 @@ export function Recovery({ shell }: { shell: Shell }) {
   // Set locally: a read with a session the old words made would answer 401.
   const create = () => {
     setBusy(true);
-    call(client.POST('/v1/recovery'))
+    recoveryCreate(api)
       .then((created) => {
         setWords(created.passphrase.split(/\s+/).filter(Boolean));
         setState({ set: true, created_at: Date.now() });
@@ -51,7 +57,7 @@ export function Recovery({ shell }: { shell: Shell }) {
   };
 
   const remove = () => {
-    call(client.DELETE('/v1/recovery'))
+    recoveryDelete(api)
       .then(() => {
         setState({ set: false, created_at: null });
         shell.notify('Recovery passphrase removed: passphrase sign-in is off.');
@@ -144,7 +150,7 @@ export function RecoveryBanner() {
   useEffect(() => {
     if (dismissed()) return;
     let live = true;
-    call(client.GET('/v1/recovery'))
+    recoveryGet(api)
       .then((state) => {
         if (live) setShown(!state.set);
       })

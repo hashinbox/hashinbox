@@ -9,6 +9,7 @@ use axum::{
 };
 use futures_util::Stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -48,6 +49,9 @@ struct SearchQuery {
     /// RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
     /// block at or before it.
     at: String,
+    /// The last event `id` read (a step's number): the same search's steps
+    /// after it.
+    cursor: Option<String>,
 }
 
 /// A produced block in a search's events.
@@ -92,12 +96,15 @@ struct Failed {
         search (the range narrows: the block is at or after `low`, before `high`); then \
         `event: found` with `{\"position\",\"timestamp\"}`, or `event: error` with \
         `{\"message\"}` (cannot find blocks by time, before the first block, the node \
-        failed). The stream then ends.",
+        failed). The stream then ends. Each event's `id` is its step's number; a search \
+        longer than the stream window (15 s) ends its answer with `event: close`: the same \
+        search, asked again with the last `id` as `cursor`, goes on from the step after (it \
+        runs on meanwhile, and is kept a minute after it ends).",
     params(NetworkPath, SearchQuery),
     responses(
         (status = 200, description = "The search's events", content_type = "text/event-stream",
             body = String),
-        (status = 400, description = "Malformed `at`", body = Error),
+        (status = 400, description = "Malformed `at` or `cursor`", body = Error),
         (status = 401, description = "Missing or invalid bearer token", body = Error),
         (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "The network is not configured", body = Error)
@@ -113,14 +120,28 @@ async fn search(
     scope::require!(session, "com.hashinbox.networks.$read");
     let Query(query) = query?;
     let time = seconds(&query.at)?;
-    let steps = networks::search_tip(&state.container, &path.network(), time)?;
-    Ok(Sse::new(futures_util::stream::unfold(
-        steps,
-        |mut steps| async move {
-            let step = steps.recv().await?;
-            Some((Ok(event(step)), steps))
-        },
-    )))
+    let seen = query.cursor.as_deref().map(str::parse::<usize>).transpose();
+    let seen = seen.map_err(|_| Error::invalid_argument("cursor is not a step number"))?;
+    let steps = networks::search_tip(&state.container, &state.searches, &path.network(), time)?;
+    let events = after(steps, seen.unwrap_or(0));
+    Ok(http_server::sse::windowed(events, state.stream_window))
+}
+
+/// The steps of a search after its `seen`th, each as its event, as they
+/// come; they end with the search.
+fn after(
+    steps: watch::Receiver<Vec<Search>>,
+    seen: usize,
+) -> impl Stream<Item = Event> + Send + 'static {
+    futures_util::stream::unfold((steps, seen), |(mut steps, seen)| async move {
+        loop {
+            let step = steps.borrow_and_update().get(seen).cloned();
+            if let Some(step) = step {
+                return Some((event(step).id((seen + 1).to_string()), (steps, seen + 1)));
+            }
+            steps.changed().await.ok()?;
+        }
+    })
 }
 
 /// A search's step as its event: `probe`, `found` or `error`, carrying its

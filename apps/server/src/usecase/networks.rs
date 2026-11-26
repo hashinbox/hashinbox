@@ -7,11 +7,15 @@
 //! then in use); its kept blocks and transactions; and the search for its
 //! block at a time.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{Arc, Mutex, PoisonError},
+    time::Duration,
+};
 
 use base::{Container, InfoClient, NetworkConfig, NodeInfo, ServiceFactory};
 use tasks::Worker;
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 use super::{
     Open, Served as _, Transport, now,
@@ -217,6 +221,7 @@ pub(crate) struct Nodes {
 }
 
 /// One step of a [`search_tip`].
+#[derive(Clone)]
 pub(crate) enum Search {
     /// The block searched for is at or after `low`, before `high`.
     Probe(base::BlockProbe),
@@ -638,25 +643,44 @@ pub(crate) async fn transactions_page(
         .await?)
 }
 
+/// How long an ended tip search stays readable: a reader cut by the
+/// stream window reads its last steps on reconnecting.
+const SEARCH_KEPT: Duration = Duration::from_secs(60);
+
+/// The tip searches running, and ended within [`SEARCH_KEPT`], by network
+/// and time: each one's steps so far.
+#[derive(Clone, Default)]
+pub(crate) struct Searches(Arc<Mutex<HashMap<(String, u64), Steps>>>);
+
+/// A tip search's steps so far, as they come.
+type Steps = watch::Receiver<Vec<Search>>;
+
 /// Searches `network`'s node for its last block at or before `time` (Unix
-/// seconds), on a task of its own: each step as the range narrows, then the
-/// block or why not, on the receiver, which then closes. A caller gone
-/// mid-search only stops hearing it.
+/// seconds), on a task of its own: its steps so far, each as the range
+/// narrows, then the block or why not, last; the sender then dropped. The
+/// same search still held in `searches` is read on, not started again, so
+/// a reader reconnecting misses no step and repeats no node read.
 ///
 /// # Errors
 ///
 /// Not found for an unconfigured network.
 pub(crate) fn search_tip(
     container: &Container<Transport>,
+    searches: &Searches,
     network: &base::Network,
     time: u64,
-) -> Result<mpsc::UnboundedReceiver<Search>, Error> {
+) -> Result<Steps, Error> {
+    let key = (format!("{}/{}", network.chain, network.name), time);
+    let mut held = searches.0.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(steps) = held.get(&key) {
+        return Ok(steps.clone());
+    }
     let dated = container.service(network)?.dated.clone();
-    let (sender, receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = watch::channel(Vec::new());
+    held.insert(key.clone(), receiver.clone());
+    let searches = searches.clone();
     tokio::spawn(async move {
-        let probe = |probe| {
-            let _ = sender.send(Search::Probe(probe));
-        };
+        let probe = |probe| sender.send_modify(|steps| steps.push(Search::Probe(probe)));
         let found = match &dated {
             None => Err(anyhow::anyhow!("this network cannot find blocks by time")),
             Some(dated) => dated.search(time, &probe).await,
@@ -666,7 +690,11 @@ pub(crate) fn search_tip(
             Ok(None) => Search::Failed("the time is before the network's first block".to_owned()),
             Err(error) => Search::Failed(format!("{error:#}")),
         };
-        let _ = sender.send(last);
+        sender.send_modify(|steps| steps.push(last));
+        drop(sender);
+        tokio::time::sleep(SEARCH_KEPT).await;
+        let mut held = searches.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.remove(&key);
     });
     Ok(receiver)
 }

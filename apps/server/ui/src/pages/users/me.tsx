@@ -1,6 +1,7 @@
 import Box from '@mui/material/Box';
 import { useEffect, useState } from 'react';
-import { openapi, type UserRead } from '@/api/client';
+import type { UserRead } from '@hashinbox/client';
+import { openapi } from '@/api/client';
 import type { Shell } from '@/layout';
 import { resourcesOf, type Resources } from './_components/scopes';
 import { UserDetail, type Own } from './_components/user';

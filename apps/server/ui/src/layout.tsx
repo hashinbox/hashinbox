@@ -28,16 +28,20 @@ import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  ApiError,
-  call,
-  client,
-  setToken,
-  whenUnauthorized,
+  assetsList,
+  networksList,
+  ownUserGet,
+  recoveryCreateOperation,
+  Session,
+  usersListOperation,
+  versionGet,
+  walletsList,
   type Listing,
   type User,
   type UserRead,
   type Wallet,
-} from '@/api/client';
+} from '@hashinbox/client';
+import { ApiError, api, whenUnauthorized } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
 import { LogsDrawer } from '@/_components/logs/drawer';
 import { logSource } from '@/api/logs';
@@ -52,7 +56,6 @@ import { Networks as Configured } from '@/pages/networks/page';
 import { Setup } from '@/pages/setup/page';
 import { Triggers } from '@/pages/triggers/page';
 import { RecoveryBanner } from '@/pages/users/_components/recovery';
-import { ROOT, allows, unpack } from '@/pages/users/_components/scopes';
 import { Me } from '@/pages/users/me';
 import { Users } from '@/pages/users/page';
 import { Wallets } from '@/pages/wallets/page';
@@ -77,7 +80,6 @@ type View =
  * install, until setup is done), or done.
  */
 type Root = 'unknown' | 'missing' | 'present';
-const TOKEN_KEY = 'tally.token';
 const VIEWS: View[] = [
   'dashboard',
   'wallets',
@@ -127,21 +129,12 @@ export interface Shell {
   fail: (error: unknown) => void;
 }
 
-function stored(): string | null {
-  try {
-    return sessionStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
-}
-
 /** Every wallet, page by page. */
 async function allWallets(): Promise<Wallet[]> {
   const wallets: Wallet[] = [];
   let cursor: string | undefined;
   do {
-    const query = { limit: 500, ...(cursor !== undefined && { cursor }) };
-    const page = await call(client.GET('/v1/wallets', { params: { query } }));
+    const page = await walletsList(api, { limit: 500, ...(cursor !== undefined && { cursor }) });
     wallets.push(...page.wallets);
     cursor = page.next_cursor ?? undefined;
   } while (cursor !== undefined);
@@ -149,7 +142,7 @@ async function allWallets(): Promise<Wallet[]> {
 }
 
 export function Layout() {
-  const [token, setSession] = useState<string | null>(stored);
+  const [token, setSession] = useState<string | null>(() => api.session?.token ?? null);
   const [root, setRoot] = useState<Root>('unknown');
   const [name, setName] = useState(NAME);
   const [me, setMe] = useState<UserRead | null>(null);
@@ -176,21 +169,16 @@ export function Layout() {
 
   /** Forgets this tab's session; the login page follows. */
   const signOut = useCallback(() => {
-    setToken(null);
+    api.session = undefined;
     setSession(null);
     setMe(null);
-    try {
-      sessionStorage.removeItem(TOKEN_KEY);
-    } catch {
-      /* private window */
-    }
   }, []);
 
   /** Logs out: this session, or (`everywhere`) every one the user issued. */
   const logout = useCallback(
     (everywhere: boolean) => {
-      const params = { query: { all: everywhere } };
-      call(client.DELETE('/v1/session', { params }))
+      api
+        .logout({ all: everywhere })
         .catch((error: unknown) => {
           if (everywhere) fail(error);
         })
@@ -208,7 +196,7 @@ export function Layout() {
 
   // The very first call: a fresh install shows the setup page instead.
   useEffect(() => {
-    call(client.GET('/v1/version'))
+    versionGet(api)
       .then((version) => {
         const instance = version.settings.instance;
         if (typeof instance === 'string' && instance) setName(instance);
@@ -222,10 +210,9 @@ export function Layout() {
 
   // The logged-in user, read with this tab's session.
   useEffect(() => {
-    setToken(token);
     if (token === null || root !== 'present') return;
     let live = true;
-    call(client.GET('/v1/user'))
+    ownUserGet(api)
       .then((read) => {
         if (live) setMe(read);
       })
@@ -238,7 +225,7 @@ export function Layout() {
   }, [token, root, meRead, fail]);
 
   const open = root === 'present' && token !== null && me !== null;
-  const reads = me !== null && allows(unpack(me.user.scopes), `${ROOT}.users.$read`);
+  const reads = me !== null && api.session?.can(usersListOperation) === true;
 
   // `users/me` was the own page; `users` without `users.$read` shows nothing.
   useEffect(() => {
@@ -254,7 +241,7 @@ export function Layout() {
   useEffect(() => {
     if (!open) return;
     let live = true;
-    Promise.all([call(client.GET('/v1/assets')), allWallets(), call(client.GET('/v1/networks'))])
+    Promise.all([assetsList(api), allWallets(), networksList(api)])
       .then(([assets, list, configured]) => {
         if (!live) return;
         const byNetwork = new Map<string, Explorer>();
@@ -292,12 +279,7 @@ export function Layout() {
 
   /** A new session for this tab: kept, and used from the next call on. */
   const keep = useCallback((value: string) => {
-    try {
-      sessionStorage.setItem(TOKEN_KEY, value);
-    } catch {
-      /* private window */
-    }
-    setToken(value);
+    api.session = Session.parse(value);
     setSession(value);
   }, []);
 
@@ -464,9 +446,7 @@ export function Layout() {
             {view === 'dashboard' && (
               <Dashboard
                 shell={shell}
-                banner={
-                  allows(unpack(me.user.scopes), `${ROOT}.recovery.$write`) && <RecoveryBanner />
-                }
+                banner={api.session?.can(recoveryCreateOperation) && <RecoveryBanner />}
               />
             )}
             {view === 'wallets' && (

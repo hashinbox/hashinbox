@@ -11,7 +11,8 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useRef, useState, type SubmitEvent } from 'react';
-import { call, client, events } from '@/api/client';
+import { networksList, networkTipSearch, type EventStream, type RawEvent } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { mono } from '@/theme';
 
 /** A produced block: its native position and Unix seconds. */
@@ -52,13 +53,14 @@ export function SearchDialog({
   // About the earliest time the network's depth limit allows: `max_depth`
   // blocks back (null: no limit).
   const [earliest, setEarliest] = useState<number | null>(null);
-  const searching = useRef<AbortController | null>(null);
+  // The search streaming: its handle reconnects across the server's windows.
+  const searching = useRef<EventStream<RawEvent> | null>(null);
   const target = at === '' ? NaN : Math.floor(new Date(at).getTime() / 1000);
 
   useEffect(() => {
     if (!open) return;
     let live = true;
-    call(client.GET('/v1/networks'))
+    networksList(api)
       .then((list) => {
         const stored = list.networks.find(
           (n) => n.chain === network.chain && n.network === network.name,
@@ -70,36 +72,33 @@ export function SearchDialog({
       .catch(() => live && setEarliest(null));
     return () => {
       live = false;
-      searching.current?.abort();
+      searching.current?.stop();
     };
   }, [open, network.chain, network.name]);
 
   const search = () => {
-    searching.current?.abort();
-    const controller = new AbortController();
-    searching.current = controller;
+    searching.current?.stop();
+    const request = { chain: network.chain, network: network.name, at: String(target) };
+    const stream = networkTipSearch(api, request);
+    searching.current = stream;
     setProbes([]);
     setFound(null);
     setError(null);
     setBusy(true);
-    const path =
-      `/v1/networks/${encodeURIComponent(network.chain)}/${encodeURIComponent(network.name)}` +
-      `/tip/search?at=${target}`;
-    events(
-      path,
-      ({ event, data }) => {
-        if (event === 'probe') setProbes((all) => [...all, data as Probe]);
-        else if (event === 'found') setFound(data as Stamp);
-        else if (event === 'error') setError((data as { message: string }).message);
-      },
-      controller.signal,
-    )
+    const read = async () => {
+      for await (const { event, data } of stream) {
+        if (event === 'probe') setProbes((all) => [...all, JSON.parse(data) as Probe]);
+        else if (event === 'found') setFound(JSON.parse(data) as Stamp);
+        else if (event === 'error') setError((JSON.parse(data) as { message: string }).message);
+      }
+    };
+    read()
       .catch((failure: unknown) => {
-        if (!controller.signal.aborted)
+        if (searching.current === stream)
           setError(failure instanceof Error ? failure.message : String(failure));
       })
       .finally(() => {
-        if (searching.current === controller) setBusy(false);
+        if (searching.current === stream) setBusy(false);
       });
   };
 

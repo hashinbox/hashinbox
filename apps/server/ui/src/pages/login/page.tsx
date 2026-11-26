@@ -4,7 +4,8 @@ import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, setToken } from '@/api/client';
+import { ownUserUpdate } from '@hashinbox/client';
+import { ApiError, api } from '@/api/client';
 import { Welcome } from '@/_components/welcome';
 import { mono } from '@/theme';
 
@@ -48,19 +49,20 @@ export function Login({
     const secret = recovering
       ? { passphrase: passphrase.trim().split(/\s+/).join(' ') }
       : { password };
-    const body = { email: email.trim(), ...secret, ...(asksCode && { totp: totp.trim() }) };
-    call(client.POST('/v1/session', { body }))
+    const login = { email: email.trim(), ...secret, ...(asksCode && { totp: totp.trim() }) };
+    // The client keeps the session; the dashboard opens once `onSession` has it.
+    api
+      .login(login)
       .then((session) => {
         if (!recovering) {
           onSession(session.token);
           return;
         }
         // A passphrase session: it sets the new password before the dashboard opens.
-        setToken(session.token);
         setResetting(true);
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.code === 'totp_required') {
+        if (error instanceof ApiError && error.reason === 'totp_required') {
           setAsksCode(true);
           return;
         }
@@ -190,7 +192,7 @@ function NewPassword({
     if (password !== repeat) return;
     setBusy(true);
     setProblem(null);
-    call(client.PUT('/v1/user', { body: { password } }))
+    ownUserUpdate(api, { body: { password } })
       .then((session) => onSession(session.token))
       .catch((error: unknown) => setProblem(problemOf(error)))
       .finally(() => setBusy(false));

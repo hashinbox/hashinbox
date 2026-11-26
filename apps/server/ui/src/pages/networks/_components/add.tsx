@@ -18,7 +18,15 @@ import Tabs from '@mui/material/Tabs';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
+import {
+  endpointsCreate,
+  networkEndpointsCreate,
+  networkEndpointTest,
+  networksCreate,
+  type ConfiguredNetwork,
+  type NetworkEndpoints,
+} from '@hashinbox/client';
+import { ApiError, api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { NetworkSelect } from '@/_components/network-select';
 import { PROVIDERS, asksKey, baseFor, urlOf } from '@/providers';
@@ -61,7 +69,7 @@ export function AddNodes({
   chains: string[];
   open: boolean;
   onClose: () => void;
-  onAdded: (changed: Schemas['NetworkEndpoints'][]) => void;
+  onAdded: (changed: NetworkEndpoints[]) => void;
   /** A network was created (its node may still be refused). */
   onCreated: () => void;
 }) {
@@ -103,7 +111,7 @@ function FromProvider({
   shell: Shell;
   networks: ConfiguredNetwork[];
   onClose: () => void;
-  onAdded: (changed: Schemas['NetworkEndpoints'][]) => void;
+  onAdded: (changed: NetworkEndpoints[]) => void;
 }) {
   const offered = PROVIDERS.filter((p) =>
     networks.some((n) => baseFor(p, n.chain, n.network) !== undefined),
@@ -145,7 +153,7 @@ function FromProvider({
     };
     setBusy(true);
     setProblem(null);
-    call(client.POST('/v1/networks/endpoints', { body }))
+    endpointsCreate(api, { body })
       .then((answer) => onAdded(answer.networks))
       .catch(failed(shell, setProblem))
       .finally(() => setBusy(false));
@@ -360,7 +368,7 @@ function OwnNode({
   networks: ConfiguredNetwork[];
   chains: string[];
   onClose: () => void;
-  onAdded: (changed: Schemas['NetworkEndpoints'][]) => void;
+  onAdded: (changed: NetworkEndpoints[]) => void;
   onCreated: () => void;
 }) {
   const [picked, setPicked] = useState(networks[0] ? name(networks[0]) : NEW);
@@ -421,8 +429,7 @@ function OwnNode({
     setBusy(true);
     setProblem(null);
     setTold(null);
-    const at = '/v1/networks/{chain}/{network}/endpoints/test';
-    call(client.POST(at, { params: { path }, body: { url: endpoint } }))
+    networkEndpointTest(api, { ...path, body: { url: endpoint } })
       .then((info) => setTold(`Serves ${info.chain_id}, this network; tip #${String(info.tip)}.`))
       .catch(failed(shell, setProblem))
       .finally(() => setBusy(false));
@@ -435,15 +442,12 @@ function OwnNode({
     setTold(null);
     try {
       if (creating) {
-        await call(client.POST('/v1/networks', { body: fresh }));
+        await networksCreate(api, { body: fresh });
         // Created: a refused node is retried on it, not created again.
         setPicked(`${atChain}/${atNetwork}`);
         onCreated();
       }
-      const at = '/v1/networks/{chain}/{network}/endpoints';
-      const added = await call(
-        client.POST(at, { params: { path }, body: { endpoints: [endpoint] } }),
-      );
+      const added = await networkEndpointsCreate(api, { ...path, body: { endpoints: [endpoint] } });
       onAdded([added]);
     } catch (error) {
       failed(shell, setProblem)(error);
@@ -680,7 +684,7 @@ export function AddNode({
     };
     setBusy(true);
     setProblem(null);
-    call(client.POST('/v1/networks/endpoints', { body }))
+    endpointsCreate(api, { body })
       .then(() => {
         close();
         onAdded();

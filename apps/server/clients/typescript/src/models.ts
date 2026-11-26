@@ -544,8 +544,8 @@ export interface LogEntry {
   /** Its fields and its spans' (`network`, `node`, …), as text. */
   fields: Record<string, string>;
   /**
-   * Its id, newest highest; 0 until stored, so 0 on the live stream
-   * (`/v1/logs/stream`).
+   * Its id, newest highest: given as it is kept, so the same on the live
+   * stream (`/v1/logs/stream`) as stored.
    */
   id: number;
   /** The job it ran in; always present, null: none. */

@@ -4,12 +4,13 @@
 //! [`find_page`], the read; and [`listen`], the feed's.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fmt,
+    sync::{Arc, Mutex, PoisonError},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _};
 use tokio::sync::{broadcast, mpsc};
 use tracing::{
     Event, Subscriber,
@@ -39,17 +40,74 @@ const QUEUED: usize = 10_000;
 /// The most rows one write stores.
 const BATCH: usize = 500;
 
-/// Entries the feed holds for its slowest listener; beyond them that one
-/// misses the oldest.
+/// The stored entries one read of a resuming listener's takes.
+const PAGE: i64 = 500;
+
+/// Entries the feed holds for its slowest listener, beyond which that one
+/// misses the oldest; and the newest it keeps for a listener resuming.
 const FEED: usize = 1_000;
 
-/// The live feed: every entry [`DbLayer`] keeps, as it is kept, unstored
-/// (its id 0).
-pub(crate) type Feed = broadcast::Sender<Log>;
+/// The live feed: every entry [`DbLayer`] keeps, as it is kept, given its
+/// id then (before it is stored); the newest [`FEED`] of them held for a
+/// listener resuming after one ([`listen`]).
+#[derive(Clone)]
+pub(crate) struct Feed(Arc<Mutex<Held>>);
+
+/// What a [`Feed`] holds, under its one lock.
+struct Held {
+    sender: broadcast::Sender<Log>,
+    /// The newest entries, oldest first.
+    recent: VecDeque<Log>,
+    /// Every entry from this id on is in `recent`.
+    from: i64,
+    /// The id given last.
+    last: i64,
+}
 
 /// A new feed with no listener.
 pub(crate) fn feed() -> Feed {
-    broadcast::channel(FEED).0
+    let now = now_micros();
+    Feed(Arc::new(Mutex::new(Held {
+        sender: broadcast::channel(FEED).0,
+        recent: VecDeque::with_capacity(FEED),
+        from: now,
+        last: now,
+    })))
+}
+
+impl Feed {
+    /// `log` given its id, held and sent to every listener; as sent. Its id
+    /// is now in microseconds, or one more than the last: newest highest,
+    /// on past a restart.
+    fn publish(&self, mut log: Log) -> Log {
+        let mut held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.last = now_micros().max(held.last + 1);
+        log.id = held.last;
+        if held.recent.len() == FEED
+            && let Some(oldest) = held.recent.pop_front()
+        {
+            held.from = oldest.id + 1;
+        }
+        held.recent.push_back(log.clone());
+        let _unheard = held.sender.send(log.clone());
+        log
+    }
+
+    /// A listener of every entry from now on.
+    #[cfg(test)]
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<Log> {
+        let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        held.sender.subscribe()
+    }
+
+    /// A listener of every entry from now on, the held ones after `after`
+    /// (oldest first), and the id from which every entry is held: at once,
+    /// so none is missed or heard twice.
+    fn resume(&self, after: i64) -> (broadcast::Receiver<Log>, Vec<Log>, i64) {
+        let held = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let recent = held.recent.iter().filter(|log| log.id > after).cloned();
+        (held.sender.subscribe(), recent.collect(), held.from)
+    }
 }
 
 /// Every event it is given, as a [`Log`] row with its spans' fields
@@ -116,7 +174,7 @@ impl<S: Subscriber + for<'a> LookupSpan<'a>> tracing_subscriber::Layer<S> for Db
         let metadata = event.metadata();
         let target = metadata.target().to_owned();
         let row = Log::new(now(), *metadata.level(), target, message, fields);
-        let _unheard = self.feed.send(row.clone());
+        let row = self.feed.publish(row);
         let _dropped = self.sender.try_send(row);
     }
 }
@@ -127,6 +185,14 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// Now, Unix µs: what a new entry's id is at least.
+fn now_micros() -> i64 {
+    let since = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    i64::try_from(since.as_micros()).unwrap_or(i64::MAX)
 }
 
 /// The event's line on stdout: time, level, code (`target`); its own
@@ -248,10 +314,25 @@ pub(crate) enum Heard {
     Missed(u64),
 }
 
-/// Every entry of `feed` from now on that `filter` reads, and each count
-/// missed by lagging; ends when the feed does.
-pub(crate) fn listen(feed: &Feed, filter: LogFilter) -> impl Stream<Item = Heard> + use<> {
-    futures_util::stream::unfold(feed.subscribe(), move |mut receiver| {
+/// Every entry `filter` reads from now on, and each count missed by
+/// lagging; ends when the feed does. With `after` (an entry's id), first
+/// every entry since it: those the feed holds, and before them, when it no
+/// longer holds all, the stored ones. None is sent twice.
+pub(crate) fn listen(
+    db: Db,
+    feed: &Feed,
+    filter: LogFilter,
+    after: Option<i64>,
+) -> impl Stream<Item = Heard> + use<> {
+    let (receiver, recent, from) = feed.resume(after.unwrap_or(i64::MAX));
+    let gap = after.filter(|after| after + 1 < from);
+    let stored = stored(db, filter.clone(), gap, from);
+    let held = recent.into_iter().filter({
+        let filter = filter.clone();
+        move |log| filter.matches(log)
+    });
+    let held = futures_util::stream::iter(held.map(|log| Heard::Entry(Box::new(log))));
+    let live = futures_util::stream::unfold(receiver, move |mut receiver| {
         let filter = filter.clone();
         async move {
             loop {
@@ -264,5 +345,32 @@ pub(crate) fn listen(feed: &Feed, filter: LogFilter) -> impl Stream<Item = Heard
                 return Some((heard, receiver));
             }
         }
-    })
+    });
+    stored.chain(held).chain(live)
+}
+
+/// The stored entries `filter` reads after `after` and before `before`,
+/// oldest first, a page at a time; none without `after`. A failed read
+/// ends them.
+fn stored(db: Db, filter: LogFilter, after: Option<i64>, before: i64) -> impl Stream<Item = Heard> {
+    let oldest_first = LogFilter {
+        after: filter.after.or(Some(0)),
+        ..filter
+    };
+    let pages = futures_util::stream::unfold(after, move |cursor| {
+        let (db, filter) = (db.clone(), oldest_first.clone());
+        async move {
+            let page = Page {
+                after: Some(cursor?),
+                limit: PAGE,
+            };
+            let logs = find_page(&db, filter, page).await.ok()?;
+            let logs: Vec<Log> = logs.into_iter().filter(|log| log.id < before).collect();
+            let full = i64::try_from(logs.len()) == Ok(PAGE);
+            let next = logs.last().map(|log| log.id).filter(|_| full);
+            let heard = logs.into_iter().map(|log| Heard::Entry(Box::new(log)));
+            Some((futures_util::stream::iter(heard), next))
+        }
+    });
+    pages.flatten()
 }

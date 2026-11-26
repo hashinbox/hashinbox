@@ -1419,8 +1419,8 @@ final readonly class LogEntry
      * @param int $at When it happened, Unix ms.
      * @param ?string $chain Its network's chain; always present, null: no network's.
      * @param array<string, string> $fields Its fields and its spans' (`network`, `node`, …), as text.
-     * @param int $id Its id, newest highest; 0 until stored, so 0 on the live stream
-     *     (`/v1/logs/stream`).
+     * @param int $id Its id, newest highest: given as it is kept, so the same on the live
+     *     stream (`/v1/logs/stream`) as stored.
      * @param ?int $jobId The job it ran in; always present, null: none.
      * @param string $level `error`, `warn`, `info`, `debug` or `trace`.
      * @param ?string $market The market it concerns (`binance`, …); always present, null: none.

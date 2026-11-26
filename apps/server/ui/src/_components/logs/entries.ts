@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Shell } from '@/layout';
 
-/** One kept entry as a page or the stream holds it; a live one's id is 0. */
+/** One kept entry as a page or the stream holds it. */
 export interface Entry {
   id: number;
   /** Unix ms. */
@@ -42,7 +42,7 @@ export interface LogSource {
   messages: () => Promise<Record<string, string>>;
 }
 
-/** An entry as shown, with a key of its own (a live one has no id); `fresh` while just heard. */
+/** An entry as shown, with a key of its own; `fresh` while just heard. */
 export interface Row {
   key: string;
   entry: Entry;

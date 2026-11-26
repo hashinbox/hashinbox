@@ -6,7 +6,8 @@ import IconButton from '@mui/material/IconButton';
 import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import { useCallback, useEffect, useState } from 'react';
-import { call, client, type ConfiguredNetwork } from '@/api/client';
+import { networksList, type ConfiguredNetwork } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
@@ -73,7 +74,7 @@ export function Networks({ shell }: { shell: Shell }) {
   const settings = page === 'settings';
 
   const refresh = useCallback(() => {
-    call(client.GET('/v1/networks'))
+    networksList(api)
       .then((list) => {
         setNetworks(list.networks);
         setChains(list.chains);

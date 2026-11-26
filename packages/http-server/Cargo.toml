@@ -3,12 +3,13 @@ name = "http-server"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Hardened axum serving for application routers: TLS/bind validation, bearer auth, body limits, health routes, static files."
+description = "Hardened axum serving for application routers: TLS/bind validation, bearer auth, body limits, health routes, static files, windowed event streams."
 
 [dependencies]
 axum = "0.8"
 constant_time_eq = "=0.4.2"
-tokio = { workspace = true, features = ["fs", "net"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+tokio = { workspace = true, features = ["fs", "net", "time"] }
 
 [dev-dependencies]
 tower = { version = "=0.5.2", features = ["util"] }

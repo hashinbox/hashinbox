@@ -1,5 +1,6 @@
 // What a wallet is watched in, from when, and how far it is indexed.
-import { call, client, type Wallet } from '@/api/client';
+import { walletGet, walletIndexesCreate, type Wallet } from '@hashinbox/client';
+import { api } from '@/api/client';
 
 /** What to watch: the assets, and where indexing begins (its birthday). */
 export interface Watching {
@@ -17,15 +18,9 @@ export async function watch(id: string, watching: Watching): Promise<Wallet> {
   const from = Number(watching.from);
   // No start: from the chain's tip.
   const at = watching.start === 'at' && Number.isInteger(from) && from >= 0;
-  const params = { path: { id } };
   for (const asset of watching.assets)
-    await call(
-      client.POST('/v1/wallets/{id}/indexes', {
-        params,
-        body: { asset, ...(at && { start: from }) },
-      }),
-    );
-  return call(client.GET('/v1/wallets/{id}', { params }));
+    await walletIndexesCreate(api, { id, body: { asset, ...(at && { start: from }) } });
+  return walletGet(api, { id });
 }
 
 /** How far one asset of a wallet is indexed. */

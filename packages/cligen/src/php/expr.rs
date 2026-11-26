@@ -305,6 +305,8 @@ pub enum Body {
     Value(Value),
     /// `head {` and its statements: a `foreach`, an `if`.
     Block(String, Vec<Body>),
+    /// `head {`, its statements, `};`: a closure assigned.
+    Closure(String, Vec<Body>),
     /// `if (condition) { … } elseif (condition) { … }`.
     If(Vec<(String, Vec<Body>)>),
 }
@@ -316,6 +318,11 @@ impl Body {
             Self::Line(line) => f.line(line),
             Self::Value(value) => f.value(value),
             Self::Block(head, body) => f.block(head, |f| all(f, body)),
+            Self::Closure(head, body) => {
+                f.line(&format!("{head} {{"))?;
+                f.indented(|f| all(f, body))?;
+                f.line("};")
+            }
             Self::If(arms) => {
                 for (index, (condition, body)) in arms.iter().enumerate() {
                     let head = if index == 0 {

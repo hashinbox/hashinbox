@@ -10,14 +10,23 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { call, client, type Schemas, type User, type UserRead } from '@/api/client';
+import {
+  ownUserUpdate,
+  recoveryCreateOperation,
+  userUpdate,
+  userUpdateOperation,
+  type UpdateUserRequest,
+  type User,
+  type UserRead,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Keys } from './keys';
 import { Picker, ScopeList } from './picker';
-import { ROOT, allows, pack, unpack, type Resources } from './scopes';
+import { pack, unpack, type Resources } from './scopes';
 import { Recovery } from './recovery';
 import { Row, Section } from './section';
 import { Sessions } from './sessions';
@@ -52,14 +61,15 @@ export function UserDetail({
   own?: Own;
 }) {
   const held = unpack(me.user.scopes);
-  const manages = user.id !== me.user.id && allows(held, `${ROOT}.users.$write`);
+  const manages =
+    user.id !== me.user.id && api.session?.can(userUpdateOperation, { id: user.id }) === true;
   const disabled = user.disabled_at != null;
   const [password, setPassword] = useState(false);
   const [editing, setEditing] = useState(false);
   const [disabling, setDisabling] = useState(false);
 
-  const update = (body: Schemas['UpdateUserRequest'], done: string) => {
-    call(client.PATCH('/v1/users/{id}', { params: { path: { id: user.id } }, body }))
+  const update = (body: UpdateUserRequest, done: string) => {
+    userUpdate(api, { id: user.id, body })
       .then(() => {
         shell.notify(done);
         onChanged();
@@ -124,7 +134,7 @@ export function UserDetail({
             onSignedOut={own.onSignedOut}
           />
           <Sessions shell={shell} onLogout={own.onLogout} />
-          {allows(held, `${ROOT}.recovery.$write`) && <Recovery shell={shell} />}
+          {api.session?.can(recoveryCreateOperation) && <Recovery shell={shell} />}
           <Password
             open={password}
             onClose={() => setPassword(false)}
@@ -231,7 +241,7 @@ function Password({
     event.preventDefault();
     if (next !== repeat) return;
     setProblem(null);
-    call(client.PUT('/v1/user', { body: { password: next } }))
+    ownUserUpdate(api, { body: { password: next } })
       .then((session) => {
         close();
         onChanged(session.token);

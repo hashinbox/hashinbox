@@ -8,7 +8,8 @@ import Tabs from '@mui/material/Tabs';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { call, client, type Trigger, type Wallet } from '@/api/client';
+import { triggersCreate, type Trigger, type Wallet } from '@hashinbox/client';
+import { api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
@@ -59,7 +60,7 @@ export function Compose({
 
   const create = () => {
     setBusy(true);
-    call(client.POST('/v1/triggers', { body: { triggers: drafts as never[] } }))
+    triggersCreate(api, { body: { triggers: drafts } })
       .then((list) => onCreated(list.triggers))
       .catch(shell.fail)
       .finally(() => setBusy(false));

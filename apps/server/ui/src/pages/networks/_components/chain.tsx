@@ -9,13 +9,15 @@ import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ApiError,
-  call,
-  client,
-  type ChainBlock,
-  type ChainTransaction,
+  networkBlockGet,
+  networkBlocksList,
+  networkBlockTransactionsList,
+  networkTransactionsList,
+  type Block as ChainBlock,
   type ConfiguredNetwork,
-} from '@/api/client';
+  type Transaction as ChainTransaction,
+} from '@hashinbox/client';
+import { ApiError, api } from '@/api/client';
 import { Address } from '@/_components/address';
 import { EmptyRow } from '@/_components/table';
 import { Transaction } from '@/_components/transaction';
@@ -68,16 +70,8 @@ export function Chain({
   const refresh = useCallback(() => {
     const path = { chain, network: name };
     Promise.all([
-      call(
-        client.GET('/v1/networks/{chain}/{network}/blocks', {
-          params: { path, query: { limit: BLOCKS } },
-        }),
-      ),
-      call(
-        client.GET('/v1/networks/{chain}/{network}/transactions', {
-          params: { path, query: { pending: true } },
-        }),
-      ),
+      networkBlocksList(api, { ...path, limit: BLOCKS }),
+      networkTransactionsList(api, { ...path, pending: true }),
     ])
       .then(([{ blocks }, { transactions: mempool }]) =>
         setRead((last) => {
@@ -110,11 +104,8 @@ export function Chain({
   useEffect(() => {
     if (picked === null) return;
     let live = true;
-    const params = { path: { chain, network: name, position: picked } };
-    Promise.all([
-      call(client.GET('/v1/networks/{chain}/{network}/blocks/{position}', { params })),
-      call(client.GET('/v1/networks/{chain}/{network}/blocks/{position}/transactions', { params })),
-    ])
+    const params = { chain, network: name, position: picked };
+    Promise.all([networkBlockGet(api, params), networkBlockTransactionsList(api, params)])
       .then(([found, { transactions }]) => {
         if (live) setFar({ position: picked, block: found, transactions });
       })

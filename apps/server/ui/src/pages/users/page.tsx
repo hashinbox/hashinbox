@@ -4,14 +4,15 @@ import Box from '@mui/material/Box';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import { useCallback, useEffect, useState } from 'react';
-import { call, client, openapi, type User, type UserRead } from '@/api/client';
+import { usersCreateOperation, usersList, type User, type UserRead } from '@hashinbox/client';
+import { api, openapi } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import { Side, SideItem } from '@/_components/side';
 import { Split } from '@/_components/split';
 import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
 import { AddUser } from './_components/add';
-import { ROOT, allows, resourcesOf, unpack, type Resources } from './_components/scopes';
+import { resourcesOf, unpack, type Resources } from './_components/scopes';
 import { UserDetail } from './_components/user';
 
 /** Every user, page by page. */
@@ -19,8 +20,7 @@ async function allUsers(): Promise<User[]> {
   const users: User[] = [];
   let cursor: string | undefined;
   do {
-    const query = { limit: 500, ...(cursor !== undefined && { cursor }) };
-    const page = await call(client.GET('/v1/users', { params: { query } }));
+    const page = await usersList(api, { limit: 500, ...(cursor !== undefined && { cursor }) });
     users.push(...page.users);
     cursor = page.next_cursor ?? undefined;
   } while (cursor !== undefined);
@@ -67,7 +67,7 @@ export function Users({ shell, me, onMe }: { shell: Shell; me: UserRead; onMe: (
           {...(users && { count: String(users.length) })}
           empty={users?.length === 0 && 'No user.'}
           actions={
-            allows(held, `${ROOT}.users.$write`) && (
+            api.session?.can(usersCreateOperation) && (
               <Tooltip title="Add user">
                 <IconButton
                   size="small"

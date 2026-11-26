@@ -19,7 +19,8 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Decimal from 'decimal.js';
 import { useState, type SubmitEvent } from 'react';
-import { call, client, type Wallet } from '@/api/client';
+import { walletsCreate, walletTagAdd, type Wallet } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Currencies } from '@/_components/currency';
 import type { Shell } from '@/layout';
 import { assetOf, decimalsOf, networkChoices, tickersOf, unitOf } from '@/money';
@@ -345,11 +346,8 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
       ...(kind === 'address' && { address: key }),
       ...(externalId.trim() !== '' && { external_id: externalId.trim() }),
     };
-    const wallet = await call(client.POST('/v1/wallets', { body }));
-    for (const tag of tags) {
-      const params = { path: { id: wallet.id, tag } };
-      await call(client.PUT('/v1/wallets/{id}/tags/{tag}', { params }));
-    }
+    const wallet = await walletsCreate(api, { body });
+    for (const tag of tags) await walletTagAdd(api, { id: wallet.id, tag });
     setText('');
     setMade(wallet);
   };

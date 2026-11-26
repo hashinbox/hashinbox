@@ -1,13 +1,12 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { call, client, type Schemas } from '@/api/client';
+import { statsGet, type Stats } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { HashinboxMark } from '@/_components/logo';
 import { Sparkline } from '@/_components/sparkline';
 import { Stat } from '@/_components/stat';
 import type { Shell } from '@/layout';
-
-type Stats = Schemas['Stats'];
 
 const BEAT_MS = 10_000;
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact' });
@@ -22,7 +21,7 @@ export function Dashboard({ shell, banner }: { shell: Shell; banner?: ReactNode 
   const [stats, setStats] = useState<Stats | null>(null);
 
   const refresh = useCallback(() => {
-    call(client.GET('/v1/stats')).then(setStats).catch(shell.fail);
+    statsGet(api).then(setStats).catch(shell.fail);
   }, [shell.fail]);
 
   useEffect(() => {

@@ -36,8 +36,8 @@ export class Session {
   static parse(token: string): Session {
     const parts = token.split(".");
     if (parts.length !== 3) throw new TypeError("not a JWT");
-    const header = decodePart(parts[0]) as { alg?: string; kid?: string };
-    const claims = decodePart(parts[1]) as Claims;
+    const header = decodePart(parts[0]!) as { alg?: string; kid?: string };
+    const claims = decodePart(parts[1]!) as Claims;
     if (header.alg !== "HS256") throw new TypeError("its alg is not HS256");
     if (typeof claims.iss !== "string" || header.kid !== claims.iss)
       throw new TypeError("its header does not name its issuer");

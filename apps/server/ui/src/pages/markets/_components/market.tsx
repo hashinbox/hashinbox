@@ -4,13 +4,17 @@ import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState } from 'react';
-import { call, client, type Schemas } from '@/api/client';
+import {
+  marketCandlesList,
+  marketUpdate,
+  type MarketCandle1h as Candle,
+  type MarketListing,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { LineChart } from '@/_components/chart';
 import { LogsButton } from '@/_components/logs/button';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
-
-type Candle = Schemas['MarketCandle1h'];
 
 const BEAT_MS = 10_000;
 const WEEK_MS = 7 * 86_400_000;
@@ -37,13 +41,12 @@ export function Market({
   onChanged,
 }: {
   shell: Shell;
-  market: Schemas['MarketListing'];
+  market: MarketListing;
   tickers: string[];
   onChanged: () => void;
 }) {
   const toggle = () => {
-    const params = { path: { name: market.name } };
-    call(client.PATCH('/v1/markets/{name}', { params, body: { feed: !market.feed } }))
+    marketUpdate(api, { name: market.name, body: { feed: !market.feed } })
       .then(() => {
         shell.notify(`${market.name} price feed ${market.feed ? 'off' : 'on'}.`);
         onChanged();
@@ -90,8 +93,7 @@ function Candles({ shell, market, asset }: { shell: Shell; market: string; asset
     let live = true;
     let after: number | undefined;
     const read = () => {
-      const query = { asset, ...(after !== undefined && { after }) };
-      call(client.GET('/v1/markets/{name}/candles', { params: { path: { name: market }, query } }))
+      marketCandlesList(api, { name: market, asset, ...(after !== undefined && { after }) })
         .then((fresh) => {
           if (!live) return;
           after = fresh.candles.at(-1)?.start ?? after;

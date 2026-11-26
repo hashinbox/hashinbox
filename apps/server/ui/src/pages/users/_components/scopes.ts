@@ -1,6 +1,6 @@
-// Scopes as text (`com.hashinbox.wallets[x].$read`), checked the way
-// `packages/scope` checks them, so the picker offers only what is held.
-import type { Packed } from '@/api/client';
+// Scopes as text (`com.hashinbox.wallets[x].$read`), checked by the SDK's
+// port of `packages/scope`, so the picker offers only what is held.
+import { Scopes, type Packed } from '@hashinbox/client';
 
 export const ROOT = 'com.hashinbox';
 
@@ -49,40 +49,9 @@ function parts(scope: string): { path: string[]; action: string } {
   return { path, action: at < 0 ? '' : scope.slice(at + 2) };
 }
 
-/** A step's name and ids; null ids: all of them. */
-function named(step: string): { name: string; ids: string[] | null } {
-  const open = step.indexOf('[');
-  if (open < 0 || !step.endsWith(']')) return { name: step, ids: null };
-  return { name: step.slice(0, open), ids: step.slice(open + 1, -1).split(',') };
-}
-
-function stepCovers(ours: string, theirs: string): boolean {
-  if (ours === '*') return true;
-  const a = named(ours);
-  const b = named(theirs);
-  if (a.name !== b.name) return false;
-  if (a.ids === null) return true;
-  const held = a.ids;
-  return b.ids?.every((id) => held.includes(id)) ?? false;
-}
-
-/** Step by step; a `*` at the end covers anything below. */
-function pathCovers(ours: string[], theirs: string[]): boolean {
-  const [step, ...rest] = ours;
-  const [their, ...theirRest] = theirs;
-  if (step === undefined) return their === undefined;
-  if (step === '*' && rest.length === 0) return true;
-  if (their === undefined) return false;
-  return stepCovers(step, their) && pathCovers(rest, theirRest);
-}
-
-/** Whether one of `held` allows everything `wanted` allows. */
+/** Whether one of `held` allows everything `wanted` allows, as the server checks it. */
 export function allows(held: string[], wanted: string): boolean {
-  const want = parts(wanted);
-  return held.some((scope) => {
-    const have = parts(scope);
-    return (have.action === '*' || have.action === want.action) && pathCovers(have.path, want.path);
-  });
+  return Scopes.parse(held.join(' ')).covers(wanted);
 }
 
 /** What a scope allows, in words: `read wallets`, `everything`. */

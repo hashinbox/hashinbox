@@ -3,7 +3,8 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { call, client, type Trigger, type Wallet } from '@/api/client';
+import { triggerReplace, type Trigger, type Wallet } from '@hashinbox/client';
+import { api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
@@ -31,7 +32,7 @@ export function Editor({
   const save = () => {
     setBusy(true);
     const { id, ...body } = def;
-    call(client.PUT('/v1/triggers/{id}', { params: { path: { id } }, body: body as never }))
+    triggerReplace(api, { id, body })
       .then((saved) => {
         shell.notify('Trigger saved.');
         onSaved(saved);

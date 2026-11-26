@@ -513,8 +513,8 @@ type LogEntry struct {
 	Chain *string `json:"chain"`
 	// Its fields and its spans' (`network`, `node`, …), as text.
 	Fields map[string]string `json:"fields"`
-	// Its id, newest highest; 0 until stored, so 0 on the live stream
-	// (`/v1/logs/stream`).
+	// Its id, newest highest: given as it is kept, so the same on the live
+	// stream (`/v1/logs/stream`) as stored.
 	ID int64 `json:"id"`
 	// The job it ran in; always present, null: none.
 	JobID *int64 `json:"job_id"`

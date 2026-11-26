@@ -11,7 +11,7 @@ use axum::{
     http::header,
     response::{
         IntoResponse,
-        sse::{Event, KeepAlive, Sse},
+        sse::{Event, Sse},
     },
 };
 use futures_util::{Stream, StreamExt as _};
@@ -239,6 +239,15 @@ async fn list_messages(session: Session) -> Result<impl IntoResponse, Error> {
     ))
 }
 
+/// Where a stream resumes.
+#[derive(Clone, Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+struct ResumeQuery {
+    /// The last event `id` read: every entry after it first, then the new
+    /// ones; absent, the new ones alone.
+    cursor: Option<String>,
+}
+
 /// A `missed` event.
 #[derive(Debug, Serialize)]
 struct Missed {
@@ -252,15 +261,16 @@ struct Missed {
     operation_id = "logs_stream",
     summary = "Stream new log entries",
     description = "`text/event-stream` of every entry kept from now on that the filters \
-        read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: \
-        not yet stored). A reader too slow for the feed gets `event: missed` with \
-        `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the \
-        stream does not end.",
-    params(LogQuery),
+        read (those of the list): one event per entry, its `data` a `LogEntry`, its `id` the \
+        entry's. A reader too slow for the feed gets `event: missed` with \
+        `{\"missed\": n}`, then the entries after. Comments keep the connection alive. \
+        After the stream window (15 s) the answer ends with `event: close`: ask again with \
+        the last `id` as `cursor` and every entry since is sent first, none twice.",
+    params(LogQuery, ResumeQuery),
     responses(
         (status = 200, description = "The entries, as they are kept",
             content_type = "text/event-stream", body = String),
-        (status = 400, description = "Malformed query, level, or network", body = Error),
+        (status = 400, description = "Malformed query, level, network, or cursor", body = Error),
         (status = 401, description = "Missing or invalid bearer token", body = Error),
         (status = 403, description = "Missing scope", body = Error)
     ),
@@ -270,18 +280,29 @@ async fn stream(
     session: Session,
     State(state): State<Arc<AppState>>,
     query: Result<Query<LogQuery>, QueryRejection>,
+    resume: Result<Query<ResumeQuery>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
     scope::require!(session, "com.hashinbox.logs.$read");
-    let Query(query) = query?;
+    let (Query(query), Query(resume)) = (query?, resume?);
     let filter = query.filter()?;
-    let events = logs::listen(&state.logs, filter).map(|heard| Ok(event(&heard)));
-    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+    let after = resume
+        .cursor
+        .as_deref()
+        .map(str::parse)
+        .transpose()
+        .map_err(|_| Error::invalid_argument("logs cursor is invalid"))?;
+    let events = logs::listen(state.db.clone(), &state.logs, filter, after);
+    let events = events.map(|heard| event(&heard));
+    Ok(http_server::sse::windowed(events, state.stream_window))
 }
 
-/// What a listener heard as its event: an entry, or `missed`.
+/// What a listener heard as its event: an entry (its id the event's), or
+/// `missed`.
 fn event(heard: &Heard) -> Event {
     match heard {
-        Heard::Entry(log) => Event::default().data(serde_json::to_string(log).unwrap_or_default()),
+        Heard::Entry(log) => Event::default()
+            .id(log.id.to_string())
+            .data(serde_json::to_string(log).unwrap_or_default()),
         Heard::Missed(missed) => Event::default()
             .event("missed")
             .data(serde_json::to_string(&Missed { missed: *missed }).unwrap_or_default()),

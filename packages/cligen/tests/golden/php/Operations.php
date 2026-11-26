@@ -6,7 +6,7 @@ declare(strict_types=1);
 
 namespace Mini;
 
-use Generator;
+use Closure;
 
 /**
  * `GET /v1/animals`.
@@ -88,9 +88,9 @@ final readonly class LogsStreamRequest implements Request
 /**
  * Stream the logs: `GET /v1/logs/stream`.
  *
- * @return Generator<int, RawEvent, mixed, void>
+ * @return Stream<RawEvent>
  */
-function logsStream(Client $client, LogsStreamRequest $request = new LogsStreamRequest()): Generator
+function logsStream(Client $client, LogsStreamRequest $request = new LogsStreamRequest()): Stream
 {
     return $client->open($request);
 }
@@ -228,17 +228,20 @@ final readonly class PetEventsStreamRequest implements Request
 /**
  * Stream a pet's events: `GET /v1/pets/{id}/events`.
  *
- * @return Generator<int, Event<Bark>|Event<Missed>, mixed, void>
+ * @return Stream<Event<Bark>|Event<Missed>>
  */
-function petEventsStream(Client $client, PetEventsStreamRequest $request): Generator
+function petEventsStream(Client $client, PetEventsStreamRequest $request): Stream
 {
-    foreach ($client->open($request) as $raw) {
+    /** @var Closure(RawEvent): (Event<Bark>|Event<Missed>|null) $decode */
+    $decode = static function (RawEvent $raw): ?Event {
         if ($raw->event === 'bark') {
-            yield new Event($raw->event, Bark::fromJson(Json::object(Json::decode($raw->data))), $raw->id);
+            return new Event($raw->event, Bark::fromJson(Json::object(Json::decode($raw->data))), $raw->id);
         } elseif ($raw->event === 'missed') {
-            yield new Event($raw->event, Missed::fromJson(Json::object(Json::decode($raw->data))), $raw->id);
+            return new Event($raw->event, Missed::fromJson(Json::object(Json::decode($raw->data))), $raw->id);
         }
-    }
+        return null;
+    };
+    return $client->open($request, $decode);
 }
 
 /**

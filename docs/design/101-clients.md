@@ -177,7 +177,7 @@ print through wrappers (`GoType(&ty)`, `GoName(&id).exported()`, `TsType`, `TsNa
 | openapi-generator | Whole HTTP clients in 50+ languages | Generates the transport (against our interfaces-only rule); output is hard to make idiomatic. |
 | progenitor (Oxide) | Rust clients | 3.0 only; generates the HTTP client too. |
 | oapi-codegen | Go types and clients | Go only; could serve Go models, but not scopes or the shared shape. |
-| openapi-typescript | TS types only | What the dashboard uses today; no operations, scopes or sessions. |
+| openapi-typescript | TS types only | What the dashboard used before `@hashinbox/client`; no operations, scopes or sessions. |
 
 What none of them does is the point of cligen: operations as functions with `.scopes` and
 `.can`, generated interfaces only (no HTTP stack), one shape across languages, typed SSE events.
@@ -194,7 +194,7 @@ starting point the clients grow from:
 | Descriptor | `Operation{ID, Method, Path, Templates}` | `Operation { id, method, path, query?, templates, events? }` | `Operation { id, method, path, templates }` |
 | Request | interface `Request`: `Operation()`, `Params()`, `Query()`, `Body()` | any object: its fields by name, `body` | trait `Request`: `type Response`, `operation()`, `param(name)`, `query(&mut)`, `body()` |
 | Client | `Client.Do(ctx, request, &response) error` | `Client.send<T>(operation, request, signal)` | `Client::send(Http)`; `call(&client, &request)` decodes |
-| Streams | `Streamer.Open`, `Open[T]` → `*Stream[T]` | `Streamer.open<E>(operation, request, signal)` | `Streamer::open(Http)` → events or the non-2xx `Response`; `open(&streamer, &request)` → `Events<T, E>` |
+| Streams | `Streamer.Open(ctx, request, cursor)`, `Open[T]` → `*Stream[T]` (a handle: `Next`, `Stop`, `Cursor`) | `Streamer.open<E>(operation, request, signal)` → `EventStream<E>` (a handle: async iterable, `stop()`, `cursor`) | `Streamer::open(Http)` → events or the non-2xx `Response`; `open(&streamer, &request)` → `Events<T, S>` (a handle: `Stream`, `stop()`, `cursor()`) |
 | Path, scopes | `Path(request)`, `op.Scopes(params)`, `session.Can(op, params)` | `path`, `scopes`, `can` | `request.path()`, `.scopes()`, `.can(session)` |
 
 - The transport prefixes its base URL and adds the credential; generated code never sees a
@@ -231,8 +231,10 @@ the trait, the models, the operations, `Session` and `Secret` still compile.
 - `check_scopes` (on by default): a call the kept session lacks a scope for fails as
   `MissingScope`, unsent (the trait's `missing(scopes)`; `None` when it cannot tell, before a
   key's first session).
-- `stream()`: a minimal SSE reader (`event`, multi-line `data`, `id`; comments skipped), no
-  reconnect.
+- `stream()`: a minimal SSE reader (`event`, multi-line `data`, `id`; comments skipped) behind
+  the reconnecting handle `Events` ([Streams](#streams-the-15-s-window-and-the-handle)):
+  `stop()` or drop ends it, `cursor()`, `backoff(first, most)`; a reconnect sets the query's
+  `cursor`, `Streamer::sleep` waits the backoff.
 - Tests (`cargo test --offline` in the folder): the `_golden/` scope and session cases (the
   signing byte-identical, a server-made token parsed), the client against a loopback server
   (path, query, body, bearer, error mapping, `MissingScope`, signing and re-signing, login,
@@ -269,8 +271,10 @@ generated operations take the `Client` interface, so the default transport is `*
   session (and any secret); `Logout(ctx, false)` only forgets, `true` first calls
   `DELETE /v1/session?all=true`.
 - `Open`: a minimal SSE reader (`event`, multi-line `data`, `id`; comments skipped; `message`
-  by default), no reconnect, ended by ctx or `Close`; the generated `Open[T]` wraps it as
-  `*Stream[T]` with `Next()`.
+  by default), setting the query's `cursor` when given one; the generated `Open[T]` wraps it as the
+  reconnecting handle `*Stream[T]` ([Streams](#streams-the-15-s-window-and-the-handle)):
+  `Next()` (`io.EOF` at the end), `Stop()` (or ctx cancel; `Close` the same), `Cursor()`;
+  `WithStreamBackoff(first, most)`. The first connect is in `Open`, its error returned there.
 - Tests (`go test ./...` in the folder): every `_golden/scope.json` case; `_golden/session.json`
   signed byte for byte and a user token parsed; `HTTPClient` against `httptest` (path, query,
   body, bearer, error mapping, local `ErrMissingScope`, signing, caching, re-signing, retry,
@@ -459,14 +463,14 @@ async def wallet_get(client: Client, request: WalletGetRequest) -> WalletGetResp
   JSON text; the field is `body`, so the method cannot be). Fields named like a method get a
   `_`, as do keywords. A request of only optional fields is the call's default.
 - **Hand-written** (`client.py`): `Operation`, `Request`, `Granted`, `Streamer`
-  (`open(request) -> AsyncIterator[RawEvent]`), `Event[T]`, `path`, `scopes`, `can`, the JSON
+  (`open(request) -> Stream[RawEvent]`, the reconnecting handle), `Event[T]`, `path`, `scopes`, `can`, the JSON
   helpers the generated code calls (`optional`, `array`, `mapping`, `first`, `encode`, `dump`,
   `data`, `text`), and `Client`: the generated ops' `client: Client` is the default httpx
   client itself (another transport goes in as `http=httpx.AsyncClient(transport=…)`). See
   "Python: `hashinbox` (built)".
 - **Streams:** `x-events` gives `PetEventsStreamEvent: TypeAlias = "Event[Bark] | Event[Missed]"`
-  and an async generator decoding each named event (others skipped); without `x-events` the call
-  returns the `Streamer`'s `RawEvent`s.
+  and `streamer.open(request).map(decode)`, a `Stream` decoding each named event (others
+  skipped); without `x-events` the call returns the `Streamer`'s `Stream[RawEvent]`.
 - cligen's tests run `python3 -m py_compile`, `ruff format --check` (else `black --check`)
   and `mypy --strict` (else `pyright`) when installed.
 
@@ -548,8 +552,8 @@ function walletGet(Client $client, WalletGetRequest $request): Wallet
   A field named `body` becomes `body_`; reserved words get a `_` (`List_`, `list_`).
 - **Calls** are namespaced functions; the response is the return type (PHP has no type
   aliases). A request of only optional fields defaults to `new XRequest()`. A stream returns
-  `Generator<int, RawEvent>`, or with `x-events` a generator decoding each named event into
-  `Event<Bark>|Event<Missed>` (others skipped).
+  `Stream<RawEvent>`, or with `x-events` `$client->open($request, $decode)`, a `Stream`
+  decoding each named event into `Event<Bark>|Event<Missed>` (others skipped).
 - cligen's tests run `php -l` and `phpstan analyse --level=max src` on a scratch copy, and
   `php-cs-fixer fix --dry-run --rules=@PER-CS2.0` on the golden and real output, each when
   installed (PHP is not here: in Docker, `php:8.3-cli`).
@@ -667,8 +671,10 @@ One universal package: browser and Node ≥ 20, ESM, web standards only (`fetch`
   `Authorization`, keeps the session and calls `onSession`; its errors keep their `reason`
   (`totp_required`: ask the code; `wrong_credentials`).
 - `stream()` (and `open()`, the generated `Streamer`): fetch and a `ReadableStream` SSE parser,
-  `RawEvent`s, or `{ event, data, id }` decoded once the descriptor carries `x-events`; ends
-  with the stream, the consumer's `break` or the signal. No `?token=`.
+  `RawEvent`s, or `{ event, data, id }` decoded once the descriptor carries `x-events`, as an
+  `EventStream` handle ([Streams](#streams-the-15-s-window-and-the-handle)): `for await` it;
+  `stop()`, the consumer's `break` or the signal end it; `cursor`; `{ backoff: { initial,
+  max } }` on the client. No `?token=`.
 - Tests (`npm test`, `node --test` with a resolve hook, no dependencies): every
   `_golden/scope.json` case; `_golden/session.json` (from `Session::to_jwt` in the server,
   `BLESS=1` rewrites it) signed byte for byte and a user token parsed; the client against a
@@ -695,7 +701,10 @@ and the generated files.
 - `send()` fills the path (each parameter URL-escaped), the query and the JSON body, adds
   `Bearer <jwt>`, and decodes the 2xx JSON; `check_scopes` raises `MissingScope` before sending.
 - `stream()` yields `Event(event, data, id)`, the data decoded from JSON; `open()` (the
-  generated ops' `Streamer`) yields `RawEvent`s. A stream's reads have no timeout.
+  generated ops' `Streamer`) yields `RawEvent`s. Both return the reconnecting handle
+  `Stream[T]` ([Streams](#streams-the-15-s-window-and-the-handle)): `async for` it; `await
+  handle.stop()` or `async with handle:` ends it; `cursor`; `Client(…, backoff=0.5,
+  max_backoff=8.0)`; `map(decode)` for typed ops. A stream's reads have no timeout.
 - `login` sends no `Authorization`; its `ApiError.reason` is `totp_required` (ask the code,
   call again with `totp`) or `wrong_credentials`. `logout()` forgets the session; `all=True`
   first calls `DELETE /v1/session?all=true`.
@@ -719,7 +728,7 @@ generated files through `"files"`. Hand-written, one class per file: `Scope`, `S
 | `Scope`, `Scopes` | `Scope::parse`, `->covers`, `(string)`; `Scopes::parse(text \| packed)`, `->covers(scope \| text)`, `->firstUncovered`, `->compress`, `->pack`; `Scope::escapeId(id)`, `Scope::fill(template, params, ?escape)`. A port of `packages/scope`: its grammar (`%+5` too), `%XX` escapes, Rust's `Ord` (bytes, `strcmp`) and `split_whitespace` |
 | `Session` | `Session::parse($jwt)` (decoded, not verified), a readonly class: `token`, `issuer`, `subject`, `scopes`, `issuedAt`, `expiresAt` (Unix s), `amr` (`list<Amr>`); `->expired(?int $now)`, `->can(Operation, array $params)` |
 | `Secret` | `Secret::parse($id, $value)` checks `his/…`'s base-58 CRC32 (`hash('crc32b')`); `->issue(?Scopes $scopes = null, ?string $subject = null, int $ttl = 600, ?int $issuedAt = null)`: HS256 with `hash_hmac`, the `his/…` text the key, header and claims in the server's byte order (`json_encode` unescaped slashes and Unicode, as serde writes them); `print_r`/`var_dump` show the id only |
-| `Client` | `new Client(string $baseUrl, ?Session $session = null, ?Secret $secret = null, ?Scopes $scopes = null, int $ttl = 600, float $timeout = 30.0, bool $checkScopes = true)`; `send(Request): mixed`, `open(Request): Generator<RawEvent>`, `stream(Request): Generator<Event<mixed>>`, `login($email, $password \| $passphrase, $totp): IssuedSession`, `logout(bool $all = false)`, `session()`, `setSession()` |
+| `Client` | `new Client(string $baseUrl, ?Session $session = null, ?Secret $secret = null, ?Scopes $scopes = null, int $ttl = 600, float $timeout = 30.0, bool $checkScopes = true, float $backoff = 0.5, float $backoffMax = 8.0)`; `send(Request): mixed`, `open(Request, ?Closure $decode): Stream<RawEvent>`, `stream(Request): Stream<Event<mixed>>`, `login($email, $password \| $passphrase, $totp): IssuedSession`, `logout(bool $all = false)`, `session()`, `setSession()` |
 | Errors | `ApiError` (`status`, `kind` (`?Kind`), `getMessage()`, `reason`, `metadata`, `text`, `body`); `MissingScope` (`operation`, `scope`), unsent; a transport failure is a `RuntimeException` (`curl: …`) |
 
 - **A session is always a JWT; a secret is never sent.** With `$secret`, the client signs its
@@ -730,7 +739,11 @@ generated files through `"files"`. Hand-written, one class per file: `Scope`, `S
 - `send()` fills the path (each parameter `rawurlencode`d), the query and the JSON body, adds
   `Bearer <jwt>`, bounds the call by `$timeout`, and decodes the 2xx JSON (objects as arrays;
   null when empty). `$checkScopes` throws `MissingScope` before sending.
-- `open()` and `stream()` are generators: the request goes out on the first iteration. The
+- `open()` and `stream()` return the reconnecting handle `Stream`
+  ([Streams](#streams-the-15-s-window-and-the-handle)): `foreach` it; PHP blocks, so
+  `$handle->stop()` (called from the loop body) is checked after each event and before each
+  reconnect; `cursor()`; `new Client(…, backoff: 0.5, backoffMax: 8.0)`. Like a
+  generator, the request goes out on the first iteration. The
   default `CurlTransport` drives a `curl_multi` handle, its write callback buffering chunks the
   generator hands out as they arrive (a stream's reads have no timeout; `$timeout` bounds
   connecting). SSE: `event`, multi-line `data`, `id`, comments skipped, `\n` or `\r\n` lines.
@@ -769,6 +782,41 @@ The server adds one vendor extension on that media type:
   stream handler, so the names sit with the code that sends them.
 - OpenAPI 3.2's `itemSchema` covers the same; cligen reads it too once utoipa emits 3.2.
 - No `x-events`: cligen still emits the op, yielding `RawEvent`s.
+
+## Streams: the 15 s window and the handle
+
+- **Server.** Every `text/event-stream` answer goes through one generic helper,
+  `http_server::sse::windowed(events, window)`: it lasts the window (`http_server::sse::
+  SSE_WINDOW`, 15 s; the server's `AppState.stream_window`, shorter in tests), kept alive by
+  comments, then sends `event: close` (data `{}`, `retry: 0`) and ends. A stream that ends
+  before (a tip search found) sends no `close`: it is done. Each reconnect is a new request, its
+  token checked again (401 when it no longer holds).
+- **Resuming.** Each event carries an `id:`; the reader reconnects with the last as
+  the query parameter `cursor` (each stream route has it; no `Last-Event-ID` header).
+  - `logs_stream`: the id is the entry's own (given as it is kept, Unix µs or one more than
+    the last, the stored row's too). The feed holds its newest 1 000; a resume sends those
+    after the id, and the stored ones before them when the feed no longer holds every one
+    (a restart), then the live ones: none missed, none twice.
+  - `network_tip_search`: the id is the step's number. The search runs on its own task, held
+    by network and time (`usecase::networks::Searches`) while it runs and a minute after: the
+    same search asked again with `cursor=n` reads on from step n + 1, no node read
+    repeated. A search is about `log2(tip)` node reads (20–30), mostly well inside 15 s, but a
+    slow node can take longer; resuming from the last probe instead would need `Dated::search`
+    to take a start range (a `sdk/base` change, not made).
+- **Clients: a handle, not a one-shot stream.** Every language's stream helper and generated
+  stream op return a handle that:
+  - reconnects at once on `close` (not handed to the caller), the last id as `cursor` (the
+    caller's own `cursor` kept on the first connect);
+  - after a failed connect (a network error, a cut body, a 5xx or 429) waits a backoff
+    (500 ms doubling to 8 s, reset after a 2xx) and tries again;
+  - ends on an answer without `close`, or with the language's error on another status;
+  - ends for good on stop: TS `stream.stop()` (or `break`, the signal), Go `Stop()` or ctx
+    cancel, Rust `stop()` or drop, Python `await handle.stop()` / `async with`, PHP
+    `$handle->stop()` (checked between events and windows);
+  - exposes the last event id (`cursor`). Without a stop it reconnects every window, forever.
+- **Dashboard.** The logs drawer and page (`api/logs.ts`) and the tip search dialog
+  (`wallets/_components/search.tsx`) read the TS handle; closing the drawer, the dialog or
+  leaving the page calls `stop()`.
 
 ## Regenerating: `apps/server/build.rs`
 
@@ -823,7 +871,7 @@ apps/server/clients/
 
 | Option | Verdict |
 |---|---|
-| **Move to `@hashinbox/client` (path dependency `file:../clients/typescript`)** | **Chosen, phase 2.** One TS client in the repo; `session.can(networksListOperation)` replaces scope checks by hand; typed SSE replaces `events()`'s `unknown`. |
+| **Move to `@hashinbox/client` (path dependency `file:../clients/typescript`)** | **Done.** One TS client in the repo; `session.can(networksListOperation)` replaces scope checks by hand; typed SSE replaces `events()`'s `unknown`. |
 | Stay on `openapi-typescript` + `openapi-fetch` | Two TS clients drift; no scopes. |
 
 - `src/api/client.ts` becomes one `HashinboxClient` (`examples/dashboard.ts`): `onSession`
@@ -831,10 +879,11 @@ apps/server/clients/
   (replaces `whenUnauthorized` and its `ASKS` list: the reason decides now);
   `call(client.GET('/v1/networks'))` becomes `networksList(api)`; the login page's
   `error.code === 'totp_required'` becomes `api.login(…)` and `error.reason`; `events()`
-  becomes `logsStream(api, query, signal)` / `networkTipSearch(…)`.
+  becomes `logsStream(api, query)` / `networkTipSearch(…)`, each an `EventStream` stopped
+  with `stop()` when its view closes.
 - Kept hand-written: `exchange()` (the docs console sends arbitrary requests) and `openapi()`.
-- `npm run api` and `schema.d.ts` go; the `Schemas['Wallet']` aliases become imports from the
-  package. Page by page, both clients coexist until the last page moves.
+- `npm run api`, `schema.d.ts`, `openapi-fetch` and `openapi-typescript` are gone; types are
+  imports from the package. `checkScopes: false`: the server's 403 stays what the UI shows.
 
 ## Plan
 

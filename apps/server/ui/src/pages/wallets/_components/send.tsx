@@ -12,7 +12,15 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode, type SubmitEvent } from 'react';
-import { call, client, type Schemas, type Wallet } from '@/api/client';
+import {
+  jobGet,
+  walletGet,
+  walletIndexLegsList,
+  walletPaymentSend,
+  type FeeLevel as Fee,
+  type Wallet,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Transaction } from '@/_components/transaction';
 import type { Shell } from '@/layout';
 import { assetName, networkOf } from '@/money';
@@ -21,7 +29,6 @@ import { assetName, networkOf } from '@/money';
 const POLL_MS = 3000;
 
 /** How fast a send should land, as the API names it. */
-type Fee = Schemas['FeeLevel'];
 const FEES: Fee[] = ['low', 'normal', 'high'];
 
 /**
@@ -64,9 +71,8 @@ export function Send({
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     setBusy(true);
-    const params = { path: { id: wallet.id } };
     const body = { asset, destination: destination.trim(), amount: amount.trim(), fee };
-    call(client.POST('/v1/wallets/{id}/transactions', { params, body }))
+    walletPaymentSend(api, { id: wallet.id, body })
       .then((queued) => setStage({ at: 'queued', job: queued.job }))
       .catch(shell.fail)
       .finally(() => setBusy(false));
@@ -77,24 +83,19 @@ export function Send({
     if (stage.at === 'form' || stage.at === 'final' || stage.at === 'failed') return;
     const look = async (): Promise<Stage | null> => {
       if (stage.at === 'queued') {
-        const job = await call(
-          client.GET('/v1/jobs/{id}', { params: { path: { id: stage.job } } }),
-        );
+        const job = await jobGet(api, { id: stage.job });
         if (job.state === 'failed') return { at: 'failed', reason: job.reason ?? 'failed' };
         if (!job.accepted || job.txid == null) return null;
         return { at: 'accepted', txid: job.txid };
       }
       if (stage.at === 'accepted') {
-        const params = { path: { id: wallet.id, asset } };
-        const page = await call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params }));
+        const page = await walletIndexLegsList(api, { id: wallet.id, asset });
         const leg = page.legs.find((l) => l.txid === stage.txid);
         if (!leg?.txid || leg.position == null) return null;
         onSent();
         return { at: 'mined', txid: leg.txid, block: leg.position };
       }
-      const fresh = await call(
-        client.GET('/v1/wallets/{id}', { params: { path: { id: wallet.id } } }),
-      );
+      const fresh = await walletGet(api, { id: wallet.id });
       const final = fresh.indexes[asset]?.finality_at;
       if (final == null || final < stage.block) return null;
       onSent();

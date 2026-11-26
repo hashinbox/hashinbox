@@ -4,7 +4,15 @@ import Box from '@mui/material/Box';
 import IconButton from '@mui/material/IconButton';
 import Tooltip from '@mui/material/Tooltip';
 import { useCallback, useEffect, useState } from 'react';
-import { call, client, type Listing, type Trigger, type Wallet } from '@/api/client';
+import {
+  tagsList,
+  triggerDelete,
+  triggersList,
+  type Listing,
+  type Trigger,
+  type Wallet,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { assetName } from '@/money';
 import { Empty } from '@/_components/empty';
 import type { Shell } from '@/layout';
@@ -30,10 +38,10 @@ function definitionOf(trigger: Trigger): Definition {
     id: trigger.id,
     chain: trigger.chain,
     network: trigger.network,
-    selector: trigger.selector as unknown as Definition['selector'],
+    selector: trigger.selector as Definition['selector'],
     filter: (trigger.filter ?? null) as unknown as Definition['filter'],
-    check: trigger.check as unknown as Definition['check'],
-    action: trigger.action as unknown as Definition['action'],
+    check: trigger.check as Definition['check'],
+    action: trigger.action as Definition['action'],
     enabled: trigger.enabled,
   };
 }
@@ -60,7 +68,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
 
   const remove = (trigger: Trigger) => {
     setDeleting(null);
-    call(client.DELETE('/v1/triggers/{id}', { params: { path: { id: trigger.id } } }))
+    triggerDelete(api, { id: trigger.id })
       .then(() => {
         shell.notify('Trigger deleted.');
         refresh();
@@ -70,14 +78,14 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
   };
 
   const refresh = useCallback(() => {
-    call(client.GET('/v1/triggers'))
+    triggersList(api)
       .then((list) => setTriggers(list.triggers))
       .catch(shell.fail);
   }, [shell.fail]);
 
   useEffect(refresh, [refresh]);
   useEffect(() => {
-    call(client.GET('/v1/wallets/tags'))
+    tagsList(api)
       .then((list) => setTags(list.tags))
       .catch(shell.fail);
   }, [shell.fail]);

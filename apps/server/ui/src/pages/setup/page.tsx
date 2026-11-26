@@ -3,7 +3,8 @@ import Button from '@mui/material/Button';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useState, type ReactNode, type SubmitEvent } from 'react';
-import { call, client } from '@/api/client';
+import { settingUpdate, usersCreate } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Welcome } from '@/_components/welcome';
 
 const MIN = 8;
@@ -111,7 +112,7 @@ function Account({
     setBusy(true);
     setProblem(null);
     const body = { email: email.trim(), name: name.trim(), password };
-    call(client.POST('/v1/users', { body }))
+    usersCreate(api, { body })
       .then((created) => {
         if (created.token) onSession(created.token);
         else setProblem('The user was created, but no session came back. Log in.');
@@ -188,8 +189,7 @@ function Organization({
     const name = value.trim();
     setBusy(true);
     setProblem(null);
-    const params = { path: { key: 'instance' } };
-    call(client.PUT('/v1/settings/{key}', { params, body: { value: name } }))
+    settingUpdate(api, { key: 'instance', body: { value: name } })
       .then(() => onInstance(name))
       .catch((error: unknown) => setProblem(problemOf(error)))
       .finally(() => setBusy(false));

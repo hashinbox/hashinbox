@@ -100,6 +100,8 @@ async fn main() -> Result<(), AnyError> {
         candles: candles.clone(),
         chains,
         root_exists: root_exists.into(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
 
     let (container, db, queue, actions) =

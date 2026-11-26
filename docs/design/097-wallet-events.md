@@ -1,6 +1,7 @@
 # 097: Wallet events: what changed a balance, as a feed and a stream
 
-Status: proposed (doc only). Open questions are at the end.
+Status: proposed (doc only). 103 adds group columns, the sync rules and the 15 s stream window.
+Open questions are at the end.
 
 ## Problem
 
@@ -26,12 +27,14 @@ Status: proposed (doc only). Open questions are at the end.
 
 ```sql
 -- One change to a wallet index's balances (design 097), written in the
--- write that made it. `id` is the cursor: the server has one writer
--- (`BEGIN IMMEDIATE`), so ids grow in commit order and a reader after id N
--- never misses a later commit. AUTOINCREMENT: never reused after a prune.
+-- write that made it. The cursor is `(at, id)` (design 103): the server has
+-- one writer (`BEGIN IMMEDIATE`) and both are taken inside the write, `at`
+-- never below the newest, so `(at, id)` grows in commit order and a reader
+-- past cursor C never misses a later commit. AUTOINCREMENT: never reused
+-- after a prune.
 CREATE TABLE wallet_event (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    at              INTEGER NOT NULL, -- Unix ms, written.
+    at              INTEGER NOT NULL, -- Unix ms: max(now, newest at), in the write.
     wallet_id       TEXT    NOT NULL,
     wallet_index_id TEXT    NOT NULL REFERENCES wallet_index (id) ON DELETE CASCADE,
     kind            TEXT    NOT NULL,
@@ -43,16 +46,19 @@ CREATE TABLE wallet_event (
     CHECK (kind IN ('pending', 'mined', 'confirmed', 'reorged', 'dropped', 'adjusted'))
 );
 -- A wallet's events, in order: the per-wallet list and stream.
-CREATE INDEX wallet_event_wallet ON wallet_event (wallet_id, id);
--- `since=<time>`, and the prune.
-CREATE INDEX wallet_event_at ON wallet_event (at);
+CREATE INDEX wallet_event_wallet ON wallet_event (wallet_id, at, id);
+-- Every wallet's events in order, `since=<time>`, the newest `at`, the prune.
+CREATE INDEX wallet_event_at ON wallet_event (at, id);
 -- Confirmed once: `confirmed` may step back on a failover and forward again.
 CREATE UNIQUE INDEX wallet_event_confirmed ON wallet_event (wallet_index_id, subject)
     WHERE kind = 'confirmed';
 ```
 
-- **Cursor = `id`**, not time: times collide within a write and clocks move. `since=<Unix ms>` is
-  still accepted and maps to the first id with `at >= since`.
+- **Cursor = the last record's timestamp with a tie-breaker:** `"{at}-{id}"`, e.g.
+  `"1795600000123-1042"`, opaque to clients, ordered by `at` then `id` (103 has the proof).
+  `at` alone is not enough: one write's events share it. `at` is
+  `max(now, newest at)`, read in the write, so a clock stepping back never lowers it.
+- `since=<Unix ms>` maps to `(at, id) >= (since, 0)`.
 - `kind` is text: third parties read it as is, and it is the SSE `event:` name.
 - Cascade with the wallet index (and so the wallet): a removed index has no feed.
 
@@ -76,6 +82,7 @@ Every event, in the list and the stream:
 {
   "id": 1042,
   "at": 1795600000123,
+  "cursor": "1795600000123-1042",
   "kind": "mined",
   "wallet_id": "ethereum.mainnet.0xabc",
   "wallet_index_id": "ethereum.mainnet.0xabc.eth",
@@ -253,7 +260,8 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 | `GET /v1/events/stream` | SSE of the same | as above |
 
 - Lists follow the convention: `IndexParams { cursor, limit }`, reply `{ events, next_cursor }`;
-  model fns `wallet_event::db::find_page`, `find_by_wallet_page`. The cursor is an event id.
+  model fns `wallet_event::db::find_page`, `find_by_wallet_page`. The cursor is the last listed
+  event's `cursor`; `next_cursor` null when none was listed.
 - `since=<Unix ms>`: start at that moment; ignored when `cursor` is given.
 - Oldest first (a feed), unlike logs.
 - `/v1/events` needs the unnarrowed scope (096: lists are not narrowed); a token of
@@ -265,38 +273,43 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 
 ### The stream
 
-- Each SSE message: `id: <event id>`, `event: <kind>`, `data: <the envelope>`.
+- Each SSE message: `id: <cursor>`, `event: <kind>`, `data: <the envelope>`.
 - Start: `Last-Event-ID` header, else `?cursor=`, else `?since=`, else now.
-- On connect it replays from the DB after the start id, then goes live.
+- On connect it replays from the DB after the start cursor, then goes live.
 - Live, through one in-process hub:
   - `Db::write` bumps a `watch` after every commit (one line in `db.rs`);
-  - one hub task reads `id > last` once per bump, for all wallets, and publishes on a
+  - one hub task reads after its last cursor once per bump, for all wallets, and publishes on a
     `broadcast`;
   - each stream filters by wallet and grant in memory.
   - So it is one query per commit, not one per listener.
-- A lagging stream does not miss: on `Lagged` it reads the DB again after its last id, then goes
-  back to the hub. There is no `missed` event, unlike logs.
-- The stream ends at the token's `exp`. `EventSource` cannot set headers and retries with the same
-  URL, so the pay SDK reconnects itself with a fresh token and `Last-Event-ID`. This needs `?token=`
-  on GET (096 open question 4), or a fetch-based SSE reader.
+- A lagging stream does not miss: on `Lagged` it reads the DB again after its last cursor, then
+  goes back to the hub. There is no `missed` event, unlike logs.
+- **A 15 s window (103):** the stream ends after about 15 s (or at the token's `exp`, if sooner)
+  with `event: reconnect`, `data: {"cursor": …}` (the last sent, or the start when none was);
+  the client re-opens from it (`Last-Event-ID` or `?cursor=`), so scopes and token are checked
+  again every window. `retry: 500` lets `EventSource` re-open by itself; it keeps its URL, so
+  the pay SDK uses a fetch-based reader (101) to send a fresh token.
 
 ## Delivery
 
-- **At-least-once:** a client that reconnects with its last processed id may see an event again;
-  it skips ids at or below its last.
+- **No event missed:** a client that resumes from the last cursor it processed sees every later
+  event (unless 410).
+- **At-least-once:** after a reconnect or a crash before it saved its cursor, it may see an
+  event again; it dedupes by `id`.
 - **Idempotency:** `id` is unique, never reused.
-- **Order:** one total order by `id`, which is commit order, so a wallet's events are in causal
-  order. Within one write: block position, transaction order, then index.
-- **Resume:** keep the last id; list or stream from it. A cursor older than the oldest kept
-  event gets `410 cursor-expired`. The client then reads balances (`GET /v1/wallets/{id}`) and
-  streams from now.
+- **Order:** one total order by `(at, id)`, which is commit order (and `id` order), so a
+  wallet's events are in causal order. Within one write: block position, transaction order,
+  then index.
+- **Resume:** keep the last cursor; list or stream from it. A cursor whose `at` is below
+  `wallet_events_pruned_before` gets `410 cursor-expired`. The client then reads balances
+  (`GET /v1/wallets/{id}`) and streams from now.
 - **Check:** for an index, Σ `amount` of `mined`, `reorged`, `adjusted` events equals the newest
   total. The last snapshot equals the API's balance.
 
 ## Retention
 
 - The existing prune job deletes events older than `wallet_events_retention_days` (default 90),
-  by `wallet_event_at`.
+  by `wallet_event_at`, and writes its cutoff to `wallet_events_pruned_before` (the 410 line).
 - Never by count: a feed with holes per wallet would lie; a hole is only ever "before the oldest".
 - An index or wallet delete removes its events by cascade.
 
@@ -305,6 +318,7 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 - Per kept block: one row per (transaction, index) with a leg in it, plus one
   `wallet_index_with_balance` read per touched index (about four index seeks). Blocks with no
   wallet legs: zero.
+- Per write with events: one seek for the newest `at` (the end of `wallet_event_at`).
 - Per finality step: one range read over the newly final kept blocks, plus one row per
   (transaction, index) in them. So each mined transaction costs about two events over its life
   (`mined`, `confirmed`).
@@ -325,6 +339,7 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 
 - `init.sql`: the table and its three indexes, after `wallet_index`.
 - `docs/design/097-migrate-1.sql`: the same `CREATE`s for an existing file.
+- Setting `wallet_events_pruned_before` (Unix ms, private), written by the prune job.
 - There is no backfill: events start at migration. A client reads balances once, then follows the
   feed.
 
@@ -349,7 +364,10 @@ In `apps/server/tests/` style, one test support module (086):
 - A write that fails `insufficient-funds`: no event.
 - The sum check: Σ amounts equals the newest total after a mixed run.
 - API: the cursor pages oldest first; `since` works; a pruned cursor gets 410.
-- SSE: `Last-Event-ID` replays the missed events; a lagging listener misses none.
+- Cursor: a block of more events than `limit`, all one `at`, pages with no skip or repeat; a
+  clock stepped back keeps `at` monotone.
+- SSE: `Last-Event-ID` replays the missed events; a lagging listener misses none; the stream
+  ends at 15 s with `reconnect` and its cursor; a revoked token fails the next re-open.
 - Scope: a `wallets[w1].events.$read` token gets 403 on w2, and `/v1/events` lists only w1.
 
 ## Open questions
@@ -370,5 +388,3 @@ In `apps/server/tests/` style, one test support module (086):
 7. **Confirmer-settled sends** (an index behind the line, `transaction::db::set_mined`, no block
    kept) write no mined legs, and their change reaches the balance through a later `adjusted`.
    Is a `confirmed` without legs needed for them?
-8. **Global stream:** is `/v1/events/stream` wanted in v1, or only the list for server
-   consumers?

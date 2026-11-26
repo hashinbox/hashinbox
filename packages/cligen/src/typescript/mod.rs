@@ -45,10 +45,10 @@ impl Typescript {
         let mut models = BTreeSet::new();
         for op in &spec.operations {
             match &op.events {
-                Some(events) if events.is_empty() => client.extend(["RawEvent", "Streamer"]),
-                Some(_) => {
-                    client.insert("Streamer");
+                Some(events) if events.is_empty() => {
+                    client.extend(["EventStream", "RawEvent", "Streamer"]);
                 }
+                Some(_) => client.extend(["EventStream", "Streamer"]),
                 None => {
                     client.insert("Client");
                 }
@@ -244,7 +244,7 @@ impl Typescript {
                 (
                     "streamer",
                     "Streamer",
-                    format!("AsyncIterable<{event}>"),
+                    format!("EventStream<{event}>"),
                     format!("streamer.open<{event}>"),
                 )
             }

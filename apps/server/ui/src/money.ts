@@ -1,6 +1,6 @@
 // Exact amounts. The API sends decimal strings in display units; nothing here
 // ever goes through a float.
-import type { Listing, Network, Wallet } from '@/api/client';
+import type { Listing, Network, Wallet } from '@hashinbox/client';
 import { shorten } from '@/_components/trim';
 
 /** Display text to atomic units, given the asset's decimals. */

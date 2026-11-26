@@ -106,8 +106,8 @@ export class Scopes implements Iterable<Scope> {
       list.some(
         (held, other) =>
           other !== at &&
-          held.covers(list[at]) &&
-          (!list[at].covers(held) || other < at),
+          held.covers(list[at]!) &&
+          (!list[at]!.covers(held) || other < at),
       );
     const kept = list.filter((_, at) => !dropped(at));
     return new Scopes([...kept].sort(compareScope));
@@ -130,11 +130,13 @@ export class Scopes implements Iterable<Scope> {
 export function packEntries(scopes: Scopes): [string, string[]][] {
   const groups: Scope[][] = [];
   for (const scope of scopes.compress()) {
-    const group = groups.find((g) => sameSegment(g[0].path[0], scope.path[0]));
+    const group = groups.find((g) =>
+      sameSegment(g[0]!.path[0]!, scope.path[0]!),
+    );
     if (group) group.push(scope);
     else groups.push([scope]);
   }
-  groups.sort((a, b) => compareSegment(a[0].path[0], b[0].path[0]));
+  groups.sort((a, b) => compareSegment(a[0]!.path[0]!, b[0]!.path[0]!));
   const packed = new Map<string, string[]>();
   for (const group of groups) {
     const shared = sharedPrefix(group);
@@ -215,7 +217,7 @@ function unescape(text: string): string {
   const out: number[] = [];
   for (let at = 0; at < bytes.length; at++) {
     if (bytes[at] !== 0x25) {
-      out.push(bytes[at]);
+      out.push(bytes[at]!);
       continue;
     }
     const hex = String.fromCharCode(...bytes.slice(at + 1, at + 3));
@@ -257,7 +259,7 @@ function pathCovers(
   if (at === ours.length - 1 && ours[at] === "*") return true;
   if (at === ours.length || their === theirs.length) return false;
   return (
-    segmentCovers(ours[at], theirs[their]) &&
+    segmentCovers(ours[at]!, theirs[their]!) &&
     pathCovers(ours, theirs, at + 1, their + 1)
   );
 }
@@ -269,12 +271,12 @@ function sameSegment(a: Segment, b: Segment): boolean {
 /** How many leading steps every scope of `group` shares as the same plain name, each keeping one. */
 function sharedPrefix(group: Scope[]): number {
   const shortest = Math.min(...group.map((scope) => scope.path.length));
-  const first = group[0].path;
+  const first = group[0]!.path;
   let shared = 0;
   while (shared < shortest - 1) {
-    const step = first[shared];
+    const step = first[shared]!;
     if (step === "*" || step.id !== undefined) break;
-    if (!group.every((scope) => sameSegment(scope.path[shared], step))) break;
+    if (!group.every((scope) => sameSegment(scope.path[shared]!, step))) break;
     shared++;
   }
   return shared;
@@ -285,7 +287,7 @@ function compareText(a: string, b: string): number {
   const x = [...a];
   const y = [...b];
   for (let at = 0; at < Math.min(x.length, y.length); at++) {
-    const diff = x[at].codePointAt(0)! - y[at].codePointAt(0)!;
+    const diff = x[at]!.codePointAt(0)! - y[at]!.codePointAt(0)!;
     if (diff !== 0) return diff;
   }
   return x.length - y.length;
@@ -304,7 +306,7 @@ function compareSegment(a: Segment, b: Segment): number {
 /** Rust's derived `Ord` of `Scope`: its path, then its action (a name before `*`). */
 function compareScope(a: Scope, b: Scope): number {
   for (let at = 0; at < Math.min(a.path.length, b.path.length); at++) {
-    const diff = compareSegment(a.path[at], b.path[at]);
+    const diff = compareSegment(a.path[at]!, b.path[at]!);
     if (diff !== 0) return diff;
   }
   if (a.path.length !== b.path.length) return a.path.length - b.path.length;
@@ -317,7 +319,7 @@ function compareScope(a: Scope, b: Scope): number {
 function unpack(packed: Packed): Scopes {
   const prefixes = Object.keys(packed).sort(compareText);
   const list = prefixes.flatMap((prefix) =>
-    packed[prefix].map((scope) =>
+    packed[prefix]!.map((scope) =>
       Scope.parse(prefix === "" ? scope : `${prefix}.${scope}`),
     ),
   );

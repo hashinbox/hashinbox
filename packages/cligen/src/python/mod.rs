@@ -306,15 +306,12 @@ impl Python {
                 func
             }
             Some(events) if events.is_empty() => {
-                json.uses.extend([
-                    client("RawEvent"),
-                    client("Streamer"),
-                    use_("collections.abc", "AsyncIterator"),
-                ]);
+                json.uses
+                    .extend([client("RawEvent"), client("Stream"), client("Streamer")]);
                 let mut func = Def::new(
                     &call,
                     &["streamer: Streamer", &input],
-                    "AsyncIterator[RawEvent]",
+                    "Stream[RawEvent]",
                     &doc,
                 );
                 func.line("return streamer.open(request)");
@@ -323,28 +320,29 @@ impl Python {
             Some(events) => {
                 json.uses.extend([
                     client("Event"),
+                    client("RawEvent"),
+                    client("Stream"),
                     client("Streamer"),
                     client("data"),
-                    use_("collections.abc", "AsyncIterator"),
                     use_("typing", "TypeAlias"),
                 ]);
                 let event = format!("{named}Event");
                 let mut cases = Vec::new();
                 let mut types = Vec::new();
-                for (index, (wire, ty)) in events.iter().enumerate() {
+                for (wire, ty) in events {
                     json.names(ty);
                     types.push(format!("Event[{}]", PyType(ty)));
                     let data = json.decode(ty, "data(raw)");
-                    let yielded = Value::call(
-                        "yield Event",
+                    let returned = Value::call(
+                        "return Event",
                         vec![Value::text("raw.event"), data, Value::text("raw.id")],
                     );
-                    let keyword = if index == 0 { "if" } else { "elif" };
                     cases.push(Body::Block(
-                        format!("{keyword} raw.event == {}", quote(wire)),
-                        vec![Body::Value(yielded)],
+                        format!("if raw.event == {}", quote(wire)),
+                        vec![Body::Value(returned)],
                     ));
                 }
+                cases.push(Body::Line("return None".to_owned()));
                 out.push(Item::TypeAlias(TypeAlias {
                     doc: format!("An event of `{call}`."),
                     name: event.clone(),
@@ -353,14 +351,16 @@ impl Python {
                 let mut func = Def::new(
                     &call,
                     &["streamer: Streamer", &input],
-                    &format!("AsyncIterator[{event}]"),
+                    &format!("Stream[{event}]"),
                     &doc,
-                )
-                .asynchronous();
-                func.push(Body::Block(
-                    "async for raw in streamer.open(request)".to_owned(),
-                    cases,
-                ));
+                );
+                func.line("")
+                    .push(Body::Block(
+                        format!("def decode(raw: RawEvent) -> {event} | None"),
+                        cases,
+                    ))
+                    .line("")
+                    .line("return streamer.open(request).map(decode)");
                 func
             }
         };

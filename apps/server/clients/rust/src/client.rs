@@ -12,6 +12,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::task::{Context, Poll, ready};
+use std::time::Duration;
 
 use futures_core::Stream;
 use serde::Serialize;
@@ -198,6 +199,9 @@ pub trait Streamer: Sync {
         http: Http,
     ) -> impl Future<Output = Result<Result<RawEvents<Self::Error>, Response>, Self::Error>> + Send;
 
+    /// Waits `duration`: a stream's backoff before it reconnects.
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send;
+
     /// As [`Client::missing`].
     fn missing(&self, scopes: &[String]) -> Option<String> {
         let _ = scopes;
@@ -328,22 +332,33 @@ where
     serde_json::from_str(text).map_err(Error::Decode)
 }
 
-/// Opens `request` with `streamer`: the events this client knows, decoded.
-pub async fn open<S: Streamer, R: Request>(
-    streamer: &S,
+/// Opens `request` with `streamer`: a handle of the events this client
+/// knows, decoded, across the server's stream windows ([`Events`]).
+///
+/// # Errors
+///
+/// A missing scope, or the first answer's error or the transport's.
+pub async fn open<'a, S: Streamer, R: Request>(
+    streamer: &'a S,
     request: &R,
-) -> Result<Events<R::Response, S::Error>, Error<S::Error>>
+) -> Result<Events<'a, R::Response, S>, Error<S::Error>>
 where
     R::Response: Event,
 {
     check(request, |scopes| streamer.missing(scopes))?;
+    let http = Http::of(request);
     let raw = streamer
-        .open(Http::of(request))
+        .open(http.clone())
         .await
         .map_err(Error::Transport)?
         .map_err(Error::api)?;
     Ok(Events {
-        raw,
+        streamer,
+        http,
+        cursor: None,
+        state: State::Reading(raw),
+        backoff: BACKOFF,
+        delay: BACKOFF.0,
         event: PhantomData,
     })
 }
@@ -360,29 +375,123 @@ impl Event for RawEvent {
     }
 }
 
-/// The typed events of a transport's raw ones.
-pub struct Events<T, E> {
-    raw: RawEvents<E>,
+/// The first wait before a reconnect after an error, and the longest.
+const BACKOFF: (Duration, Duration) = (Duration::from_millis(500), Duration::from_secs(8));
+
+type Opening<'a, E> =
+    Pin<Box<dyn Future<Output = Result<Result<RawEvents<E>, Response>, E>> + Send + 'a>>;
+
+/// Where an [`Events`] is.
+enum State<'a, E> {
+    /// Reading an answer's events.
+    Reading(RawEvents<E>),
+    /// Waiting out a backoff.
+    Waiting(Pin<Box<dyn Future<Output = ()> + Send + 'a>>),
+    /// Reconnecting.
+    Opening(Opening<'a, E>),
+    /// Ended, or stopped.
+    Done,
+}
+
+/// A stream's handle: its typed events across the server's windows. When
+/// an answer ends with `event: close` (the window is over) it reconnects at
+/// once with the last event id as its `cursor`; after a transport error,
+/// a cut answer or a 5xx/429, after a backoff (500 ms doubling to 8 s,
+/// [`Self::backoff`]). Another refused reconnect (a 401, …) is its last
+/// item; an answer that ends without `close` (a finished search) its end.
+/// [`Self::stop`], or dropping it, ends it for good.
+pub struct Events<'a, T, S: Streamer> {
+    streamer: &'a S,
+    http: Http,
+    cursor: Option<String>,
+    state: State<'a, S::Error>,
+    backoff: (Duration, Duration),
+    delay: Duration,
     event: PhantomData<fn() -> T>,
 }
 
-impl<T: Event, E> Stream for Events<T, E> {
-    type Item = Result<T, Error<E>>;
+impl<T, S: Streamer> Events<'_, T, S> {
+    /// The last event id read: the `cursor` a reconnect resumes from.
+    pub fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+    /// Ends it for good: the answer read now is closed, none is opened.
+    pub fn stop(&mut self) {
+        self.state = State::Done;
+    }
+
+    /// Waits `first`, doubling up to `most`, before reconnecting after an
+    /// error.
+    #[must_use]
+    pub fn backoff(mut self, first: Duration, most: Duration) -> Self {
+        (self.backoff, self.delay) = ((first, most), first);
+        self
+    }
+}
+
+impl<'a, T: Event, S: Streamer> Stream for Events<'a, T, S> {
+    type Item = Result<T, Error<S::Error>>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        let streamer: &'a S = this.streamer;
         loop {
-            let Some(raw) = ready!(self.raw.as_mut().poll_next(cx)) else {
-                return Poll::Ready(None);
-            };
-            match raw
-                .map_err(Error::Transport)
-                .and_then(|raw| T::decode(&raw).map_err(Error::Decode))
-            {
-                Ok(None) => continue,
-                Ok(Some(event)) => return Poll::Ready(Some(Ok(event))),
-                Err(error) => return Poll::Ready(Some(Err(error))),
+            match &mut this.state {
+                State::Done => return Poll::Ready(None),
+                State::Waiting(wait) => {
+                    ready!(wait.as_mut().poll(cx));
+                    let mut http = this.http.clone();
+                    if let Some(cursor) = &this.cursor {
+                        http.query.retain(|(name, _)| *name != "cursor");
+                        http.query.push(("cursor", cursor.clone()));
+                    }
+                    this.state = State::Opening(Box::pin(streamer.open(http)));
+                }
+                State::Opening(opening) => match ready!(opening.as_mut().poll(cx)) {
+                    Ok(Ok(raw)) => {
+                        this.delay = this.backoff.0;
+                        this.state = State::Reading(raw);
+                    }
+                    Ok(Err(response)) if response.status == 429 || response.status >= 500 => {
+                        this.state = this.wait();
+                    }
+                    Ok(Err(response)) => {
+                        this.state = State::Done;
+                        return Poll::Ready(Some(Err(Error::api(response))));
+                    }
+                    Err(_) => this.state = this.wait(),
+                },
+                State::Reading(raw) => match ready!(raw.as_mut().poll_next(cx)) {
+                    None => this.state = State::Done,
+                    Some(Err(_)) => this.state = this.wait(),
+                    Some(Ok(raw)) if raw.event == "close" => {
+                        this.delay = this.backoff.0;
+                        let wait = streamer.sleep(Duration::ZERO);
+                        this.state = State::Waiting(Box::pin(wait));
+                    }
+                    Some(Ok(raw)) => {
+                        if let Some(id) = raw.id.as_ref().filter(|id| !id.is_empty()) {
+                            this.cursor = Some(id.clone());
+                        }
+                        match T::decode(&raw) {
+                            Ok(None) => {}
+                            Ok(Some(event)) => return Poll::Ready(Some(Ok(event))),
+                            Err(error) => return Poll::Ready(Some(Err(Error::Decode(error)))),
+                        }
+                    }
+                },
             }
         }
+    }
+}
+
+impl<'a, T, S: Streamer> Events<'a, T, S> {
+    /// The backoff's next wait, doubling the one after.
+    fn wait(&mut self) -> State<'a, S::Error> {
+        let delay = self.delay;
+        self.delay = (delay * 2).min(self.backoff.1);
+        State::Waiting(Box::pin(self.streamer.sleep(delay)))
     }
 }
 

@@ -20,7 +20,7 @@ function imports(files, ...patterns) {
 }
 
 export default tseslint.config(
-  { ignores: ['dist', 'src/api/schema.d.ts'] },
+  { ignores: ['dist'] },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,
@@ -41,7 +41,7 @@ export default tseslint.config(
       'react-refresh/only-export-components': ['error', { allowExportNames: [] }],
       'no-restricted-globals': [
         'error',
-        { name: 'fetch', message: 'Talk to the server through the generated client in src/api.' },
+        { name: 'fetch', message: 'Call the server through the SDK, @hashinbox/client.' },
       ],
     },
   },
@@ -54,7 +54,8 @@ export default tseslint.config(
   // A page uses its own files (`./`) and shared ones (`@/`), never another page.
   imports('src/pages/**', { group: ['@/pages/**'], message: 'A page never imports another page.' }),
   {
-    // The API client is the only place that performs a request.
+    // src/api alone sends raw requests: the OpenAPI document and the docs
+    // console's arbitrary one (see exchange()); everything else uses the SDK.
     files: ['src/api/**'],
     rules: { 'no-restricted-globals': 'off' },
   },

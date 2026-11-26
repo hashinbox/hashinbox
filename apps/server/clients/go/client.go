@@ -53,12 +53,14 @@ type Client interface {
 	Do(ctx context.Context, request Request, response any) error
 }
 
-// Streamer opens request as a stream of events.
+// Streamer opens one answer (a window) of request's stream of events,
+// with cursor, when not empty, as its `cursor` query (in place of the
+// request's own). Open[T] reconnects it into a Stream.
 type Streamer interface {
-	Open(ctx context.Context, request Request) (Events, error)
+	Open(ctx context.Context, request Request, cursor string) (Events, error)
 }
 
-// Events are a stream's raw events; Next returns io.EOF at the end.
+// Events are one answer's raw events; Next returns io.EOF at its end.
 type Events interface {
 	Next() (RawEvent, error)
 	Close() error
@@ -149,6 +151,9 @@ type HTTPClient struct {
 	userAgent string
 	check     bool
 
+	backoff    time.Duration // a stream's first wait before reconnecting after an error
+	maxBackoff time.Duration // and its longest
+
 	mu      sync.Mutex
 	session *Session
 	secret  *Secret
@@ -172,6 +177,9 @@ func NewClient(baseURL string, opts ...Option) *HTTPClient {
 		userAgent: "hashinbox-go",
 		check:     true,
 		ttl:       defaultTTL,
+
+		backoff:    500 * time.Millisecond,
+		maxBackoff: 8 * time.Second,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -224,6 +232,17 @@ func WithUserAgent(userAgent string) Option {
 	return func(c *HTTPClient) { c.userAgent = userAgent }
 }
 
+// WithStreamBackoff is how long a Stream waits before reconnecting after
+// an error: first, doubling up to most (500 ms and 8 s by default).
+func WithStreamBackoff(first, most time.Duration) Option {
+	return func(c *HTTPClient) { c.backoff, c.maxBackoff = first, most }
+}
+
+// streamBackoff is WithStreamBackoff's.
+func (c *HTTPClient) streamBackoff() (time.Duration, time.Duration) {
+	return c.backoff, c.maxBackoff
+}
+
 // WithoutScopeCheck sends every call, leaving the scope check to the
 // server.
 func WithoutScopeCheck() Option {
@@ -244,17 +263,18 @@ func (c *HTTPClient) Session() (Session, bool) {
 func (c *HTTPClient) Do(ctx context.Context, request Request, response any) error {
 	ctx, cancel := c.bound(ctx)
 	defer cancel()
-	answer, err := c.exchange(ctx, request, "application/json")
+	answer, err := c.exchange(ctx, request, "application/json", "")
 	if err != nil {
 		return err
 	}
 	return decode(answer, response)
 }
 
-// Open opens request as a stream of server-sent events, read until ctx
-// ends or Close.
-func (c *HTTPClient) Open(ctx context.Context, request Request) (Events, error) {
-	answer, err := c.exchange(ctx, request, "text/event-stream")
+// Open opens one answer of request's stream of server-sent events, read
+// until its end, ctx's or Close; with cursor, when not empty, as its
+// `cursor` query.
+func (c *HTTPClient) Open(ctx context.Context, request Request, cursor string) (Events, error) {
+	answer, err := c.exchange(ctx, request, "text/event-stream", cursor)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +318,7 @@ func (c *HTTPClient) Login(ctx context.Context, login LoginRequest) (Session, er
 	}}
 	ctx, cancel := c.bound(ctx)
 	defer cancel()
-	answer, err := c.attempt(ctx, nil, request, "application/json")
+	answer, err := c.attempt(ctx, nil, request, "application/json", "")
 	if err != nil {
 		return Session{}, err
 	}
@@ -332,12 +352,12 @@ func (c *HTTPClient) Logout(ctx context.Context, all bool) error {
 // exchange sends request with its session, signing a new one and retrying
 // once after a 401 session_expired when it signs its own; a 2xx answer, its
 // body to close.
-func (c *HTTPClient) exchange(ctx context.Context, request Request, accept string) (*http.Response, error) {
+func (c *HTTPClient) exchange(ctx context.Context, request Request, accept, cursor string) (*http.Response, error) {
 	session, err := c.bearer(ctx, "")
 	if err != nil {
 		return nil, err
 	}
-	answer, err := c.attempt(ctx, session, request, accept)
+	answer, err := c.attempt(ctx, session, request, accept, cursor)
 	if session == nil || !c.signs() || !errors.Is(err, ErrSessionExpired) {
 		return answer, err
 	}
@@ -345,7 +365,7 @@ func (c *HTTPClient) exchange(ctx context.Context, request Request, accept strin
 	if err != nil {
 		return nil, err
 	}
-	return c.attempt(ctx, session, request, accept)
+	return c.attempt(ctx, session, request, accept, cursor)
 }
 
 // signs reports whether it signs its own sessions.
@@ -391,7 +411,7 @@ func (c *HTTPClient) keyScopes(ctx context.Context) (Scopes, error) {
 	if err != nil {
 		return nil, err
 	}
-	answer, err := c.attempt(ctx, &probe, SessionGetRequest{}, "application/json")
+	answer, err := c.attempt(ctx, &probe, SessionGetRequest{}, "application/json", "")
 	if err != nil {
 		return nil, err
 	}
@@ -406,8 +426,9 @@ func (c *HTTPClient) keyScopes(ctx context.Context) (Scopes, error) {
 }
 
 // attempt sends request once with session (nil: no bearer, no scope
-// check); a 2xx answer, or the error.
-func (c *HTTPClient) attempt(ctx context.Context, session *Session, request Request, accept string) (*http.Response, error) {
+// check), with cursor, when not empty, as its `cursor` query; a 2xx
+// answer, or the error.
+func (c *HTTPClient) attempt(ctx context.Context, session *Session, request Request, accept, cursor string) (*http.Response, error) {
 	op := request.Operation()
 	if c.check && session != nil {
 		if scope, ok := session.missing(op, request.Params()); !ok {
@@ -415,7 +436,14 @@ func (c *HTTPClient) attempt(ctx context.Context, session *Session, request Requ
 		}
 	}
 	target := c.base + Path(request)
-	if query := request.Query(); len(query) > 0 {
+	query := request.Query()
+	if cursor != "" {
+		if query == nil {
+			query = url.Values{}
+		}
+		query.Set("cursor", cursor)
+	}
+	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
 	body, err := request.Body()
@@ -516,20 +544,86 @@ func (s *sse) Close() error {
 	return s.body.Close()
 }
 
-// Stream is a stream of typed events.
+// Stream is a stream of typed events over as many answers as it takes:
+// the server ends each after its window (`event: close`, not delivered)
+// and Stream reconnects at once, sending the last event's id as its
+// `cursor` query; after a transport error, a cut answer or a 5xx/429 it
+// waits first (WithStreamBackoff). It ends at an answer's end without
+// `close` (the stream is done, io.EOF), at any other error answer (an
+// *APIError, the token checked anew on each reconnect), on Stop (io.EOF),
+// or when its ctx ends (ctx's error). Without Stop or ctx's end it keeps
+// reconnecting. Next is for one goroutine; Stop and Cursor for any.
 type Stream[T any] struct {
-	events Events
-	decode func(RawEvent) (T, bool, error)
+	ctx      context.Context
+	cancel   context.CancelFunc
+	streamer Streamer
+	request  Request
+	decode   func(RawEvent) (T, bool, error)
+	first    time.Duration // the first wait after an error
+	most     time.Duration // the longest
+
+	mu      sync.Mutex
+	events  Events // the current answer; nil between answers
+	lastID  string
+	stopped bool
+	done    bool
 }
 
-// Next returns the next event this client knows, skipping any other; io.EOF
-// at the end.
+// Next returns the next event this client knows, skipping any other,
+// reconnecting as it must; io.EOF at the end.
 func (s *Stream[T]) Next() (T, error) {
+	var zero T
+	var wait time.Duration
 	for {
-		raw, err := s.events.Next()
-		if err != nil {
-			var zero T
+		events, done := s.current()
+		if done {
+			return zero, io.EOF
+		}
+		if err := s.ctx.Err(); err != nil {
+			s.drop()
+			if s.isStopped() {
+				return zero, io.EOF
+			}
 			return zero, err
+		}
+		if events == nil {
+			if !s.sleep(wait) {
+				continue
+			}
+			opened, err := s.streamer.Open(s.ctx, s.request, s.Cursor())
+			if err != nil {
+				if s.ctx.Err() == nil && !retryable(err) {
+					s.finish()
+					return zero, err
+				}
+				wait = s.longer(wait)
+				continue
+			}
+			wait = 0
+			if !s.hold(opened) {
+				continue
+			}
+			events = opened
+		}
+		raw, err := events.Next()
+		if errors.Is(err, io.EOF) {
+			s.finish()
+			return zero, io.EOF
+		}
+		if err != nil {
+			s.drop()
+			wait = s.longer(wait)
+			continue
+		}
+		if raw.ID != "" {
+			s.mu.Lock()
+			s.lastID = raw.ID
+			s.mu.Unlock()
+		}
+		if raw.Event == "close" {
+			s.drop()
+			wait = 0
+			continue
 		}
 		event, ok, err := s.decode(raw)
 		if ok || err != nil {
@@ -538,15 +632,116 @@ func (s *Stream[T]) Next() (T, error) {
 	}
 }
 
-// Close closes the stream.
-func (s *Stream[T]) Close() error {
-	return s.events.Close()
+// Cursor is the id of the last event read: the `cursor` a reconnect
+// resumes from; empty before the first.
+func (s *Stream[T]) Cursor() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lastID
 }
 
-// Open opens request with s, its events decoded as T.
+// Stop ends the stream for good: its answer closed, no reconnect; Next
+// then returns io.EOF.
+func (s *Stream[T]) Stop() {
+	s.mu.Lock()
+	s.stopped = true
+	s.mu.Unlock()
+	s.cancel()
+	s.drop()
+}
+
+// Close is Stop.
+func (s *Stream[T]) Close() error {
+	s.Stop()
+	return nil
+}
+
+// current is its answer, and whether it is done.
+func (s *Stream[T]) current() (Events, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.events, s.done
+}
+
+// hold keeps events as its answer; false (events closed) once stopped.
+func (s *Stream[T]) hold(events Events) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.stopped {
+		events.Close()
+		return false
+	}
+	s.events = events
+	return true
+}
+
+// drop closes its answer, if any.
+func (s *Stream[T]) drop() {
+	s.mu.Lock()
+	events := s.events
+	s.events = nil
+	s.mu.Unlock()
+	if events != nil {
+		events.Close()
+	}
+}
+
+// finish ends it: done, its answer closed.
+func (s *Stream[T]) finish() {
+	s.drop()
+	s.mu.Lock()
+	s.done = true
+	s.mu.Unlock()
+	s.cancel()
+}
+
+func (s *Stream[T]) isStopped() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopped
+}
+
+// sleep waits wait, or less if ctx ends first (then false).
+func (s *Stream[T]) sleep(wait time.Duration) bool {
+	if wait <= 0 {
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-s.ctx.Done():
+		return false
+	}
+}
+
+// longer is the wait after wait: the first, then doubled up to the most.
+func (s *Stream[T]) longer(wait time.Duration) time.Duration {
+	if wait <= 0 {
+		return s.first
+	}
+	return min(wait*2, s.most)
+}
+
+// retryable reports whether a failed (re)connect is worth another after a
+// wait: a transport error, or a 5xx or 429 answer.
+func retryable(err error) bool {
+	var answer *APIError
+	if errors.As(err, &answer) {
+		return answer.Status >= 500 || answer.Status == http.StatusTooManyRequests
+	}
+	var transport *url.Error
+	return errors.As(err, &transport)
+}
+
+// Open opens request with s as a Stream, its events decoded as T: the
+// first answer opened here, its error returned.
 func Open[T any, P decoder[T]](ctx context.Context, s Streamer, request Request) (*Stream[T], error) {
-	events, err := s.Open(ctx, request)
+	ctx, cancel := context.WithCancel(ctx)
+	events, err := s.Open(ctx, request, "")
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	decode := func(raw RawEvent) (T, bool, error) {
@@ -554,7 +749,16 @@ func Open[T any, P decoder[T]](ctx context.Context, s Streamer, request Request)
 		ok, err := P(&event).decode(raw)
 		return event, ok, err
 	}
-	return &Stream[T]{events: events, decode: decode}, nil
+	first, most := 500*time.Millisecond, 8*time.Second
+	if backoff, ok := s.(interface {
+		streamBackoff() (time.Duration, time.Duration)
+	}); ok {
+		first, most = backoff.streamBackoff()
+	}
+	return &Stream[T]{
+		ctx: ctx, cancel: cancel, streamer: s, request: request, decode: decode,
+		first: first, most: most, events: events,
+	}, nil
 }
 
 func (e *RawEvent) decode(raw RawEvent) (bool, error) {

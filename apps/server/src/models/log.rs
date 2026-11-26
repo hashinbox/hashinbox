@@ -25,9 +25,8 @@ use crate::db::{Keyed, Page};
 #[diesel(table_name = log, check_for_backend(Sqlite))]
 #[schema(as = LogEntry)]
 pub(crate) struct Log {
-    /// Its id, newest highest; 0 until stored, so 0 on the live stream
-    /// (`/v1/logs/stream`).
-    #[diesel(skip_insertion)]
+    /// Its id, newest highest: given as it is kept, so the same on the live
+    /// stream (`/v1/logs/stream`) as stored.
     pub(crate) id: i64,
     /// When it happened, Unix ms.
     pub(crate) at: i64,

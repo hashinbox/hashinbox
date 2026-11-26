@@ -11,7 +11,8 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, type User } from '@/api/client';
+import { usersCreate, type User } from '@hashinbox/client';
+import { ApiError, api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Picker } from './picker';
@@ -30,8 +31,8 @@ function generated(): string {
 function problemOf(error: unknown): string {
   if (!(error instanceof ApiError)) return error instanceof Error ? error.message : String(error);
   if (error.status === 409) return 'A user with this email already exists.';
-  const scope = error.metadata?.scope;
-  if (error.status === 403 && error.code === 'missing_scope' && scope)
+  const scope = error.metadata.scope;
+  if (error.status === 403 && error.reason === 'missing_scope' && scope)
     return `You can't grant ${short(scope)}.`;
   return error.message;
 }
@@ -141,7 +142,7 @@ function Create({
     setProblem(null);
     const secret = generate ? generated() : password;
     const body = { email: email.trim(), name: name.trim(), password: secret, scopes: pack(scopes) };
-    call(client.POST('/v1/users', { body }))
+    usersCreate(api, { body })
       .then((created) => onCreated(created.user, generate ? secret : null))
       .catch((error: unknown) => setProblem(problemOf(error)))
       .finally(() => setBusy(false));

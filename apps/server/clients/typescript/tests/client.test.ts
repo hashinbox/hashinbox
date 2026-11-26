@@ -233,6 +233,72 @@ test("a stream yields its events, split across chunks", async () => {
   assert.equal(sent[0].url, "/v1/logs/stream?level=info");
 });
 
+/** A 200 `text/event-stream` answer of `text`. */
+const sse = (text: string) => () =>
+  new Response(text, {
+    status: 200,
+    headers: { "Content-Type": "text/event-stream" },
+  });
+
+const fast = { initial: 1, max: 2 };
+
+test("a stream reads on across windows, resuming after the last id", async () => {
+  const { fetch, sent } = fake(
+    sse("data: a\nid: 1\n\ndata: b\nid: 2\n\nevent: close\ndata: {}\n\n"),
+    sse("data: c\nid: 3\n\n"),
+  );
+  const client = new HashinboxClient("", { session: user, fetch });
+  const stream = logsStream(client, { level: "info" });
+  const seen = [];
+  for await (const event of stream) seen.push(event.data);
+  assert.deepEqual(seen, ["a", "b", "c"]);
+  assert.deepEqual(
+    sent.map((call) => call.url),
+    ["/v1/logs/stream?level=info", "/v1/logs/stream?level=info&cursor=2"],
+  );
+  assert.equal(stream.cursor, "3");
+});
+
+test("stop() ends a stream: no reconnect", async () => {
+  const window = sse("data: a\nid: 1\n\nevent: close\ndata: {}\n\n");
+  const { fetch, sent } = fake(window, window, window);
+  const client = new HashinboxClient("", { session: user, fetch });
+  const stream = logsStream(client);
+  const seen = [];
+  for await (const event of stream) {
+    seen.push(event.data);
+    if (seen.length === 2) stream.stop();
+  }
+  assert.deepEqual(seen, ["a", "a"]);
+  assert.equal(sent.length, 2);
+});
+
+test("a failed connect is tried again after a backoff; a 401 ends it", async () => {
+  const { fetch, sent } = fake(
+    json(503, { kind: "unavailable", message: "busy" }),
+    () => {
+      throw new TypeError("network down");
+    },
+    sse("data: a\nid: 1\n\nevent: close\ndata: {}\n\n"),
+    json(401, { kind: "unauthenticated", message: "no" }),
+  );
+  const client = new HashinboxClient("", {
+    session: user,
+    fetch,
+    backoff: fast,
+  });
+  const seen: string[] = [];
+  await assert.rejects(
+    (async () => {
+      for await (const event of logsStream(client)) seen.push(event.data);
+    })(),
+    (error) => error instanceof ApiError && error.status === 401,
+  );
+  assert.deepEqual(seen, ["a"]);
+  assert.equal(sent.length, 4);
+  assert.equal(sent[3].url, "/v1/logs/stream?cursor=1");
+});
+
 test("a timeout aborts the call", async () => {
   const fetch = ((_url: string, init?: RequestInit) =>
     new Promise((_, reject) =>

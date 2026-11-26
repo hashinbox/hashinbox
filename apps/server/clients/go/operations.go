@@ -1346,6 +1346,9 @@ type LogsStreamRequest struct {
 	Before *int64 `json:"-"`
 	// Only entries from this Unix ms on; a page then lists oldest first.
 	After *int64 `json:"-"`
+	// The last event `id` read: every entry after it first, then the new
+	// ones; absent, the new ones alone.
+	Cursor *string `json:"-"`
 }
 
 // Operation is logsStream.
@@ -1394,6 +1397,9 @@ func (r LogsStreamRequest) Query() url.Values {
 	if r.After != nil {
 		query.Set("after", text(*r.After))
 	}
+	if r.Cursor != nil {
+		query.Set("cursor", *r.Cursor)
+	}
 	return query
 }
 
@@ -1404,7 +1410,7 @@ func (r LogsStreamRequest) Body() ([]byte, error) {
 
 // LogsStream streams new log entries.
 //
-// `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
+// `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry`, its `id` the entry's. A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive. After the stream window (15 s) the answer ends with `event: close`: ask again with the last `id` as `cursor` and every entry since is sent first, none twice.
 func LogsStream(ctx context.Context, streamer Streamer, request LogsStreamRequest) (*Stream[RawEvent], error) {
 	return Open[RawEvent](ctx, streamer, request)
 }
@@ -2263,6 +2269,9 @@ type NetworkTipSearchRequest struct {
 	// RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
 	// block at or before it.
 	At string `json:"-"`
+	// The last event `id` read (a step's number): the same search's steps
+	// after it.
+	Cursor *string `json:"-"`
 }
 
 // Operation is networkTipSearch.
@@ -2279,6 +2288,9 @@ func (r NetworkTipSearchRequest) Params() map[string]string {
 func (r NetworkTipSearchRequest) Query() url.Values {
 	query := url.Values{}
 	query.Set("at", r.At)
+	if r.Cursor != nil {
+		query.Set("cursor", *r.Cursor)
+	}
 	return query
 }
 
@@ -2289,7 +2301,7 @@ func (r NetworkTipSearchRequest) Body() ([]byte, error) {
 
 // NetworkTipSearch finds a network's last block at or before a time, streaming the search.
 //
-// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
+// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
 func NetworkTipSearch(ctx context.Context, streamer Streamer, request NetworkTipSearchRequest) (*Stream[RawEvent], error) {
 	return Open[RawEvent](ctx, streamer, request)
 }

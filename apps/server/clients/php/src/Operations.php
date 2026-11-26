@@ -6,8 +6,6 @@ declare(strict_types=1);
 
 namespace Hashinbox;
 
-use Generator;
-
 /**
  * `GET /v1/assets`.
  */
@@ -1361,6 +1359,8 @@ final readonly class LogsStreamRequest implements Request
      * @param ?string $target Only entries of these events, comma-separated (`rpc.http,index.leg`).
      * @param ?int $before Only entries from before this Unix ms.
      * @param ?int $after Only entries from this Unix ms on; a page then lists oldest first.
+     * @param ?string $cursor The last event `id` read: every entry after it first, then the new
+     *     ones; absent, the new ones alone.
      */
     public function __construct(
         public ?string $network = null,
@@ -1374,6 +1374,7 @@ final readonly class LogsStreamRequest implements Request
         public ?string $target = null,
         public ?int $before = null,
         public ?int $after = null,
+        public ?string $cursor = null,
     ) {}
 
     public function operation(): Operation
@@ -1422,6 +1423,9 @@ final readonly class LogsStreamRequest implements Request
         if ($this->after !== null) {
             $pairs[] = ['after', (string) $this->after];
         }
+        if ($this->cursor !== null) {
+            $pairs[] = ['cursor', $this->cursor];
+        }
         return $pairs;
     }
 
@@ -1434,11 +1438,11 @@ final readonly class LogsStreamRequest implements Request
 /**
  * Stream new log entries: `GET /v1/logs/stream`.
  *
- * `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
+ * `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry`, its `id` the entry's. A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive. After the stream window (15 s) the answer ends with `event: close`: ask again with the last `id` as `cursor` and every entry since is sent first, none twice.
  *
- * @return Generator<int, RawEvent, mixed, void>
+ * @return Stream<RawEvent>
  */
-function logsStream(Client $client, LogsStreamRequest $request = new LogsStreamRequest()): Generator
+function logsStream(Client $client, LogsStreamRequest $request = new LogsStreamRequest()): Stream
 {
     return $client->open($request);
 }
@@ -2335,8 +2339,15 @@ final readonly class NetworkTipSearchRequest implements Request
      * @param string $network Network name, as `GET /v1/networks` lists it.
      * @param string $at RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
      *     block at or before it.
+     * @param ?string $cursor The last event `id` read (a step's number): the same search's steps
+     *     after it.
      */
-    public function __construct(public string $chain, public string $network, public string $at) {}
+    public function __construct(
+        public string $chain,
+        public string $network,
+        public string $at,
+        public ?string $cursor = null,
+    ) {}
 
     public function operation(): Operation
     {
@@ -2352,6 +2363,9 @@ final readonly class NetworkTipSearchRequest implements Request
     {
         $pairs = [];
         $pairs[] = ['at', $this->at];
+        if ($this->cursor !== null) {
+            $pairs[] = ['cursor', $this->cursor];
+        }
         return $pairs;
     }
 
@@ -2364,11 +2378,11 @@ final readonly class NetworkTipSearchRequest implements Request
 /**
  * Find a network's last block at or before a time, streaming the search: `GET /v1/networks/{chain}/{network}/tip/search`.
  *
- * `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
+ * `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
  *
- * @return Generator<int, RawEvent, mixed, void>
+ * @return Stream<RawEvent>
  */
-function networkTipSearch(Client $client, NetworkTipSearchRequest $request): Generator
+function networkTipSearch(Client $client, NetworkTipSearchRequest $request): Stream
 {
     return $client->open($request);
 }

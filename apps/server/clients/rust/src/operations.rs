@@ -1194,6 +1194,9 @@ pub struct LogsStreamRequest {
     pub before: Option<i64>,
     /// Only entries from this Unix ms on; a page then lists oldest first.
     pub after: Option<i64>,
+    /// The last event `id` read: every entry after it first, then the new
+    /// ones; absent, the new ones alone.
+    pub cursor: Option<String>,
 }
 
 impl Request for LogsStreamRequest {
@@ -1237,16 +1240,19 @@ impl Request for LogsStreamRequest {
         if let Some(after) = &self.after {
             query.push(("after", after.to_string()));
         }
+        if let Some(cursor) = &self.cursor {
+            query.push(("cursor", cursor.to_string()));
+        }
     }
 }
 
 /// Stream new log entries: `GET /v1/logs/stream`.
 ///
-/// `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
+/// `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry`, its `id` the entry's. A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive. After the stream window (15 s) the answer ends with `event: close`: ask again with the last `id` as `cursor` and every entry since is sent first, none twice.
 pub async fn logs_stream<S: Streamer>(
     streamer: &S,
     request: LogsStreamRequest,
-) -> Result<Events<RawEvent, S::Error>, Error<S::Error>> {
+) -> Result<Events<'_, RawEvent, S>, Error<S::Error>> {
     open(streamer, &request).await
 }
 
@@ -2064,6 +2070,9 @@ pub struct NetworkTipSearchRequest {
     /// RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
     /// block at or before it.
     pub at: String,
+    /// The last event `id` read (a step's number): the same search's steps
+    /// after it.
+    pub cursor: Option<String>,
 }
 
 impl Request for NetworkTipSearchRequest {
@@ -2083,16 +2092,19 @@ impl Request for NetworkTipSearchRequest {
 
     fn query(&self, query: &mut Vec<(&'static str, String)>) {
         query.push(("at", self.at.to_string()));
+        if let Some(cursor) = &self.cursor {
+            query.push(("cursor", cursor.to_string()));
+        }
     }
 }
 
 /// Find a network's last block at or before a time, streaming the search: `GET /v1/networks/{chain}/{network}/tip/search`.
 ///
-/// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
+/// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
 pub async fn network_tip_search<S: Streamer>(
     streamer: &S,
     request: NetworkTipSearchRequest,
-) -> Result<Events<RawEvent, S::Error>, Error<S::Error>> {
+) -> Result<Events<'_, RawEvent, S>, Error<S::Error>> {
     open(streamer, &request).await
 }
 

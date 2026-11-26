@@ -11,6 +11,7 @@ use Hashinbox\Json;
 use Hashinbox\Kind;
 use Hashinbox\LogsStreamRequest;
 use Hashinbox\MissingScope;
+use Hashinbox\NetworkTipSearchRequest;
 use Hashinbox\Scopes;
 use Hashinbox\Secret;
 use Hashinbox\Session;
@@ -18,8 +19,10 @@ use Hashinbox\WalletGetRequest;
 use Hashinbox\WalletsCreateRequest;
 use Hashinbox\WalletsListRequest;
 use PHPUnit\Framework\TestCase;
+use RuntimeException;
 
 use function Hashinbox\logsStream;
+use function Hashinbox\networkTipSearch;
 use function Hashinbox\walletGet;
 use function Hashinbox\walletsCreate;
 
@@ -197,5 +200,101 @@ final class ClientTest extends TestCase
         self::assertSame(['message', 'missed'], array_map(static fn($event): string => $event->event, $raw));
         $typed = iterator_to_array($api->stream(new LogsStreamRequest()), false);
         self::assertSame([['id' => 0], ['missed' => 2]], array_map(static fn($event): mixed => $event->data, $typed));
+    }
+
+    /**
+     * A client over `$answers`, one per request, in order (a closure answers
+     * or throws).
+     *
+     * @param list<array{int, string|list<string>}|RuntimeException> $answers
+     * @return array{Client, FakeTransport}
+     */
+    private static function streaming(array $answers): array
+    {
+        $fake = new FakeTransport(static function (array $request) use (&$answers): array {
+            $answer = array_shift($answers) ?? [500, ''];
+            if ($answer instanceof RuntimeException) {
+                throw $answer;
+            }
+            return $answer;
+        });
+        $scopes = Scopes::parse('com.hashinbox.*.$*');
+        $api = new Client('http://hashinbox.test', self::secret()->issue($scopes), transport: $fake, backoff: 0.01, backoffMax: 0.02);
+        return [$api, $fake];
+    }
+
+    /**
+     * The `cursor` each request sent, null: none.
+     *
+     * @return list<?string>
+     */
+    private static function cursors(FakeTransport $fake): array
+    {
+        return array_map(static function (array $request): ?string {
+            parse_str((string) parse_url($request['url'], PHP_URL_QUERY), $query);
+            $cursor = $query['cursor'] ?? null;
+            return is_string($cursor) ? $cursor : null;
+        }, $fake->sent);
+    }
+
+    public function testAStreamGoesOnAcrossWindowsFromItsCursor(): void
+    {
+        [$api, $fake] = self::streaming([
+            [200, ["id: 1\ndata: {\"n\":1}\n\n", "id: 2\ndata: {\"n\":2}\n\n", "event: close\ndata: {}\nretry: 0\n\n"]],
+            [200, ["id: 3\ndata: {\"n\":3}\n\nevent: close\ndata: {}\n\n"]],
+            [200, "id: 4\nevent: found\ndata: {\"n\":4}\n\n"],
+        ]);
+        $stream = $api->stream(new LogsStreamRequest(level: 'warn'));
+        $read = array_map(static fn($event): mixed => $event->data, iterator_to_array($stream, false));
+        self::assertSame([['n' => 1], ['n' => 2], ['n' => 3], ['n' => 4]], $read);
+        self::assertSame('4', $stream->cursor());
+        self::assertSame([null, '2', '3'], self::cursors($fake), 'each window from the last id; ended without close');
+        self::assertStringContainsString('level=warn', $fake->sent[1]['url'], 'the filters kept');
+        self::assertArrayNotHasKey('Last-Event-ID', $fake->sent[1]['headers']);
+    }
+
+    public function testStopEndsAStreamWithoutReconnecting(): void
+    {
+        $window = [200, "id: 1\ndata: {}\n\nid: 2\ndata: {}\n\nevent: close\ndata: {}\n\n"];
+        [$api, $fake] = self::streaming([$window, $window, $window]);
+        $handle = logsStream($api);
+        $read = [];
+        foreach ($handle as $event) {
+            $read[] = $event->id;
+            if (count($read) === 3) {
+                $handle->stop();
+            }
+        }
+        self::assertSame(['1', '2', '1'], $read);
+        self::assertCount(2, $fake->sent);
+        self::assertSame([], iterator_to_array($handle, false), 'stopped for good');
+        self::assertCount(2, $fake->sent);
+    }
+
+    public function testAStreamBacksOffOnErrorsAndThrowsARefusal(): void
+    {
+        $error = '{"kind": "unavailable", "message": "down"}';
+        [$api, $fake] = self::streaming([
+            [503, $error],
+            new RuntimeException('curl: reset'),
+            [200, "id: 7\nevent: probe\ndata: {}\n\nevent: close\ndata: {}\n\n"],
+            [401, '{"kind": "unauthenticated", "message": "refused", "reason": "session_revoked"}'],
+        ]);
+        $started = microtime(true);
+        $handle = networkTipSearch($api, new NetworkTipSearchRequest(chain: 'bitcoin', network: 'regtest', at: '1', cursor: '5'));
+        $read = [];
+        try {
+            foreach ($handle as $event) {
+                $read[] = $event->event;
+            }
+            self::fail('a 401 is thrown');
+        } catch (ApiError $refused) {
+            self::assertSame(401, $refused->status);
+        }
+        self::assertSame(['probe'], $read);
+        self::assertGreaterThanOrEqual(0.03, microtime(true) - $started, 'waited 0.01 s, then 0.02 s');
+        self::assertCount(4, $fake->sent);
+        self::assertSame(['5', '5', '5', '7'], self::cursors($fake), "the caller's cursor first, then the last id");
+        self::assertSame(1, substr_count($fake->sent[3]['url'], 'cursor='), 'overridden, not repeated');
     }
 }

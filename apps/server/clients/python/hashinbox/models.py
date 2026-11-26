@@ -1035,8 +1035,8 @@ class LogEntry:
     chain: str | None
     # Its fields and its spans' (`network`, `node`, …), as text.
     fields: dict[str, str]
-    # Its id, newest highest; 0 until stored, so 0 on the live stream
-    # (`/v1/logs/stream`).
+    # Its id, newest highest: given as it is kept, so the same on the live
+    # stream (`/v1/logs/stream`) as stored.
     id: int
     # The job it ran in; always present, null: none.
     job_id: int | None

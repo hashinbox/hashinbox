@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import TypeAlias
 
@@ -14,6 +13,7 @@ from .client import (
     Operation,
     RawEvent,
     Request,
+    Stream,
     Streamer,
     array,
     data,
@@ -80,7 +80,7 @@ class LogsStreamRequest(Request):
 def logs_stream(
     streamer: Streamer,
     request: LogsStreamRequest = LogsStreamRequest(),
-) -> AsyncIterator[RawEvent]:
+) -> Stream[RawEvent]:
     """Stream the logs: `GET /v1/logs/stream`."""
     return streamer.open(request)
 
@@ -174,16 +174,20 @@ class PetEventsStreamRequest(Request):
 PetEventsStreamEvent: TypeAlias = "Event[Bark] | Event[Missed]"
 
 
-async def pet_events_stream(
+def pet_events_stream(
     streamer: Streamer,
     request: PetEventsStreamRequest,
-) -> AsyncIterator[PetEventsStreamEvent]:
+) -> Stream[PetEventsStreamEvent]:
     """Stream a pet's events: `GET /v1/pets/{id}/events`."""
-    async for raw in streamer.open(request):
+
+    def decode(raw: RawEvent) -> PetEventsStreamEvent | None:
         if raw.event == "bark":
-            yield Event(raw.event, Bark.from_json(data(raw)), raw.id)
-        elif raw.event == "missed":
-            yield Event(raw.event, Missed.from_json(data(raw)), raw.id)
+            return Event(raw.event, Bark.from_json(data(raw)), raw.id)
+        if raw.event == "missed":
+            return Event(raw.event, Missed.from_json(data(raw)), raw.id)
+        return None
+
+    return streamer.open(request).map(decode)
 
 
 # `GET /v1/pets/{id}`.

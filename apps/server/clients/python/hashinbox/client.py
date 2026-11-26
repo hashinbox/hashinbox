@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Generic, Protocol, Self, TypeVar
@@ -27,6 +27,7 @@ __all__ = [
     "Operation",
     "RawEvent",
     "Request",
+    "Stream",
     "Streamer",
     "can",
     "path",
@@ -34,6 +35,7 @@ __all__ = [
 ]
 
 T = TypeVar("T")
+U = TypeVar("U")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -93,7 +95,7 @@ class Event(Generic[T]):
 class Streamer(Protocol):
     """Opens a request as a stream of events."""
 
-    def open(self, request: Request) -> AsyncIterator[RawEvent]: ...
+    def open(self, request: Request) -> Stream[RawEvent]: ...
 
 
 def path(request: Request) -> str:
@@ -164,6 +166,113 @@ def first(value: Any, *decoders: Callable[[Any], object]) -> Any:
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
     raise ValueError("no variant fits")
+
+
+# A connect of a `Stream`: the request sent anew, with the last event id
+# read, if any, as its `cursor`; its 2xx streaming response.
+Connect = Callable[[str | None], Awaitable[httpx.Response]]
+
+
+class Stream(Generic[T]):
+    """A stream's events across the server's windows: an async iterator, and
+    `async with` or `await stop()` to end it. The server ends each answer
+    after its window (15 s) with `event: close`; the stream then reconnects
+    at once, sending the last event id read (`cursor`) as the query's
+    `cursor` (the caller's own, if any, on the first connect), and goes on. An answer that ends without `close` ends
+    the stream: it is done. A failed connect (a transport error, a 5xx or
+    429) or an answer cut short reconnects after `backoff` seconds, doubled
+    each time up to `max_backoff`, reset by a 2xx; any other non-2xx raises
+    its `ApiError`. Until `stop()`, it keeps reconnecting."""
+
+    def __init__(
+        self,
+        connect: Connect,
+        decode: Callable[[RawEvent], T | None],
+        *,
+        backoff: float = 0.5,
+        max_backoff: float = 8.0,
+    ) -> None:
+        self._connect = connect
+        self._decode = decode
+        self.backoff = backoff
+        self.max_backoff = max_backoff
+        # The id of the last event read, sent as `?cursor=` on reconnecting.
+        self.cursor: str | None = None
+        self._stopped = asyncio.Event()
+        self._response: httpx.Response | None = None
+
+    def map(self, decode: Callable[[T], U | None]) -> Stream[U]:
+        """Its events decoded by `decode`, each it answers None for skipped."""
+        own = self._decode
+
+        def both(raw: RawEvent) -> U | None:
+            value = own(raw)
+            return None if value is None else decode(value)
+
+        return Stream(
+            self._connect, both, backoff=self.backoff, max_backoff=self.max_backoff
+        )
+
+    async def stop(self) -> None:
+        """Ends it for good: no reconnect, the current answer closed."""
+        self._stopped.set()
+        if self._response is not None:
+            await self._response.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        kind: type[BaseException] | None,
+        error: BaseException | None,
+        trace: TracebackType | None,
+    ) -> None:
+        await self.stop()
+
+    async def __aiter__(self) -> AsyncIterator[T]:
+        delay = self.backoff
+        while not self._stopped.is_set():
+            try:
+                response = await self._connect(self.cursor)
+            except ApiError as error:
+                if error.status < 500 and error.status != 429:
+                    raise
+            except httpx.TransportError:
+                pass
+            else:
+                delay = self.backoff
+                self._response = response
+                try:
+                    async for raw in _events(response.aiter_lines()):
+                        if raw.id:
+                            self.cursor = raw.id
+                        if raw.event == "close":
+                            break
+                        value = self._decode(raw)
+                        if value is not None:
+                            yield value
+                        if self._stopped.is_set():
+                            return
+                    else:
+                        return
+                    continue
+                except (httpx.TransportError, httpx.StreamError):
+                    pass
+                finally:
+                    self._response = None
+                    await response.aclose()
+            if self._stopped.is_set():
+                return
+            try:
+                await asyncio.wait_for(self._stopped.wait(), delay)
+            except TimeoutError:
+                pass
+            delay = min(delay * 2, self.max_backoff)
+
+
+def _raw(raw: RawEvent) -> RawEvent:
+    return raw
 
 
 # The models import the helpers above from this module, so these come after.
@@ -250,6 +359,8 @@ class Client:
       not closed by this one.
     - `check_scopes`: refuse locally (`MissingScope`) a call the session's
       scopes do not cover.
+    - `backoff`, `max_backoff`: a stream's waits, seconds, before it
+      reconnects after a failure (see `Stream`).
     """
 
     def __init__(
@@ -263,6 +374,8 @@ class Client:
         http: httpx.AsyncClient | None = None,
         timeout: float = 30.0,
         check_scopes: bool = True,
+        backoff: float = 0.5,
+        max_backoff: float = 8.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._session = session
@@ -274,6 +387,7 @@ class Client:
         self._timeout = timeout
         self._check_scopes = check_scopes
         self._signing = asyncio.Lock()
+        self._backoff = (backoff, max_backoff)
 
     async def __aenter__(self) -> Self:
         return self
@@ -306,19 +420,19 @@ class Client:
         response = await self._exchange(request)
         return response.json() if response.content else None
 
-    async def open(self, request: Request) -> AsyncIterator[RawEvent]:
-        """`request`'s server-sent events, as read, until the stream ends."""
-        response = await self._exchange(request, stream=True)
-        try:
-            async for event in _events(response.aiter_lines()):
-                yield event
-        finally:
-            await response.aclose()
+    def open(self, request: Request) -> Stream[RawEvent]:
+        """`request`'s server-sent events, as read, reconnecting each window
+        until it is done or stopped (see `Stream`)."""
 
-    async def stream(self, request: Request) -> AsyncIterator[Event[Any]]:
+        def connect(cursor: str | None) -> Awaitable[httpx.Response]:
+            return self._exchange(request, stream=True, cursor=cursor)
+
+        backoff, max_backoff = self._backoff
+        return Stream(connect, _raw, backoff=backoff, max_backoff=max_backoff)
+
+    def stream(self, request: Request) -> Stream[Event[Any]]:
         """`request`'s server-sent events, their data decoded from JSON."""
-        async for raw in self.open(request):
-            yield Event(raw.event, data(raw), raw.id)
+        return self.open(request).map(lambda raw: Event(raw.event, data(raw), raw.id))
 
     async def login(
         self,
@@ -354,7 +468,12 @@ class Client:
             self._session = None
 
     async def _exchange(
-        self, request: Request, *, stream: bool = False, anonymous: bool = False
+        self,
+        request: Request,
+        *,
+        stream: bool = False,
+        anonymous: bool = False,
+        cursor: str | None = None,
     ) -> httpx.Response:
         """`request` sent with the session (signed anew once on a
         `session_expired` when a secret signs them): its 2xx response, else
@@ -366,7 +485,7 @@ class Client:
                 for scope in scopes(request):
                     if not session.scopes.covers(scope):
                         raise MissingScope(request.operation().id, scope)
-            response = await self._fetch(request, session, stream)
+            response = await self._fetch(request, session, stream, cursor)
             if response.is_success:
                 return response
             if stream:
@@ -380,11 +499,20 @@ class Client:
             raise error
 
     async def _fetch(
-        self, request: Request, session: Session | None, stream: bool = False
+        self,
+        request: Request,
+        session: Session | None,
+        stream: bool = False,
+        cursor: str | None = None,
     ) -> httpx.Response:
-        """One request, its response once it answers. A stream's reads wait
-        as long as it takes."""
+        """One request, its response once it answers; with `cursor`, that as
+        its query's `cursor` (in place of its own). A stream's reads wait as
+        long as it takes."""
         headers = {"Accept": "text/event-stream" if stream else "application/json"}
+        query = request.query()
+        if cursor is not None:
+            query = [pair for pair in query if pair[0] != "cursor"]
+            query.append(("cursor", cursor))
         if session is not None:
             headers["Authorization"] = f"Bearer {session.token}"
         content = request.content()
@@ -394,7 +522,7 @@ class Client:
         built = self._http.build_request(
             request.operation().method,
             self.base_url + path(request),
-            params=tuple(request.query()),
+            params=tuple(query),
             headers=headers,
             content=content.encode() if content is not None else None,
             timeout=timeout,

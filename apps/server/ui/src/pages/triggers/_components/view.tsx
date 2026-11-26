@@ -10,7 +10,14 @@ import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode } from 'react';
-import { call, client, type Trigger, type TriggerRun } from '@/api/client';
+import {
+  triggerGet,
+  triggerReplace,
+  triggerRunsList,
+  type Trigger,
+  type TriggerRun,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { EmptyRow } from '@/_components/table';
 import { LogsButton } from '@/_components/logs/button';
 import { When } from '@/_components/when';
@@ -56,9 +63,8 @@ export function View({
   const id = initial.id;
   useEffect(() => {
     const read = () => {
-      const params = { params: { path: { id } } };
-      call(client.GET('/v1/triggers/{id}', params)).then(setTrigger).catch(shell.fail);
-      call(client.GET('/v1/triggers/{id}/runs', params))
+      triggerGet(api, { id }).then(setTrigger).catch(shell.fail);
+      triggerRunsList(api, { id })
         .then((list) => setRuns(list.runs))
         .catch(shell.fail);
     };
@@ -76,7 +82,7 @@ export function View({
   const toggle = () => {
     const { chain, network, selector, filter, check, action } = parts;
     const body = { chain, network, selector, filter, check, action, enabled: !trigger.enabled };
-    call(client.PUT('/v1/triggers/{id}', { params: { path: { id } }, body: body as never }))
+    triggerReplace(api, { id, body })
       .then((saved) => {
         setTrigger(saved);
         onChanged();

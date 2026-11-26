@@ -709,8 +709,8 @@ pub struct LogEntry {
     pub chain: Option<String>,
     /// Its fields and its spans' (`network`, `node`, …), as text.
     pub fields: BTreeMap<String, String>,
-    /// Its id, newest highest; 0 until stored, so 0 on the live stream
-    /// (`/v1/logs/stream`).
+    /// Its id, newest highest: given as it is kept, so the same on the live
+    /// stream (`/v1/logs/stream`) as stored.
     pub id: i64,
     /// The job it ran in; always present, null: none.
     pub job_id: Option<i64>,

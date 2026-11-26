@@ -77,7 +77,7 @@ impl Request for LogsStreamRequest {
 pub async fn logs_stream<S: Streamer>(
     streamer: &S,
     request: LogsStreamRequest,
-) -> Result<Events<RawEvent, S::Error>, Error<S::Error>> {
+) -> Result<Events<'_, RawEvent, S>, Error<S::Error>> {
     open(streamer, &request).await
 }
 
@@ -212,7 +212,7 @@ impl Request for PetEventsStreamRequest {
 pub async fn pet_events_stream<S: Streamer>(
     streamer: &S,
     request: PetEventsStreamRequest,
-) -> Result<Events<PetEventsStreamEvent, S::Error>, Error<S::Error>> {
+) -> Result<Events<'_, PetEventsStreamEvent, S>, Error<S::Error>> {
     open(streamer, &request).await
 }
 

@@ -243,12 +243,14 @@ impl Client {
         Ok(())
     }
 
-    /// Opens `request`'s server-sent events, typed.
+    /// Opens `request`'s server-sent events, typed: a handle reconnecting
+    /// across the server's stream windows until it ends, is stopped or
+    /// dropped ([`Events`]).
     ///
     /// # Errors
     ///
     /// The answer's, or the transport's.
-    pub async fn stream<R: Request>(&self, request: &R) -> Result<Events<R::Response, Error>>
+    pub async fn stream<R: Request>(&self, request: &R) -> Result<Events<'_, R::Response, Self>>
     where
         R::Response: Event,
     {
@@ -412,6 +414,10 @@ impl super::Streamer for Client {
         http: Http,
     ) -> std::result::Result<std::result::Result<RawEvents<Error>, Response>, Error> {
         Ok(self.exchange(&http, true).await?.map(events))
+    }
+
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
     }
 
     fn missing(&self, scopes: &[String]) -> Option<String> {

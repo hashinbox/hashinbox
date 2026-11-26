@@ -1,6 +1,6 @@
 import AccountBalanceWallet from '@mui/icons-material/AccountBalanceWallet';
 import Box from '@mui/material/Box';
-import type { Wallet as Account } from '@/api/client';
+import type { Wallet as Account } from '@hashinbox/client';
 import type { Shell } from '@/layout';
 import { Empty } from '@/_components/empty';
 import { Rail } from './_components/rail';

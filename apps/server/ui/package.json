@@ -4,10 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "api": "openapi-typescript ../../../docs/openapi.json -o src/api/schema.d.ts",
     "dev": "vite",
     "check": "tsc --noEmit",
-    "build": "npm run api && tsc --noEmit && prettier --check . && eslint . && vite build",
+    "build": "tsc --noEmit && prettier --check . && eslint . && vite build",
     "preview": "vite preview",
     "lint": "prettier --check . && eslint .",
     "format": "prettier --write ."
@@ -15,10 +14,10 @@
   "dependencies": {
     "@emotion/react": "^11.14.0",
     "@emotion/styled": "^11.14.1",
+    "@hashinbox/client": "file:../clients/typescript",
     "@mui/icons-material": "^9.4.0",
     "@mui/material": "^9.4.0",
     "decimal.js": "^10.6.0",
-    "openapi-fetch": "^0.17.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
@@ -33,7 +32,6 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.12.0",
-    "openapi-typescript": "^7.13.0",
     "prettier": "^3.9.9",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.71.0",

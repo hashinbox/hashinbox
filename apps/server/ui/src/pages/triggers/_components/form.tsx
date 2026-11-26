@@ -11,7 +11,7 @@ import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type ReactNode } from 'react';
-import type { Wallet } from '@/api/client';
+import type { Wallet } from '@hashinbox/client';
 import type { Shell } from '@/layout';
 import { assetName, networkChoices } from '@/money';
 import { mono } from '@/theme';

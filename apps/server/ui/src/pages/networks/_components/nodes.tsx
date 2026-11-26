@@ -13,7 +13,15 @@ import TableCell from '@mui/material/TableCell';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState } from 'react';
-import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
+import {
+  networkEndpointDelete,
+  networkEndpointFailuresList,
+  networkEndpointStateUpdate,
+  type ConfiguredNetwork,
+  type RpcNode,
+  type RpcNodeFailure,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
@@ -27,14 +35,14 @@ interface Node {
   text: string;
   url: URL;
   enabled: boolean;
-  stored: Schemas['RpcNode'];
+  stored: RpcNode;
 }
 
 const HEADER = 'header.';
 const SETTING = 'rpc.';
 
 /** One line of a node's calls. */
-function summary(node: Schemas['RpcNode']): string {
+function summary(node: RpcNode): string {
   return `${node.stats.calls} calls · ${node.stats.failed_calls} failed`;
 }
 
@@ -63,10 +71,8 @@ export function Nodes({
 
   const remove = (target: Node) => {
     setRemoving(null);
-    const params = {
-      path: { chain: network.chain, network: network.network, id: target.stored.id },
-    };
-    call(client.DELETE('/v1/networks/{chain}/{network}/endpoints/{id}', { params }))
+    const params = { chain: network.chain, network: network.network, id: target.stored.id };
+    networkEndpointDelete(api, params)
       .then(() => {
         shell.notify(`${target.url.origin} removed from ${name}.`);
         setPicked(0);
@@ -76,11 +82,9 @@ export function Nodes({
   };
 
   const toggle = (target: Node) => {
-    const params = {
-      path: { chain: network.chain, network: network.network, id: target.stored.id },
-    };
+    const params = { chain: network.chain, network: network.network, id: target.stored.id };
     const body = { state: target.enabled ? ('disabled' as const) : ('enabled' as const) };
-    call(client.PUT('/v1/networks/{chain}/{network}/endpoints/{id}/state', { params, body }))
+    networkEndpointStateUpdate(api, { ...params, body })
       .then(() => {
         shell.notify(`${target.url.origin} ${target.enabled ? 'disabled' : 'enabled'}.`);
         onChanged();
@@ -281,14 +285,15 @@ function Detail({
 
 /** What last disabled or enabled a node, and why, newest first. */
 function Failures({ network, id }: { network: ConfiguredNetwork; id: number }) {
-  const [failures, setFailures] = useState<Schemas['RpcNodeFailure'][] | null>(null);
+  const [failures, setFailures] = useState<RpcNodeFailure[] | null>(null);
   useEffect(() => {
     let live = true;
-    const params = {
-      path: { chain: network.chain, network: network.network, id },
-      query: { limit: 20 },
-    };
-    call(client.GET('/v1/networks/{chain}/{network}/endpoints/{id}/failures', { params }))
+    networkEndpointFailuresList(api, {
+      chain: network.chain,
+      network: network.network,
+      id,
+      limit: 20,
+    })
       .then((page) => {
         if (live) setFailures(page.failures);
       })

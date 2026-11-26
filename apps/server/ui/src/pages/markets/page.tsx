@@ -1,7 +1,8 @@
 import ShowChart from '@mui/icons-material/ShowChart';
 import Box from '@mui/material/Box';
 import { useCallback, useEffect, useState } from 'react';
-import { call, client, type Schemas } from '@/api/client';
+import { marketsList, type MarketList } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import { Split } from '@/_components/split';
 import { When } from '@/_components/when';
@@ -14,12 +15,12 @@ const BEAT_MS = 10_000;
 
 /** The markets beside the one whose candles and logs are shown. */
 export function Markets({ shell }: { shell: Shell }) {
-  const [list, setList] = useState<Schemas['MarketList'] | null>(null);
+  const [list, setList] = useState<MarketList | null>(null);
   // markets/{name}
   const [, selected] = useSegments();
 
   const refresh = useCallback(() => {
-    call(client.GET('/v1/markets')).then(setList).catch(shell.fail);
+    marketsList(api).then(setList).catch(shell.fail);
   }, [shell.fail]);
 
   useEffect(() => {

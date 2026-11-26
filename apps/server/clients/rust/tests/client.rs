@@ -384,3 +384,99 @@ async fn a_stream_yields_its_events() {
     assert_eq!(seen[0].line, "GET /v1/logs/stream?level=info HTTP/1.1");
     assert!(seen[0].head.contains("accept: text/event-stream"));
 }
+
+/// A client of `url` that may read logs.
+fn streaming(url: String) -> Client {
+    let client = Client::builder(url).session(session("com.hashinbox.*.$*"));
+    client.build().unwrap()
+}
+
+/// The query `seen` sent, if any.
+fn query(seen: &Seen) -> Option<&str> {
+    let target = seen.line.split(' ').nth(1)?;
+    target.split_once('?').map(|(_, query)| query)
+}
+
+/// A window of `data` events, id each, ended by `close`.
+fn window(events: &[(&str, &str)]) -> Reply {
+    let mut text: String = events
+        .iter()
+        .map(|(id, data)| format!("data: {data}\nid: {id}\n\n"))
+        .collect();
+    text.push_str("event: close\ndata: {}\nretry: 0\n\n");
+    (200, "text/event-stream", text)
+}
+
+#[tokio::test]
+async fn a_stream_reads_on_across_windows_from_the_last_id() {
+    let (url, log) = server(|n, _| match n {
+        0 => window(&[("1", "a"), ("2", "b")]),
+        _ => (200, "text/event-stream", "data: c\nid: 3\n\n".to_owned()),
+    })
+    .await;
+    let client = streaming(url);
+    let request = LogsStreamRequest {
+        level: Some("info".into()),
+        cursor: Some("0".into()),
+        ..Default::default()
+    };
+    let mut events = client.stream(&request).await.unwrap();
+    let mut read = Vec::new();
+    while let Some(event) = events.next().await {
+        read.push(event.unwrap().data);
+    }
+    assert_eq!(read, ["a", "b", "c"], "each once, in order; no close");
+    assert_eq!(events.cursor(), Some("3"));
+    let seen = log.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "ended without close: done");
+    assert_eq!(query(&seen[0]), Some("level=info&cursor=0"));
+    assert_eq!(query(&seen[1]), Some("level=info&cursor=2"), "overridden");
+}
+
+#[tokio::test]
+async fn a_stopped_stream_reconnects_no_more() {
+    let (url, log) = server(|n, _| window(&[(&n.to_string(), "x")])).await;
+    let client = streaming(url);
+    let mut events = client.stream(&LogsStreamRequest::default()).await.unwrap();
+    for _ in 0..3 {
+        events.next().await.unwrap().unwrap();
+    }
+    assert_eq!(events.cursor(), Some("2"));
+    events.stop();
+    assert!(events.next().await.is_none());
+    let opened = log.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(log.lock().unwrap().len(), opened, "none opened after stop");
+}
+
+#[tokio::test]
+async fn a_stream_backs_off_after_an_error_and_ends_on_a_refusal() {
+    let (url, log) = server(|n, _| match n {
+        0 => window(&[("1", "a")]),
+        1 | 2 => error(503, "unavailable", None),
+        3 => window(&[("2", "b")]),
+        _ => error(401, "unauthenticated", Some("session_expired")),
+    })
+    .await;
+    let client = streaming(url);
+    let events = client.stream(&LogsStreamRequest::default()).await.unwrap();
+    let mut events = events.backoff(Duration::from_millis(20), Duration::from_millis(30));
+    let started = std::time::Instant::now();
+    assert_eq!(events.next().await.unwrap().unwrap().data, "a");
+    assert_eq!(events.next().await.unwrap().unwrap().data, "b");
+    assert!(
+        started.elapsed() >= Duration::from_millis(50),
+        "20 then 30 ms"
+    );
+    let refused = events.next().await.unwrap().unwrap_err();
+    assert!(
+        matches!(refused, Error::Api { status: 401, .. }),
+        "{refused}"
+    );
+    assert!(events.next().await.is_none());
+    let seen = log.lock().unwrap().clone();
+    assert_eq!(seen.len(), 5);
+    let resumed: Vec<_> = seen.iter().map(query).collect();
+    let cursor = Some("cursor=1");
+    assert_eq!(resumed, [None, cursor, cursor, cursor, Some("cursor=2")]);
+}

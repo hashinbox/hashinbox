@@ -9,7 +9,8 @@ import TableHead from '@mui/material/TableHead';
 import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { call, client, type Job } from '@/api/client';
+import { jobsList, type Job } from '@hashinbox/client';
+import { api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { Empty } from '@/_components/empty';
 import { EmptyRow } from '@/_components/table';
@@ -97,7 +98,7 @@ export function Jobs({ shell }: { shell: Shell }) {
       ...(kind ? { kind } : {}),
       ...(state ? { state: state as Job['state'] } : {}),
     };
-    call(client.GET('/v1/jobs', { params: { query } }))
+    jobsList(api, query)
       .then((list) => {
         setJobs(list.jobs);
       })

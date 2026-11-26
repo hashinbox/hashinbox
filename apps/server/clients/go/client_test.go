@@ -311,3 +311,127 @@ func TestStreamReadsEventsUntilCancelled(t *testing.T) {
 		t.Fatal("not cancelled")
 	}
 }
+
+// windows is a stream server: answer n (1-based) as answers[n-1]
+// (`503`/`401`: that status; else that body, then its end), recording each
+// `cursor` query; past the last, open until the client leaves.
+func windows(t *testing.T, answers ...string) (*HTTPClient, *[]string, *sync.Mutex) {
+	var mu sync.Mutex
+	var ids []string
+	server, _ := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		mu.Lock()
+		ids = append(ids, r.URL.Query().Get("cursor"))
+		mu.Unlock()
+		if n > len(answers) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		switch body := answers[n-1]; body {
+		case "503", "401":
+			status := map[string]int{"503": 503, "401": 401}[body]
+			answer(w, status, `{"kind":"unavailable","message":"no","metadata":{}}`)
+		default:
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, body)
+		}
+	})
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs.$read")}
+	client := NewClient(server.URL, WithSession(session), WithStreamBackoff(time.Millisecond, 4*time.Millisecond))
+	return client, &ids, &mu
+}
+
+// readData is the data of the next n events of stream.
+func readData(t *testing.T, stream *Stream[RawEvent], n int) []string {
+	t.Helper()
+	var data []string
+	for range n {
+		event, err := stream.Next()
+		if err != nil {
+			t.Fatal(data, err)
+		}
+		data = append(data, event.Data)
+	}
+	return data
+}
+
+func TestStreamReconnectsAfterEachWindowFromTheLastID(t *testing.T) {
+	client, ids, mu := windows(t,
+		"data: a\nid: 1\n\ndata: b\nid: 2\n\nevent: close\ndata: {}\n\n",
+		"data: c\nid: 3\n\nevent: close\ndata: {}\n\n",
+		"data: d\nid: 4\n\n",
+	)
+	own := "0"
+	stream, err := LogsStream(context.Background(), client, LogsStreamRequest{Cursor: &own})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Stop()
+	if got := strings.Join(readData(t, stream, 4), ""); got != "abcd" {
+		t.Fatal(got)
+	}
+	if _, err := stream.Next(); err != io.EOF {
+		t.Fatal("an answer without close ends it:", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(*ids, ",") != "0,2,3" || stream.Cursor() != "4" {
+		t.Fatal(*ids, stream.Cursor())
+	}
+}
+
+func TestStreamStopsReconnecting(t *testing.T) {
+	client, ids, mu := windows(t, "data: a\nid: 1\n\nevent: close\ndata: {}\n\n")
+	stream, err := LogsStream(context.Background(), client, LogsStreamRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	readData(t, stream, 1)
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		stream.Stop()
+	}()
+	if _, err := stream.Next(); err != io.EOF {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(*ids) != 2 {
+		t.Fatal("reconnected after Stop:", *ids)
+	}
+}
+
+func TestStreamBacksOffOnErrorsAndEndsOnARefusal(t *testing.T) {
+	client, ids, mu := windows(t,
+		"data: a\nid: 1\n\nevent: close\ndata: {}\n\n",
+		"503", "503",
+		"data: b\nid: 2\n\nevent: close\ndata: {}\n\n",
+		"401",
+	)
+	stream, err := LogsStream(context.Background(), client, LogsStreamRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if got := strings.Join(readData(t, stream, 2), ""); got != "ab" {
+		t.Fatal(got)
+	}
+	if waited := time.Since(started); waited < 3*time.Millisecond {
+		t.Fatal("no backoff:", waited)
+	}
+	_, err = stream.Next()
+	var refused *APIError
+	if !errors.As(err, &refused) || refused.Status != 401 {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(); err != io.EOF {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(*ids, ",") != ",1,1,1,2" {
+		t.Fatal(*ids)
+	}
+}

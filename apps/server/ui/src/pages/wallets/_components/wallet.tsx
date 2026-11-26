@@ -22,7 +22,16 @@ import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
-import { call, client, type Movement, type Wallet as Account } from '@/api/client';
+import {
+  walletGet,
+  walletIndexLegsList,
+  walletIndexUpdate,
+  walletTagAdd,
+  walletTagRemove,
+  type Movement,
+  type Wallet as Account,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import { Address } from '@/_components/address';
 import { Currencies, Currency } from '@/_components/currency';
 import { format } from '@/_components/format';
@@ -138,12 +147,8 @@ export function Wallet({
   const [sendOpen, setSendOpen] = useState(false);
 
   const refresh = useCallback(() => {
-    const id = { path: { id: wallet.id } };
-    call(client.GET('/v1/wallets/{id}', { params: id }))
-      .then(setFresh)
-      .catch(shell.fail);
-    const index = { path: { id: wallet.id, asset } };
-    call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params: index }))
+    walletGet(api, { id: wallet.id }).then(setFresh).catch(shell.fail);
+    walletIndexLegsList(api, { id: wallet.id, asset })
       .then((page) => {
         setLegs(page.legs);
         setLegsCursor(page.next_cursor ?? null);
@@ -160,11 +165,7 @@ export function Wallet({
 
   const olderLegs = () => {
     if (legsCursor === null) return;
-    const params = {
-      path: { id: wallet.id, asset },
-      query: { cursor: legsCursor },
-    };
-    call(client.GET('/v1/wallets/{id}/indexes/{asset}/legs', { params }))
+    walletIndexLegsList(api, { id: wallet.id, asset, cursor: legsCursor })
       .then((page) => {
         setLegs((current) => [...current, ...page.legs]);
         setLegsCursor(page.next_cursor ?? null);
@@ -222,15 +223,10 @@ export function Wallet({
     const index_state = halt ? 'indexing' : 'paused';
     Promise.all(
       Object.values(wallet.indexes).map(({ asset }) =>
-        call(
-          client.PATCH('/v1/wallets/{id}/indexes/{asset}', {
-            params: { path: { id: wallet.id, asset } },
-            body: { index_state },
-          }),
-        ),
+        walletIndexUpdate(api, { id: wallet.id, asset, body: { index_state } }),
       ),
     )
-      .then(() => call(client.GET('/v1/wallets/{id}', { params: { path: { id: wallet.id } } })))
+      .then(() => walletGet(api, { id: wallet.id }))
       .then((changed) => {
         shell.notify(halt ? 'Indexing resumed.' : 'Indexing paused.');
         onWatched(changed);
@@ -470,12 +466,12 @@ function Tags({
   onTagged: () => void;
 }) {
   const [text, setText] = useState('');
-  const params = (tag: string) => ({ params: { path: { id: wallet.id, tag } } });
+  const params = (tag: string) => ({ id: wallet.id, tag });
   const add = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
     const tag = text.trim().toLowerCase();
     if (tag === '') return;
-    call(client.PUT('/v1/wallets/{id}/tags/{tag}', params(tag)))
+    walletTagAdd(api, params(tag))
       .then(() => {
         setText('');
         onClose();
@@ -484,9 +480,7 @@ function Tags({
       .catch(shell.fail);
   };
   const remove = (tag: string) => {
-    call(client.DELETE('/v1/wallets/{id}/tags/{tag}', params(tag)))
-      .then(onTagged)
-      .catch(shell.fail);
+    walletTagRemove(api, params(tag)).then(onTagged).catch(shell.fail);
   };
   return (
     <>

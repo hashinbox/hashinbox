@@ -45,6 +45,34 @@ async fn text(router: &Router, uri: &str) -> (StatusCode, String) {
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// The status and the events (name, data, id) of `GET uri`, read to its
+/// end, sent with each of `headers`.
+async fn events(
+    router: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, Vec<(String, String, String)>) {
+    let mut request = Request::builder().uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.body(Body::empty()).expect("a request");
+    let response = router.clone().oneshot(request).await.expect("a response");
+    let status = response.status();
+    let bytes = response.into_body().collect().await.expect("a body");
+    let text = String::from_utf8_lossy(&bytes.to_bytes()).into_owned();
+    let events = text.split("\n\n").filter(|block| !block.is_empty());
+    let events = events.map(|block| {
+        let field = |name: &str| {
+            let value = block.lines().find_map(|line| line.strip_prefix(name));
+            value.unwrap_or_default().to_owned()
+        };
+        (field("event: "), field("data: "), field("id: "))
+    });
+    let events = events.filter(|(_, data, _)| !data.is_empty() || status != StatusCode::OK);
+    (status, events.collect())
+}
+
 async fn call(
     router: &Router,
     method: Method,
@@ -115,6 +143,8 @@ async fn wallets_balance_legs_and_sends() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -401,6 +431,8 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -530,6 +562,8 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -590,10 +624,21 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
     let found = events
         .split("\n\n")
         .find(|event| event.starts_with("event: found"))
-        .and_then(|event| event.split("data: ").nth(1))
+        .and_then(|event| event.lines().find_map(|line| line.strip_prefix("data: ")))
         .and_then(|data| serde_json::from_str::<Value>(data).ok())
         .unwrap_or_default();
     assert_eq!(found["position"], 49, "{events}");
+    // Asked again after its last probe: the same search, its last step only.
+    let (_, steps) = self::events(&router, &uri, &[]).await;
+    let probed = (steps.len() - 1).to_string();
+    let resumed = format!("{uri}&cursor={probed}");
+    let (status, rest) = self::events(&router, &resumed, &[]).await;
+    assert_eq!(status, StatusCode::OK);
+    let rest: Vec<_> = rest
+        .iter()
+        .map(|(event, _, id)| (event.as_str(), id.as_str()))
+        .collect();
+    assert_eq!(rest, [("found", steps.len().to_string().as_str())]);
     let (status, _) = text(&router, "/v1/networks/bitcoin/regtest/tip/search?at=soon").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
@@ -642,6 +687,8 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -868,6 +915,8 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -924,6 +973,8 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -963,6 +1014,8 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1059,6 +1112,8 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1185,6 +1240,8 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1244,6 +1301,8 @@ async fn app(
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2241,6 +2300,8 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2289,9 +2350,9 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
             .expect("a frame")
             .expect("its bytes");
         let event = String::from_utf8_lossy(frame.data_ref().expect("data")).into_owned();
-        let data = event.strip_prefix("data: ");
+        let data = event.lines().find_map(|line| line.strip_prefix("data: "));
         let data = data.unwrap_or_else(|| panic!("a data line: {event}"));
-        serde_json::from_str::<Value>(data.trim_end()).expect("an entry")
+        serde_json::from_str::<Value>(data).expect("an entry")
     };
     let its = first(trigger).await;
     assert_eq!(its["message"], "The trigger's", "{its}");
@@ -2304,12 +2365,102 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         entry["message"], "Kept blocks reorged",
         "the first it reads"
     );
-    assert_eq!((&entry["id"], &entry["level"]), (&json!(0), &json!("warn")));
+    assert!(entry["id"].as_i64().unwrap_or_default() > 0, "{entry}");
+    assert_eq!(entry["level"], "warn");
     assert_eq!(
         (&entry["chain"], &entry["network"]),
         (&json!("bitcoin"), &json!("regtest"))
     );
     assert_eq!(entry["fields"]["from"], "3");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_log_stream_ends_each_window_and_resumes_after_the_last_id() {
+    let (_, db, _directory) = seeded().await;
+    let build = |feed: &crate::usecase::logs::Feed| {
+        let state = Arc::new(AppState {
+            container: container(&db, Arc::new(Script::default())),
+            db: db.clone(),
+            queue: crate::usecase::tasks::queue(db.clone()),
+            actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+            logs: feed.clone(),
+            candles: Default::default(),
+            chains: Default::default(),
+            root_exists: Default::default(),
+            searches: Default::default(),
+            stream_window: std::time::Duration::from_millis(300),
+        });
+        let config = http_server::Config::new(
+            "127.0.0.1:0".parse().expect("an address"),
+            http_server::TransportSecurity::PlaintextLoopback,
+            None,
+            http_server::RequestLimits::default(),
+        );
+        api::router(state, &config).expect("a router")
+    };
+    let feed = crate::usecase::logs::feed();
+    let router = as_root(build(&feed)).await;
+    let dispatch = subscriber(&db, feed);
+    let log = |message: &str| {
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::warn!(target: "index.reorg", "{message}");
+        });
+    };
+    let uri = "/v1/logs/stream?target=index.reorg";
+    let messages = |events: &[(String, String, String)]| {
+        let entries = events.iter().filter(|(event, ..)| event.is_empty());
+        let entries = entries.map(|(_, data, _)| serde_json::from_str::<Value>(data).unwrap());
+        entries
+            .map(|entry| entry["message"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+
+    // A window: what is kept while it is open, then `close`, then its end.
+    let open = tokio::spawn({
+        let router = router.clone();
+        async move { events(&router, uri, &[]).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    log("one");
+    log("two");
+    let (status, first) = open.await.expect("the window");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(messages(&first), ["one", "two"], "{first:?}");
+    let close = first.last().expect("a close");
+    assert_eq!((close.0.as_str(), close.1.as_str()), ("close", "{}"));
+    let one = first[0].2.clone();
+    assert!(one.parse::<i64>().unwrap() > 0, "an id: {first:?}");
+
+    // Kept while no reader: the next window, resumed after "one", sends
+    // "two" and "three" first, none twice.
+    log("three");
+    let (_, second) = events(&router, &format!("{uri}&cursor={one}"), &[]).await;
+    assert_eq!(messages(&second), ["two", "three"], "{second:?}");
+    let three = second[1].2.clone();
+    let (status, _) = events(&router, &format!("{uri}&cursor=x"), &[]).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The token is checked on every reconnect.
+    let refused = [("authorization", "Bearer nope")];
+    let (status, _) = events(&router, &format!("{uri}&cursor={three}"), &refused).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // After a restart (a new feed, holding none), they are read stored.
+    for _ in 0..50 {
+        let (_, listed) = call(&router, Method::GET, "/v1/logs?target=index.reorg", None).await;
+        if listed["logs"].as_array().map_or(0, Vec::len) == 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let restarted = build(&crate::usecase::logs::feed());
+    let login =
+        json!({"email": super::support::ROOT_EMAIL, "password": super::support::ROOT_PASSWORD});
+    let (_, issued) = call(&restarted, Method::POST, "/v1/session", Some(login)).await;
+    let bearer = format!("Bearer {}", issued["token"].as_str().expect("a token"));
+    let resumed = [("authorization", bearer.as_str())];
+    let (_, again) = events(&restarted, &format!("{uri}&cursor={one}"), &resumed).await;
+    assert_eq!(messages(&again), ["two", "three"], "{again:?}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2377,6 +2528,8 @@ async fn markets_list_set_read_candles_and_log() {
         candles: candles.clone(),
         chains: Default::default(),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2520,6 +2673,8 @@ async fn a_network_is_created_live_its_node_tested_and_added() {
                 .with::<chain_ethereum::Info, chain_ethereum::Factory>(),
         ),
         root_exists: Default::default(),
+        searches: Default::default(),
+        stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),

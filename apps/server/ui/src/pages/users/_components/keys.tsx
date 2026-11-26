@@ -10,7 +10,15 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
-import { ApiError, call, client, keyPath, type Schemas, type UserKey } from '@/api/client';
+import {
+  keyRevoke,
+  keyRotate,
+  keysCreate,
+  keysList,
+  type CreatedKey,
+  type UserKey,
+} from '@hashinbox/client';
+import { ApiError, api, keyPath } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { Dot } from '@/_components/dot';
 import { When } from '@/_components/when';
@@ -29,8 +37,7 @@ async function allKeys(): Promise<UserKey[]> {
   const keys: UserKey[] = [];
   let cursor: string | undefined;
   do {
-    const query = { limit: 500, ...(cursor !== undefined && { cursor }) };
-    const page = await call(client.GET('/v1/user/keys', { params: { query } }));
+    const page = await keysList(api, { limit: 500, ...(cursor !== undefined && { cursor }) });
     keys.push(...page.keys);
     cursor = page.next_cursor ?? undefined;
   } while (cursor !== undefined);
@@ -60,7 +67,7 @@ export function Keys({
   const [keys, setKeys] = useState<UserKey[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [created, setCreated] = useState<Schemas['CreatedKey'] | null>(null);
+  const [created, setCreated] = useState<CreatedKey | null>(null);
   const [rotating, setRotating] = useState<UserKey | null>(null);
   const [revoking, setRevoking] = useState<UserKey | null>(null);
   const [now] = useState(Date.now);
@@ -81,7 +88,7 @@ export function Keys({
 
   const rotate = (key: UserKey) => {
     setRotating(null);
-    call(client.POST('/v1/user/keys/{id}/rotate', { params: { path: { id: keyPath(key.id) } } }))
+    keyRotate(api, { id: keyPath(key.id) })
       .then(() => {
         shell.notify(`${key.name} rotated: its sessions until now end.`);
         refresh();
@@ -91,7 +98,7 @@ export function Keys({
 
   const revoke = (key: UserKey) => {
     setRevoking(null);
-    call(client.DELETE('/v1/user/keys/{id}', { params: { path: { id: keyPath(key.id) } } }))
+    keyRevoke(api, { id: keyPath(key.id) })
       .then(() => {
         shell.notify(`${key.name} revoked.`);
         refresh();
@@ -212,7 +219,7 @@ function Create({
   resources: Resources;
   held: string[];
   onClose: () => void;
-  onCreated: (created: Schemas['CreatedKey']) => void;
+  onCreated: (created: CreatedKey) => void;
 }) {
   const [name, setName] = useState('');
   const [scopes, setScopes] = useState(held);
@@ -229,7 +236,7 @@ function Create({
       scopes: pack(scopes),
       ...(days > 0 && { expires_at: Date.now() + days * DAY_MS }),
     };
-    call(client.POST('/v1/user/keys', { body }))
+    keysCreate(api, { body })
       .then(onCreated)
       .catch((error: unknown) => setProblem(error instanceof Error ? error.message : String(error)))
       .finally(() => setBusy(false));
@@ -283,7 +290,7 @@ function Secret({
   shell,
   onClose,
 }: {
-  created: Schemas['CreatedKey'] | null;
+  created: CreatedKey | null;
   shell: Shell;
   onClose: () => void;
 }) {

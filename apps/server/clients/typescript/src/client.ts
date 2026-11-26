@@ -33,7 +33,7 @@ export interface Operation {
 export interface RawEvent {
   event: string;
   data: string;
-  id?: string;
+  id?: string | undefined;
 }
 
 /** What holds scopes: a `Session`'s or a key's `Scopes`. */
@@ -59,7 +59,28 @@ export interface Streamer {
     operation: Operation,
     request: object,
     signal?: AbortSignal,
-  ): AsyncIterable<E>;
+  ): EventStream<E>;
+}
+
+/**
+ * A stream's events across its windows: the server ends each answer after
+ * a window (15 s) with `event: close`, and the stream reconnects at once
+ * with the last `id` it read as `cursor`; after a failed connect
+ * (a network error, a 5xx or 429) it tries again after a backoff. It
+ * reconnects until `stop()` (or its `signal`), an answer that ends without
+ * `close` (the stream is done), or another error (thrown).
+ */
+export interface EventStream<E> extends AsyncIterable<E> {
+  /** The last `id` read, sent as `cursor` on a reconnect. */
+  readonly cursor: string | undefined;
+  /** Ends it for good: the answer read now is dropped, no reconnect. */
+  stop(): void;
+}
+
+/** The wait after a failed connect: `initial` ms, doubled each time up to `max`. */
+export interface Backoff {
+  initial: number;
+  max: number;
 }
 
 /**
@@ -160,14 +181,122 @@ export async function* events<E>(
   raw: AsyncIterable<RawEvent>,
 ): AsyncIterable<E> {
   for await (const event of raw) {
-    if (!operation.events) {
-      yield event as E;
-    } else if (operation.events.includes(event.event)) {
-      yield {
-        event: event.event,
-        data: JSON.parse(event.data) as unknown,
-        id: event.id,
-      } as E;
+    const typed = typedEvent<E>(operation, event);
+    if (typed !== undefined) yield typed;
+  }
+}
+
+/** `event` typed by `operation.events`: undefined for one it does not name. */
+function typedEvent<E>(operation: Operation, event: RawEvent): E | undefined {
+  if (!operation.events) return event as E;
+  if (!operation.events.includes(event.event)) return undefined;
+  return {
+    event: event.event,
+    data: JSON.parse(event.data) as unknown,
+    id: event.id,
+  } as E;
+}
+
+/** Whether a failed connect is tried again: a network error, a 5xx or a 429. */
+function retried(error: unknown): boolean {
+  if (error instanceof MissingScope) return false;
+  if (!(error instanceof ApiError)) return true;
+  return error.status >= 500 || error.status === 429;
+}
+
+/** Waits `ms`, or until `signal` aborts. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
+
+/** The default `Backoff`: half a second, up to 8. */
+const BACKOFF: Backoff = { initial: 500, max: 8000 };
+
+/** One window's answer body, from `cursor` on; null: none. */
+type Connect = (
+  cursor: string | undefined,
+  signal: AbortSignal,
+) => Promise<ReadableStream<Uint8Array> | null>;
+
+/** An `EventStream` over `connect`: one answer's body per window. */
+class Reconnecting<E> implements EventStream<E> {
+  #cursor: string | undefined;
+  readonly #stopped = new AbortController();
+  readonly #signal: AbortSignal;
+  readonly operation: Operation;
+  readonly connect: Connect;
+  readonly backoff: Backoff;
+
+  constructor(
+    operation: Operation,
+    connect: Connect,
+    backoff: Backoff,
+    signal?: AbortSignal,
+  ) {
+    this.operation = operation;
+    this.connect = connect;
+    this.backoff = backoff;
+    this.#signal = signal
+      ? AbortSignal.any([signal, this.#stopped.signal])
+      : this.#stopped.signal;
+  }
+
+  get cursor(): string | undefined {
+    return this.#cursor;
+  }
+
+  stop(): void {
+    this.#stopped.abort();
+  }
+
+  async *[Symbol.asyncIterator](): AsyncIterator<E> {
+    const signal = this.#signal;
+    let wait = this.backoff.initial;
+    try {
+      while (!signal.aborted) {
+        let body: ReadableStream<Uint8Array> | null;
+        try {
+          body = await this.connect(this.#cursor, signal);
+        } catch (error) {
+          if (signal.aborted) return;
+          if (!retried(error)) throw error;
+          await pause(wait, signal);
+          wait = Math.min(wait * 2, this.backoff.max);
+          continue;
+        }
+        wait = this.backoff.initial;
+        if (!body) return;
+        let closed = false;
+        try {
+          for await (const event of readEvents(body)) {
+            if (event.id !== undefined) this.#cursor = event.id;
+            if (event.event === "close") closed = true;
+            const typed = closed
+              ? undefined
+              : typedEvent<E>(this.operation, event);
+            if (typed !== undefined) yield typed;
+          }
+        } catch (error) {
+          if (signal.aborted) return;
+          if (!retried(error)) throw error;
+          await pause(wait, signal);
+          wait = Math.min(wait * 2, this.backoff.max);
+          continue;
+        }
+        if (!closed) return;
+      }
+    } finally {
+      this.stop();
     }
   }
 }
@@ -194,6 +323,8 @@ export interface ClientOptions {
   fetch?: typeof fetch;
   /** Milliseconds a call may take (a stream: until it answers); none by default. */
   timeout?: number;
+  /** A stream's wait after a failed connect: 500 ms doubling up to 8 s by default. */
+  backoff?: Backoff;
   /** Called with each new session (a login, a self-signed one), and `undefined` once it is dropped. */
   onSession?: (session: Session | undefined) => void;
   /** Called when the server refuses the session sent (a 401 other than wrong input). */
@@ -264,25 +395,36 @@ export class HashinboxClient implements Client, Streamer {
     operation: Operation,
     request: object,
     signal?: AbortSignal,
-  ): AsyncIterable<E> {
+  ): EventStream<E> {
     return this.stream<E>(operation, request, signal);
   }
 
-  /** `operation`'s server-sent events: raw, or typed by `operation.events`; ends with the stream or `signal`. */
-  async *stream<E = RawEvent>(
+  /**
+   * `operation`'s server-sent events, raw or typed by `operation.events`,
+   * window after window (see `EventStream`) until `stop()`, `signal`, or
+   * the stream's end.
+   */
+  stream<E = RawEvent>(
     operation: Operation,
     request: object = {},
     signal?: AbortSignal,
-  ): AsyncIterable<E> {
-    const { response, done } = await this.#exchange(
-      operation,
-      request,
-      signal,
-      "text/event-stream",
-    );
-    done();
-    if (!response.body) return;
-    yield* events<E>(operation, readEvents(response.body));
+  ): EventStream<E> {
+    const connect = async (
+      cursor: string | undefined,
+      stopped: AbortSignal,
+    ) => {
+      const from = cursor === undefined ? request : { ...request, cursor };
+      const { response, done } = await this.#exchange(
+        operation,
+        from,
+        stopped,
+        "text/event-stream",
+      );
+      done();
+      return response.body;
+    };
+    const backoff = this.#options.backoff ?? BACKOFF;
+    return new Reconnecting<E>(operation, connect, backoff, signal);
   }
 
   /**
@@ -415,7 +557,7 @@ export class HashinboxClient implements Client, Streamer {
       const response = await (this.#options.fetch ?? fetch)(url, {
         method: operation.method,
         headers,
-        body: json,
+        body: json ?? null,
         signal: AbortSignal.any(signals),
       });
       return { response, done };
@@ -469,7 +611,9 @@ async function* readEvents(
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let event: { event?: string; data: string[]; id?: string } = { data: [] };
+  let event: { event?: string; data: string[]; id?: string | undefined } = {
+    data: [],
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();

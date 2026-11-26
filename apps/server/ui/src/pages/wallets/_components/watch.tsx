@@ -16,7 +16,7 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import type { Listing, Wallet } from '@/api/client';
+import type { Listing, Wallet } from '@hashinbox/client';
 import type { Shell } from '@/layout';
 import { SearchDialog } from './search';
 import { WATCH_NOTHING, watch, type Watching } from './watching';

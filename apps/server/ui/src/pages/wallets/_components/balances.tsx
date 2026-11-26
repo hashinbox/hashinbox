@@ -2,7 +2,7 @@ import InfoOutlined from '@mui/icons-material/InfoOutlined';
 import Box from '@mui/material/Box';
 import Tooltip from '@mui/material/Tooltip';
 import type { ReactNode } from 'react';
-import type { Wallet } from '@/api/client';
+import type { Wallet } from '@hashinbox/client';
 import { format } from '@/_components/format';
 import { mono } from '@/theme';
 

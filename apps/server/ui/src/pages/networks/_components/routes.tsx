@@ -6,11 +6,14 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import { call, client, type ConfiguredNetwork, type Schemas } from '@/api/client';
+import {
+  networkRoutesReplace,
+  type ConfiguredNetwork,
+  type RpcRoute as Route,
+} from '@hashinbox/client';
+import { api } from '@/api/client';
 import type { Shell } from '@/layout';
 import { mono } from '@/theme';
-
-type Route = Schemas['RpcRoute'];
 
 /**
  * A network's routed methods: each goes round robin over its own nodes;
@@ -36,8 +39,7 @@ export function Routes({
 
   const save = (routes: Route[], done: string) => {
     setBusy(true);
-    const params = { path: { chain: network.chain, network: network.network } };
-    call(client.PUT('/v1/networks/{chain}/{network}/routes', { params, body: { routes } }))
+    networkRoutesReplace(api, { chain: network.chain, network: network.network, body: { routes } })
       .then(() => {
         shell.notify(done);
         setMethod('');

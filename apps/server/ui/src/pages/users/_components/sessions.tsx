@@ -1,6 +1,7 @@
 import Button from '@mui/material/Button';
 import { useEffect, useState } from 'react';
-import { call, client, type Schemas } from '@/api/client';
+import { sessionGet, type SessionRead } from '@hashinbox/client';
+import { api } from '@/api/client';
 import { When } from '@/_components/when';
 import type { Shell } from '@/layout';
 import { ScopeList } from './picker';
@@ -15,10 +16,10 @@ export function Sessions({
   shell: Shell;
   onLogout: (everywhere: boolean) => void;
 }) {
-  const [session, setSession] = useState<Schemas['SessionRead'] | null>(null);
+  const [session, setSession] = useState<SessionRead | null>(null);
 
   useEffect(() => {
-    call(client.GET('/v1/session')).then(setSession).catch(shell.fail);
+    sessionGet(api).then(setSession).catch(shell.fail);
   }, [shell.fail]);
 
   return (

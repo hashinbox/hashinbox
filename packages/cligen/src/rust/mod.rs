@@ -408,7 +408,7 @@ impl Rust {
                 func
             }
             Some(_) => {
-                let ret = format!("Result<Events<{output}, S::Error>, Error<S::Error>>");
+                let ret = format!("Result<Events<'_, {output}, S>, Error<S::Error>>");
                 let mut func = Fn::new(
                     &format!("{call}<S: Streamer>"),
                     &["streamer: &S", &format!("request: {request}")],

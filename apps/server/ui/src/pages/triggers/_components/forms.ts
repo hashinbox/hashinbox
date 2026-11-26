@@ -1,6 +1,6 @@
 // A trigger as the API writes it (the server's `models::trigger`), the
 // one-line summaries the editor shows for each part, and templates.
-import type { Wallet } from '@/api/client';
+import type { Wallet } from '@hashinbox/client';
 
 /** A selector leaf: wallet indexes by id, by asset, or by tag. */
 export type Pick =

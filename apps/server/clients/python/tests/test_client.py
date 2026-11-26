@@ -1,3 +1,4 @@
+import itertools
 import json
 import time
 from collections.abc import Callable
@@ -189,3 +190,71 @@ async def test_a_stream_yields_its_events() -> None:
         typed = [event async for event in api.stream(LogsStreamRequest())]
     assert [event.event for event in raw] == ["message", "missed"]
     assert [event.data for event in typed] == [{"id": 0}, {"missed": 2}]
+
+
+CLOSE = b"event: close\ndata: {}\nretry: 0\n\n"
+
+
+def entries(*ids: int) -> bytes:
+    return b"".join(f'data: {{"n": {n}}}\nid: {n}\n\n'.encode() for n in ids)
+
+
+async def test_a_stream_reconnects_each_window_after_its_last_event() -> None:
+    answers = [entries(1, 2) + CLOSE, entries(3) + CLOSE, entries(4)]
+    sent: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert "Last-Event-ID" not in request.headers
+        sent.append(request.url.params.get("cursor"))
+        return httpx.Response(200, content=answers.pop(0))
+
+    async with client(handler) as api:
+        handle = logs_stream(api, LogsStreamRequest(cursor="0"))
+        read = [json.loads(event.data)["n"] async for event in handle]
+    assert read == [1, 2, 3, 4]
+    assert sent == ["0", "2", "3"], "the caller's own cursor first"
+    assert handle.cursor == "4"
+
+
+async def test_stop_ends_a_stream_for_good() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, content=entries(calls) + CLOSE)
+
+    async with client(handler) as api:
+        read = []
+        async with api.stream(LogsStreamRequest()) as handle:
+            async for event in handle:
+                read.append(event.data["n"])
+                if len(read) == 2:
+                    await handle.stop()
+    assert read == [1, 2]
+    assert calls == 2
+
+
+async def test_a_failed_connect_backs_off_and_a_refused_one_raises() -> None:
+    answers = [
+        httpx.Response(503, json={"kind": "unavailable", "message": "down"}),
+        httpx.Response(503, json={"kind": "unavailable", "message": "down"}),
+        httpx.Response(200, content=entries(1) + CLOSE),
+        httpx.Response(401, json={"kind": "unauthenticated", "message": "no"}),
+    ]
+    at: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        at.append(time.monotonic())
+        return answers.pop(0)
+
+    read = []
+    async with client(handler, backoff=0.05, max_backoff=0.08) as api:
+        with pytest.raises(ApiError) as refused:
+            async for event in logs_stream(api, LogsStreamRequest()):
+                read.append(event.id)
+    assert read == ["1"]
+    assert refused.value.status == 401
+    waits = [later - earlier for earlier, later in itertools.pairwise(at)]
+    assert waits[0] >= 0.05 and waits[1] >= 0.08, waits
+    assert waits[2] < 0.05, "a window's close reconnects at once"

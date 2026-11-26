@@ -61,8 +61,9 @@ impl Php {
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut items, op, &json));
-        let uses = if spec.operations.iter().any(|op| op.events.is_some()) {
-            vec![Use("Generator".to_owned())]
+        let typed = |op: &Operation| op.events.as_ref().is_some_and(|events| !events.is_empty());
+        let uses = if spec.operations.iter().any(typed) {
+            vec![Use("Closure".to_owned())]
         } else {
             Vec::new()
         };
@@ -339,8 +340,8 @@ impl Php {
                 func
             }
             Some(events) if events.is_empty() => {
-                doc = doc.tag("@return Generator<int, RawEvent, mixed, void>");
-                let mut func = Method::function(&call, &params, "Generator", doc);
+                doc = doc.tag("@return Stream<RawEvent>");
+                let mut func = Method::function(&call, &params, "Stream", doc);
                 func.line("return $client->open($request);");
                 func
             }
@@ -351,7 +352,7 @@ impl Php {
                     types.push(format!("Event<{}>", json.ty(ty).doc()));
                     let data = json.decode(ty, "Json::decode($raw->data)");
                     let event = Value::call(
-                        "yield new Event",
+                        "return new Event",
                         vec![Value::text("$raw->event"), data, Value::text("$raw->id")],
                     );
                     arms.push((
@@ -359,15 +360,17 @@ impl Php {
                         vec![Body::Value(event.suffix(";"))],
                     ));
                 }
-                doc = doc.tag(format!(
-                    "@return Generator<int, {}, mixed, void>",
-                    types.join("|")
+                let types = types.join("|");
+                doc = doc.tag(format!("@return Stream<{types}>"));
+                let mut func = Method::function(&call, &params, "Stream", doc);
+                func.line(format!(
+                    "/** @var Closure(RawEvent): ({types}|null) $decode */"
                 ));
-                let mut func = Method::function(&call, &params, "Generator", doc);
-                func.push(Body::Block(
-                    "foreach ($client->open($request) as $raw)".to_owned(),
-                    vec![Body::If(arms)],
+                func.push(Body::Closure(
+                    "$decode = static function (RawEvent $raw): ?Event".to_owned(),
+                    vec![Body::If(arms), Body::Line("return null;".to_owned())],
                 ));
+                func.line("return $client->open($request, $decode);");
                 func
             }
         };
