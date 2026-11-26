@@ -38,14 +38,11 @@ HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"change
 
 ```bash
 docker run -p 8080:8080 -v hashinbox:/data ghcr.io/hashinbox/hashinbox:latest
-# with a preset first account
-docker run -p 8080:8080 -v hashinbox:/data \
-  -e HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"change-me"}}' \
-  ghcr.io/hashinbox/hashinbox:latest
 ```
 
-The image serves plain HTTP: put a TLS-terminating proxy (Caddy, Traefik, a load balancer) in
-front, never expose port 8080 to the internet.
+All data lives in the database `/data/hashinbox.db`, inside the volume `hashinbox`. Keep the
+`-v hashinbox:/data`: without it, removing the container deletes the database, wallets and keys
+included. Back up the volume, not the container.
 
 ## Options
 
