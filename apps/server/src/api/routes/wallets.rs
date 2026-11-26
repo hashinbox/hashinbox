@@ -40,7 +40,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 /// `address`, the address is watched without a key; with neither, a new key
 /// is generated and kept.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = CreateWallet)]
+#[schema(as = CreateWalletRequest)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     /// Chain name, as `GET /v1/assets` lists it.
@@ -90,7 +90,7 @@ impl CreateRequest {
 #[scope::utoipa(
     post,
     path = "/v1/wallets",
-    operation_id = "create_wallet",
+    operation_id = "wallets_create",
     summary = "Import a wallet's key, watch an address, or generate a wallet, in one configured network",
     description = "With `secret`, imports a raw private key and keeps it; with `address` too, \
         the key must derive that address. With `address` alone, watches it without its key. \
@@ -142,7 +142,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/wallets",
-    operation_id = "list_wallets",
+    operation_id = "wallets_list",
     summary = "List the wallets",
     description = "Keyed wallets and watched addresses, a page in wallet ID order, each with \
         its tags and its indexes: their balances (exact atomic units), progress and legs. A \
@@ -184,7 +184,7 @@ pub(super) struct WalletPath {
 #[scope::utoipa(
     get,
     path = "/v1/wallets/{id}",
-    operation_id = "read_wallet",
+    operation_id = "wallet_get",
     summary = "Read one wallet's public metadata",
     description = "The wallet's network, canonical address, whether it is keyed, the assets \
         it is indexed in and how far each is; never its key.",

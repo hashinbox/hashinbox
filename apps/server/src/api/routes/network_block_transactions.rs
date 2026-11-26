@@ -42,7 +42,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/blocks/{position}/transactions",
-    operation_id = "list_block_transactions",
+    operation_id = "network_block_transactions_list",
     summary = "List a live block's kept transactions",
     params(BlockPath, IndexParams),
     responses(

@@ -93,7 +93,7 @@ struct SendResponse {
 #[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/transactions",
-    operation_id = "send_payment",
+    operation_id = "wallet_payment_send",
     summary = "Enqueue a payment from a wallet",
     description = "Enqueues one send job of `asset` from the keyed wallet: one payment, signed \
         as one transaction and broadcast. Several payments are several requests; a wallet's \

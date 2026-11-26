@@ -41,7 +41,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/wallets/tags",
-    operation_id = "list_tags",
+    operation_id = "tags_list",
     summary = "List the tags in use",
     params(IndexParams),
     responses(
@@ -82,7 +82,7 @@ struct TagPath {
 #[scope::utoipa(
     put,
     path = "/v1/wallets/{id}/tags/{tag}",
-    operation_id = "add_wallet_tag",
+    operation_id = "wallet_tag_add",
     summary = "Tag a wallet",
     description = "Tags the wallet, keyed or watch-only; tagging twice keeps one tag.",
     params(TagPath),
@@ -111,7 +111,7 @@ async fn add(
 #[scope::utoipa(
     delete,
     path = "/v1/wallets/{id}/tags/{tag}",
-    operation_id = "remove_wallet_tag",
+    operation_id = "wallet_tag_remove",
     summary = "Untag a wallet",
     description = "Removes the tag from the wallet.",
     params(TagPath),

@@ -35,7 +35,7 @@ struct ReadResponse {
 #[utoipa::path(
     get,
     path = "/v1/version",
-    operation_id = "read_version",
+    operation_id = "version_get",
     summary = "Read the server's version",
     description = "Public: the version this server was built as, `missing_root` while no \
         user exists (`POST /v1/users` creates the root) and every public setting's value. \

@@ -61,6 +61,10 @@ utoipa-axum = "=0.2.0"
 url = "=2.5.8"
 zeroize.workspace = true
 
+[build-dependencies]
+# The clients' models and operations, from docs/openapi.json.
+cligen = { path = "../../packages/cligen" }
+
 [dev-dependencies]
 # The mock chains and nodes the suite (`tests/support`, `tests/cases`) runs over.
 base = { path = "../../sdk/base", features = ["testing"] }

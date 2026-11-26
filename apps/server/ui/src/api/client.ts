@@ -29,6 +29,7 @@ export class ApiError extends Error {
     readonly status: number,
     message: string,
     readonly code?: string,
+    readonly metadata?: Record<string, string>,
   ) {
     super(message);
   }
@@ -89,7 +90,13 @@ export async function call<T>(
   const { data, error, response } = await request;
   if (response.ok) return data as T;
   const message = field(error, 'message') ?? `${response.status} ${response.statusText}`;
-  throw new ApiError(response.status, message, field(error, 'reason') ?? field(error, 'code'));
+  const metadata = (error as { metadata?: Record<string, string> } | undefined)?.metadata;
+  throw new ApiError(
+    response.status,
+    message,
+    field(error, 'reason') ?? field(error, 'code'),
+    metadata,
+  );
 }
 
 /** A key's id as its routes take it: without `hip/`. */

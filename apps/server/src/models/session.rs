@@ -350,6 +350,83 @@ mod tests {
         assert!(Session::from_jwt(&sign(Algorithm::HS384), 1000).is_err());
     }
 
+    /// The signing vectors the clients read
+    /// (`apps/server/clients/_golden/session.json`): a fixed key secret and
+    /// claims, and the exact JWT this server makes of them. Fails when the
+    /// file is stale; `BLESS=1` rewrites it.
+    #[test]
+    fn signing_vectors_are_current() {
+        let mut bytes: Vec<u8> = (1..=32).collect();
+        bytes.extend(crypto::crc32(&bytes).to_be_bytes());
+        let secret = format!("his/{}", crypto::base58::encode(&bytes));
+        assert!(KeySecret::parse(&secret).is_some());
+        let id = format!("hip/{}", crypto::base58::encode(&[7; 16]));
+        let session = |client: Client,
+                       sub: Option<&str>,
+                       text: &str,
+                       ttl: i64,
+                       jti: Option<&str>,
+                       amr: Vec<Amr>| Session {
+            client,
+            sub: sub.map(str::to_owned),
+            scopes: scopes(text),
+            issued_at: 1_700_000_000,
+            expires_at: 1_700_000_000 + ttl,
+            id: jti.map(str::to_owned),
+            amr,
+            jwt: None,
+        };
+        let key = |sub: Option<&str>, text: &str, ttl: i64| {
+            let made = session(Client::Key(id.clone()), sub, text, ttl, None, Vec::new());
+            serde_json::json!({
+                "sub": sub,
+                "scopes": text,
+                "iat": made.issued_at,
+                "exp": made.expires_at,
+                "token": made.to_jwt(secret.as_bytes()),
+            })
+        };
+        let user = session(
+            Client::User("0193a".to_owned()),
+            Some("0193a"),
+            "com.hashinbox.*.$* 123.a.$read",
+            3600,
+            Some("0193b"),
+            vec![Amr::Pwd, Amr::Otp],
+        );
+        let vectors = serde_json::json!({
+            "id": id,
+            "secret": secret,
+            "sessions": [
+                key(None, "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read", 900),
+                key(
+                    Some("customer-1"),
+                    "com.hashinbox.wallets[a,b%5D%20c%25d].$read com.hashinbox.markets.$read \
+                     com.hashinbox.wallets[é].legs.$read other.thing.$write 123.a.$read",
+                    MAX_TTL,
+                ),
+                key(Some("\"quoted\" \\ ü"), "", 60),
+            ],
+            "user": {
+                "token": user.to_jwt(b"user secret"),
+                "iss": "user/0193a",
+                "sub": "0193a",
+                "iat": user.issued_at,
+                "exp": user.expires_at,
+                "scopes": user.scopes.compress().to_string(),
+                "amr": ["pwd", "otp"],
+            },
+        });
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/clients/_golden/session.json");
+        let text = serde_json::to_string_pretty(&vectors).unwrap() + "\n";
+        if std::env::var_os("BLESS").is_some() {
+            std::fs::write(path, &text).unwrap();
+            return;
+        }
+        let kept = std::fs::read_to_string(path).unwrap_or_default();
+        assert!(kept == text, "{path} is stale: run with BLESS=1");
+    }
+
     #[test]
     fn invalidation_refuses_sessions_issued_in_its_second_or_before() {
         let new = Session::new(Client::User("u".to_owned()), None, scopes(""), 1000, 60);

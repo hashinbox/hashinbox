@@ -72,7 +72,7 @@ impl From<Vec<Network>> for ReadResponse {
 #[utoipa::path(
     get,
     path = "/health",
-    operation_id = "read_health",
+    operation_id = "health_get",
     summary = "Read readiness and every indexed network's indexing",
     description = "Public readiness: ready when at least one network has an index, every \
         indexed network has an enabled RPC node, and no network's index job has a reason \

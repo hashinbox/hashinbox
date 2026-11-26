@@ -56,7 +56,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/triggers",
-    operation_id = "list_triggers",
+    operation_id = "triggers_list",
     summary = "List triggers",
     params(IndexParams),
     responses(
@@ -146,7 +146,7 @@ struct CreateResponse {
 #[scope::utoipa(
     post,
     path = "/v1/triggers",
-    operation_id = "create_triggers",
+    operation_id = "triggers_create",
     summary = "Create triggers",
     description = "Stores every trigger or none, all on one configured network, each with an \
         `id` chosen here that never changes: a template of several triggers (gas funding and \
@@ -192,7 +192,7 @@ struct TriggerPath {
 #[scope::utoipa(
     get,
     path = "/v1/triggers/{id}",
-    operation_id = "read_trigger",
+    operation_id = "trigger_get",
     summary = "Read a trigger",
     params(TriggerPath),
     responses(
@@ -216,7 +216,7 @@ async fn read(
 #[scope::utoipa(
     put,
     path = "/v1/triggers/{id}",
-    operation_id = "replace_trigger",
+    operation_id = "trigger_replace",
     summary = "Replace a trigger",
     description = "Replaces everything but its id and creation time; a body `id` is refused. \
         Setting `enabled` to false pauses it.",
@@ -253,7 +253,7 @@ async fn replace(
 #[scope::utoipa(
     delete,
     path = "/v1/triggers/{id}",
-    operation_id = "delete_trigger",
+    operation_id = "trigger_delete",
     summary = "Delete a trigger and its runs",
     params(TriggerPath),
     responses(
@@ -318,7 +318,7 @@ struct RunsResponse {
 #[scope::utoipa(
     get,
     path = "/v1/triggers/{id}/runs",
-    operation_id = "list_trigger_runs",
+    operation_id = "trigger_runs_list",
     summary = "List a trigger's latest runs",
     params(TriggerPath, IndexParams),
     responses(

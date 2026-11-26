@@ -86,7 +86,7 @@ struct StatsResponse {
 #[scope::utoipa(
     get,
     path = "/v1/stats",
-    operation_id = "read_stats",
+    operation_id = "stats_get",
     summary = "Read what the store holds and its last day",
     description = "Counts across every network, and per hour over the last day: blocks and \
         transactions by chain time (up to the newest kept block), jobs and trigger runs by \

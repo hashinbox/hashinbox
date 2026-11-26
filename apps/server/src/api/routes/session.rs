@@ -33,7 +33,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 /// `totp`) log in; with `Authorization: Bearer his/…`, the key's session,
 /// for `sub`.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = CreateSession)]
+#[schema(as = CreateSessionRequest)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     /// A login: the user's email.
@@ -109,7 +109,7 @@ fn bearer_secret(headers: &HeaderMap) -> Option<KeySecret> {
 #[utoipa::path(
     post,
     path = "/v1/session",
-    operation_id = "create_session",
+    operation_id = "session_create",
     summary = "Log in, or sign a key's session",
     description = "With `email` and `password` or `passphrase` (the recovery passphrase, any \
         user's email; and `totp` once two-factor is on) and no `Authorization`: a session of \
@@ -176,10 +176,12 @@ async fn create(
     ))
 }
 
+// Named apart from the error `Kind`: two schemas of one name collapse into one in the
+// OpenAPI document.
 /// Who issued a session.
 #[derive(Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
-enum Kind {
+enum Issuer {
     /// The user, at login.
     User,
     /// A key: its secret, or a session it signed.
@@ -191,7 +193,7 @@ enum Kind {
 #[schema(as = SessionRead)]
 struct ReadResponse {
     /// Who issued it.
-    kind: Kind,
+    kind: Issuer,
     /// Its user.
     user: User,
     /// Its key, when a key issued it.
@@ -216,7 +218,7 @@ struct ReadResponse {
 #[utoipa::path(
     get,
     path = "/v1/session",
-    operation_id = "read_session",
+    operation_id = "session_get",
     summary = "Read the caller's session",
     description = "The session the bearer token is, decoded and checked: its issuer, user, \
         key, scopes, times and `amr`.",
@@ -229,8 +231,8 @@ struct ReadResponse {
 )]
 async fn read(caller: Caller) -> Json<ReadResponse> {
     let kind = match caller.session.client {
-        Client::User(_) => Kind::User,
-        Client::Key(_) => Kind::Key,
+        Client::User(_) => Issuer::User,
+        Client::Key(_) => Issuer::Key,
     };
     Json(ReadResponse {
         kind,
@@ -257,7 +259,7 @@ struct DeleteQuery {
 #[utoipa::path(
     delete,
     path = "/v1/session",
-    operation_id = "delete_session",
+    operation_id = "session_delete",
     summary = "Log out",
     description = "Alone, nothing: the client forgets its token. With `all=true`, every \
         session the caller's issuer (its user, or its key) issued until now answers 401, \

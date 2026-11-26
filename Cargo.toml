@@ -15,6 +15,7 @@ members = [
     "packages/tasks",
     "packages/scope",
     "packages/scope/macro",
+    "packages/cligen",
 ]
 exclude = ["old", "reference"]
 resolver = "3"

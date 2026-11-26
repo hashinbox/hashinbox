@@ -2,6 +2,7 @@ import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { call, client, type Schemas } from '@/api/client';
+import { HashinboxMark } from '@/_components/logo';
 import { Sparkline } from '@/_components/sparkline';
 import { Stat } from '@/_components/stat';
 import type { Shell } from '@/layout';
@@ -31,12 +32,35 @@ export function Dashboard({ shell, banner }: { shell: Shell; banner?: ReactNode 
   }, [refresh]);
 
   return (
-    <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 } }}>
+    <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, position: 'relative', zIndex: 0 }}>
+      <Watermark />
       <Typography variant="h2" component="h1" sx={{ mb: 2.5 }}>
         Dashboard
       </Typography>
       {banner}
       {stats && <Cards stats={stats} />}
+    </Box>
+  );
+}
+
+/** The mark, large and faint, fixed behind the cards in the bottom-right corner. */
+function Watermark() {
+  return (
+    <Box
+      aria-hidden
+      sx={{
+        position: 'fixed',
+        right: '4vmin',
+        bottom: '4vmin',
+        width: '50vmin',
+        height: '50vmin',
+        zIndex: -1,
+        pointerEvents: 'none',
+        color: 'text.primary',
+      }}
+    >
+      {/* Faint as a whole, so the surface needs a bigger step to show: 0.08 box, 0.04 triangles. */}
+      <HashinboxMark opacity={0.08} surface={0.5} style={{ width: '100%', height: '100%' }} />
     </Box>
   );
 }

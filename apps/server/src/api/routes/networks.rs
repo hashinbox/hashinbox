@@ -64,7 +64,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks",
-    operation_id = "list_networks",
+    operation_id = "networks_list",
     summary = "List every network, its assets, its RPC nodes, its indexing and its tip",
     description = "Every stored network: its row, its assets, its routes, its nodes (each \
         URL with its calls and, while disabled, the record that disabled it: `disabled`) \
@@ -158,7 +158,7 @@ impl From<CreateRequest> for Network {
 #[scope::utoipa(
     post,
     path = "/v1/networks",
-    operation_id = "create_network",
+    operation_id = "networks_create",
     summary = "Add a network",
     description = "Stores a network and its native currency in one write, checked by its \
         chain as a start reads it, then registers it at once, with no node: add its nodes \

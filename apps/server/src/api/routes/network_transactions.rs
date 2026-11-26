@@ -51,7 +51,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/transactions",
-    operation_id = "list_network_transactions",
+    operation_id = "network_transactions_list",
     summary = "List a network's transactions, or only its pending ones",
     params(NetworkPath, ListQuery, IndexParams),
     responses(

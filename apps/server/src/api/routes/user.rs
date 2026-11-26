@@ -65,7 +65,7 @@ struct ReadResponse {
 #[utoipa::path(
     get,
     path = "/v1/user",
-    operation_id = "read_user",
+    operation_id = "own_user_get",
     summary = "Read the logged-in user",
     description = "The caller's user, its scopes and its two-factor; the calling key too, \
         when a key calls.",
@@ -94,7 +94,7 @@ async fn read(
 
 /// `PUT /v1/user` body: what changes.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = UpdateOwnUser)]
+#[schema(as = UpdateOwnUserRequest)]
 #[serde(deny_unknown_fields)]
 struct UpdateRequest {
     /// The new password, 8 characters at least; the current one is not
@@ -106,7 +106,7 @@ struct UpdateRequest {
 #[utoipa::path(
     put,
     path = "/v1/user",
-    operation_id = "update_own_user",
+    operation_id = "own_user_update",
     summary = "Change the logged-in user's password",
     description = "Sets a new password, checked as at signup; the current one is not asked, so \
         any session of the user (a passphrase login too) may. Every other session it and its \
@@ -144,7 +144,7 @@ struct StartResponse {
 #[utoipa::path(
     post,
     path = "/v1/user/2fa",
-    operation_id = "start_two_factor",
+    operation_id = "two_factor_start",
     summary = "Start two-factor",
     description = "A new TOTP secret, pending until its first code is confirmed \
         (`POST /v1/user/2fa/confirm`); starting again replaces a pending one.",
@@ -179,7 +179,7 @@ struct CodeRequest {
 #[utoipa::path(
     post,
     path = "/v1/user/2fa/confirm",
-    operation_id = "confirm_two_factor",
+    operation_id = "two_factor_confirm",
     summary = "Confirm two-factor",
     description = "Its first valid code turns two-factor on: a login needs a code from now.",
     request_body = CodeRequest,
@@ -209,7 +209,7 @@ async fn confirm_two_factor(
 #[utoipa::path(
     delete,
     path = "/v1/user/2fa",
-    operation_id = "stop_two_factor",
+    operation_id = "two_factor_stop",
     summary = "Turn two-factor off",
     description = "Needs a valid code; logs the user out everywhere.",
     request_body = CodeRequest,

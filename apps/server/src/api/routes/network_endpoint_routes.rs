@@ -39,7 +39,7 @@ struct RoutesResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/routes",
-    operation_id = "list_network_routes",
+    operation_id = "network_routes_list",
     summary = "List a network's routed methods",
     description = "Each routed method and the nodes taking turns serving it, round robin. \
         Every other method goes to the network's healthy node with the highest tip.",
@@ -80,7 +80,7 @@ struct RoutesRequest {
 #[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/routes",
-    operation_id = "replace_network_routes",
+    operation_id = "network_routes_replace",
     summary = "Replace a network's routed methods",
     description = "Stores the routes, then sends each routed method round robin over its \
         nodes, and every other method to the healthy node with the highest tip. A routed \

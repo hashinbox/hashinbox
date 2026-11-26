@@ -1,0 +1,313 @@
+package hashinbox
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// seen is what a test server was sent.
+type seen struct {
+	mu       sync.Mutex
+	requests []string // "METHOD escaped-path?query body"
+	bearers  []string
+}
+
+func (s *seen) add(r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	line := r.Method + " " + r.URL.EscapedPath()
+	if r.URL.RawQuery != "" {
+		line += "?" + r.URL.RawQuery
+	}
+	if len(body) > 0 {
+		line += " " + string(body)
+	}
+	s.requests = append(s.requests, line)
+	s.bearers = append(s.bearers, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+}
+
+// serve is a test server answering with handle, recording each request.
+func serve(t *testing.T, handle func(w http.ResponseWriter, r *http.Request, n int)) (*httptest.Server, *seen) {
+	t.Helper()
+	s := &seen{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.add(r)
+		s.mu.Lock()
+		n := len(s.requests)
+		s.mu.Unlock()
+		handle(w, r, n)
+	}))
+	t.Cleanup(server.Close)
+	return server, s
+}
+
+func answer(w http.ResponseWriter, status int, body string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	io.WriteString(w, body)
+}
+
+func TestDoFillsThePathQueryBodyAndBearer(t *testing.T) {
+	server, seen := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		switch r.URL.Path {
+		case "/openapi.json":
+			answer(w, 200, `{"openapi":"3.1.0"}`)
+		case "/v1/wallets":
+			answer(w, 200, `{"wallets":[],"next_cursor":null}`)
+		default:
+			answer(w, 201, `{"asset":"native"}`)
+		}
+	})
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[a%20b/c].$write", "com.hashinbox.wallets.$read")}
+	client := NewClient(server.URL+"/", WithSession(session))
+	ctx := context.Background()
+
+	start := int64(7)
+	index, err := WalletIndexesCreate(ctx, client, WalletIndexesCreateRequest{
+		ID:                       "a b/c",
+		CreateWalletIndexRequest: CreateWalletIndexRequest{Asset: "native", Start: &start},
+	})
+	if err != nil || index.Asset != "native" {
+		t.Fatal(index, err)
+	}
+	limit, cursor := int64(5), "x&y"
+	if _, err := WalletsList(ctx, client, WalletsListRequest{Limit: &limit, Cursor: &cursor}); err != nil {
+		t.Fatal(err)
+	}
+	document, err := OpenapiGet(ctx, client, OpenapiGetRequest{})
+	if err != nil || string(document.Value) != `{"openapi":"3.1.0"}` {
+		t.Fatal(string(document.Value), err)
+	}
+	want := []string{
+		`POST /v1/wallets/a%20b%2Fc/indexes {"asset":"native","start":7}`,
+		`GET /v1/wallets?cursor=x%26y&limit=5`,
+		`GET /openapi.json`,
+	}
+	if fmt.Sprint(seen.requests) != fmt.Sprint(want) {
+		t.Errorf("sent %q\nwant %q", seen.requests, want)
+	}
+	for _, bearer := range seen.bearers {
+		if bearer != "jwt" {
+			t.Errorf("bearer %q", bearer)
+		}
+	}
+}
+
+func TestDoMapsTheErrorBody(t *testing.T) {
+	server, _ := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if n == 1 {
+			answer(w, 403, `{"kind":"permission_denied","message":"no","reason":"missing_scope","metadata":{"scope":"com.hashinbox.wallets.$read"}}`)
+			return
+		}
+		answer(w, 503, `{"status":"down"}`)
+	})
+	client := NewClient(server.URL, WithoutScopeCheck())
+	_, err := WalletsList(context.Background(), client, WalletsListRequest{})
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != 403 || api.Kind != KindPermissionDenied || api.Message != "no" ||
+		api.Metadata["scope"] != "com.hashinbox.wallets.$read" || !errors.Is(err, ErrMissingScope) {
+		t.Fatalf("%#v", err)
+	}
+	_, err = WalletsList(context.Background(), client, WalletsListRequest{})
+	if !errors.As(err, &api) || api.Status != 503 || api.Kind != "" || string(api.Raw) != `{"status":"down"}` {
+		t.Fatalf("%#v", err)
+	}
+}
+
+func TestDoRefusesAMissingScopeLocally(t *testing.T) {
+	server, seen := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		answer(w, 200, `{}`)
+	})
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[x].$read")}
+	client := NewClient(server.URL, WithSession(session))
+	_, err := WalletGet(context.Background(), client, WalletGetRequest{ID: "y"})
+	if !errors.Is(err, ErrMissingScope) || !strings.Contains(err.Error(), "com.hashinbox.wallets[y].$read") {
+		t.Fatal(err)
+	}
+	if _, err := WalletGet(context.Background(), client, WalletGetRequest{ID: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen.requests) != 1 {
+		t.Errorf("sent %q", seen.requests)
+	}
+}
+
+// testSecret is the vectors' key.
+func testSecret(t *testing.T) Secret {
+	t.Helper()
+	var v sessionVectors
+	read(t, "session.json", &v)
+	secret, err := ParseSecret(v.ID, v.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return secret
+}
+
+// keyServer answers GET /v1/session with the key's scopes, and each other
+// call with call's answer.
+func keyServer(t *testing.T, call func(w http.ResponseWriter, n int)) (*httptest.Server, *seen) {
+	calls := 0
+	return serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if r.URL.Path == "/v1/session" {
+			answer(w, 200, `{"kind":"key","key":{"id":"hip/x","scopes":{"com.hashinbox":["wallets.$*"]}},"scopes":{}}`)
+			return
+		}
+		calls++
+		call(w, calls)
+	})
+}
+
+func TestWithSecretSignsItsOwnSessions(t *testing.T) {
+	secret := testSecret(t)
+	at(t, 1_700_000_000)
+	server, seen := keyServer(t, func(w http.ResponseWriter, n int) {
+		answer(w, 200, `{"wallets":[],"next_cursor":null}`)
+	})
+	client := NewClient(server.URL, WithSecret(secret))
+	ctx := context.Background()
+	for range 2 {
+		if _, err := WalletsList(ctx, client, WalletsListRequest{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	at(t, 1_700_000_000+int64((defaultTTL-renewBefore)/time.Second))
+	if _, err := WalletsList(ctx, client, WalletsListRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	want := "[GET /v1/session GET /v1/wallets GET /v1/wallets GET /v1/wallets]"
+	if fmt.Sprint(seen.requests) != want {
+		t.Errorf("sent %q", seen.requests)
+	}
+	probe, err := ParseSession(seen.bearers[0])
+	if err != nil || len(probe.Scopes) != 0 {
+		t.Fatal("the probe holds scopes", probe, err)
+	}
+	first, err := ParseSession(seen.bearers[1])
+	if err != nil || first.Scopes.String() != "com.hashinbox.wallets.$*" || first.ExpiresAt.Sub(first.IssuedAt) != defaultTTL {
+		t.Fatal(first, err)
+	}
+	if seen.bearers[2] != seen.bearers[1] || seen.bearers[3] == seen.bearers[1] {
+		t.Error("not cached, or not renewed near expiry")
+	}
+	for _, bearer := range seen.bearers {
+		if strings.Contains(bearer, "his/") || strings.Count(bearer, ".") != 2 {
+			t.Errorf("bearer %q is not a JWT", bearer)
+		}
+	}
+}
+
+func TestWithSecretRenewsOnceAfterSessionExpired(t *testing.T) {
+	secret := testSecret(t)
+	expired := `{"kind":"unauthenticated","message":"expired","reason":"session_expired"}`
+	server, seen := keyServer(t, func(w http.ResponseWriter, n int) {
+		if n == 1 || n >= 3 {
+			answer(w, 401, expired)
+			return
+		}
+		answer(w, 200, `{"wallets":[],"next_cursor":null}`)
+	})
+	client := NewClient(server.URL, WithSecret(secret), WithSecretScopes(MustScopes("com.hashinbox.wallets.$read")))
+	ctx := context.Background()
+	if _, err := WalletsList(ctx, client, WalletsListRequest{}); err != nil {
+		t.Fatal("not retried:", err)
+	}
+	if _, err := WalletsList(ctx, client, WalletsListRequest{}); !errors.Is(err, ErrSessionExpired) {
+		t.Fatal("retried more than once, or hid the error:", err)
+	}
+	want := "[GET /v1/wallets GET /v1/wallets GET /v1/wallets GET /v1/wallets]"
+	if fmt.Sprint(seen.requests) != want {
+		t.Errorf("sent %q", seen.requests)
+	}
+}
+
+func TestLoginSurfacesItsReasonsAndKeepsTheSession(t *testing.T) {
+	var v sessionVectors
+	read(t, "session.json", &v)
+	server, seen := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		switch n {
+		case 1:
+			answer(w, 401, `{"kind":"unauthenticated","message":"code","reason":"totp_required"}`)
+		case 2:
+			answer(w, 401, `{"kind":"unauthenticated","message":"wrong","reason":"wrong_credentials"}`)
+		case 3:
+			body, _ := json.Marshal(map[string]any{"token": v.User.Token, "expires_at": v.User.Exp, "scopes": map[string]any{}})
+			answer(w, 201, string(body))
+		default:
+			w.WriteHeader(204)
+		}
+	})
+	client := NewClient(server.URL)
+	ctx := context.Background()
+	login := LoginRequest{Email: "a@b.c", Password: "pw"}
+	if _, err := client.Login(ctx, login); !errors.Is(err, ErrTOTPRequired) {
+		t.Fatal(err)
+	}
+	login.TOTP = "123456"
+	if _, err := client.Login(ctx, login); !errors.Is(err, ErrWrongCredentials) {
+		t.Fatal(err)
+	}
+	session, err := client.Login(ctx, login)
+	if err != nil || session.Issuer != v.User.Iss {
+		t.Fatal(session, err)
+	}
+	if current, ok := client.Session(); !ok || current.Token != v.User.Token {
+		t.Fatal("not kept")
+	}
+	if err := client.Logout(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.Session(); ok {
+		t.Fatal("kept after logout")
+	}
+	if seen.bearers[2] != "" || seen.bearers[3] != v.User.Token {
+		t.Errorf("bearers %q", seen.bearers)
+	}
+	if !strings.HasPrefix(seen.requests[2], `POST /v1/session {"email":"a@b.c","password":"pw","totp":"123456"}`) ||
+		seen.requests[3] != "DELETE /v1/session?all=true" {
+		t.Errorf("sent %q", seen.requests)
+	}
+}
+
+func TestStreamReadsEventsUntilCancelled(t *testing.T) {
+	server, _ := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, ": hello\n\nevent: missed\ndata: {\"missed\":2}\n\ndata: a\ndata: b\nid: 7\n\n")
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	})
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs.$read")}
+	client := NewClient(server.URL, WithSession(session))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := LogsStream(ctx, client, LogsStreamRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	first, err := stream.Next()
+	if err != nil || first != (RawEvent{Event: "missed", Data: `{"missed":2}`}) {
+		t.Fatal(first, err)
+	}
+	second, err := stream.Next()
+	if err != nil || second != (RawEvent{Event: "message", Data: "a\nb", ID: "7"}) {
+		t.Fatal(second, err)
+	}
+	cancel()
+	if _, err := stream.Next(); err == nil {
+		t.Fatal("not cancelled")
+	}
+}

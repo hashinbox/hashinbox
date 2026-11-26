@@ -5,7 +5,6 @@ import Bolt from '@mui/icons-material/Bolt';
 import Close from '@mui/icons-material/Close';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import Hub from '@mui/icons-material/Hub';
-import Logout from '@mui/icons-material/Logout';
 import MenuIcon from '@mui/icons-material/Menu';
 import MenuBook from '@mui/icons-material/MenuBook';
 import Notes from '@mui/icons-material/Notes';
@@ -13,7 +12,6 @@ import People from '@mui/icons-material/People';
 import ShowChart from '@mui/icons-material/ShowChart';
 import WorkHistory from '@mui/icons-material/WorkHistory';
 import Box from '@mui/material/Box';
-import Button from '@mui/material/Button';
 import Drawer from '@mui/material/Drawer';
 import IconButton from '@mui/material/IconButton';
 import Link from '@mui/material/Link';
@@ -25,7 +23,6 @@ import Stack from '@mui/material/Stack';
 import Tab from '@mui/material/Tab';
 import Tabs from '@mui/material/Tabs';
 import Toolbar from '@mui/material/Toolbar';
-import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
@@ -37,12 +34,12 @@ import {
   setToken,
   whenUnauthorized,
   type Listing,
+  type User,
   type UserRead,
   type Wallet,
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
 import { LogsDrawer } from '@/_components/logs/drawer';
-import { HashinboxLogo, HashinboxMark } from '@/_components/logo';
 import { logSource } from '@/api/logs';
 import { Docs } from '@/pages/docs/page';
 import { Explorers, type Explorer } from '@/_components/explorers';
@@ -56,6 +53,7 @@ import { Setup } from '@/pages/setup/page';
 import { Triggers } from '@/pages/triggers/page';
 import { RecoveryBanner } from '@/pages/users/_components/recovery';
 import { ROOT, allows, unpack } from '@/pages/users/_components/scopes';
+import { Me } from '@/pages/users/me';
 import { Users } from '@/pages/users/page';
 import { Wallets } from '@/pages/wallets/page';
 import { go, segments } from '@/route';
@@ -70,6 +68,7 @@ type View =
   | 'jobs'
   | 'logs'
   | 'users'
+  | 'user'
   | 'docs'
   | 'login'
   | 'setup';
@@ -88,6 +87,7 @@ const VIEWS: View[] = [
   'jobs',
   'logs',
   'users',
+  'user',
   'docs',
   'login',
   'setup',
@@ -110,6 +110,14 @@ function allowed(view: View, root: Root, token: string | null): View {
 function linked(): View {
   const named = segments()[0];
   return VIEWS.find((v) => v === named) ?? 'dashboard';
+}
+
+/** "Richard Huttar" → "RH", one word → its first letter, no name → the email's. */
+function initials(user: User): string {
+  const words = user.name.trim().split(/\s+/).filter(Boolean);
+  const first = words[0]?.[0] ?? user.email[0] ?? '?';
+  const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';
+  return (first + last).toUpperCase();
 }
 
 /** Everything a page needs to talk back to the shell. */
@@ -230,6 +238,13 @@ export function Layout() {
   }, [token, root, meRead, fail]);
 
   const open = root === 'present' && token !== null && me !== null;
+  const reads = me !== null && allows(unpack(me.user.scopes), `${ROOT}.users.$read`);
+
+  // `users/me` was the own page; `users` without `users.$read` shows nothing.
+  useEffect(() => {
+    if (view !== 'users' || me === null) return;
+    if (segments()[1] === 'me' || !reads) go(['user'], true);
+  }, [view, me, reads]);
 
   useEffect(() => {
     document.title = name;
@@ -327,7 +342,9 @@ export function Layout() {
           { view: 'markets' as const, label: 'Markets', icon: <ShowChart fontSize="small" /> },
           { view: 'jobs' as const, label: 'Jobs', icon: <WorkHistory fontSize="small" /> },
           { view: 'logs' as const, label: 'Logs', icon: <Notes fontSize="small" /> },
-          { view: 'users' as const, label: 'Users', icon: <People fontSize="small" /> },
+          ...(reads
+            ? [{ view: 'users' as const, label: 'Users', icon: <People fontSize="small" /> }]
+            : []),
           { view: 'docs' as const, label: 'Docs', icon: <MenuBook fontSize="small" /> },
         ]
       : []),
@@ -372,44 +389,21 @@ export function Layout() {
             )}
             <Box sx={{ flexGrow: 1 }} />
             {open && (
-              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
-                <Button
-                  color="inherit"
-                  href="/users/me"
-                  onClick={(e) => {
-                    e.preventDefault();
-                    go(['users', 'me']);
-                  }}
-                  startIcon={
-                    <Avatar sx={{ width: 24, height: 24, fontSize: 12 }}>
-                      {me.user.name.slice(0, 1).toUpperCase()}
-                    </Avatar>
-                  }
-                  sx={{ border: 0 }}
-                >
-                  <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>
-                    {me.user.name}
-                  </Box>
-                </Button>
-                {wide && (
-                  <Tooltip title="Log out">
-                    <IconButton size="small" aria-label="Log out" onClick={() => logout(false)}>
-                      <Logout fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                )}
-              </Stack>
+              <Link
+                href="/user"
+                underline="none"
+                color="text.primary"
+                aria-label={me.user.name || me.user.email}
+                onClick={(e) => {
+                  e.preventDefault();
+                  go(['user']);
+                }}
+                sx={{ display: 'flex', alignItems: 'center', gap: 1 }}
+              >
+                <Avatar sx={{ width: 28, height: 28, fontSize: 12 }}>{initials(me.user)}</Avatar>
+                {wide && <Typography sx={{ fontSize: 14 }}>{me.user.name}</Typography>}
+              </Link>
             )}
-            <Box
-              sx={{ display: 'flex', flexShrink: 0, pointerEvents: 'none', color: 'text.primary' }}
-            >
-              <Box sx={{ display: { xs: 'none', md: 'flex' } }}>
-                <HashinboxLogo height={26} opacity={0.18} />
-              </Box>
-              <Box sx={{ display: { xs: 'flex', md: 'none' } }}>
-                <HashinboxMark height={26} opacity={0.18} />
-              </Box>
-            </Box>
           </Toolbar>
         </AppBar>
       )}
@@ -461,22 +455,6 @@ export function Layout() {
               </ListItemButton>
             ))}
           </List>
-          {open && (
-            <List sx={{ px: 1.5, py: 1.5, borderTop: 1, borderColor: 'divider' }}>
-              <ListItemButton
-                onClick={() => {
-                  setMenu(false);
-                  logout(false);
-                }}
-                sx={{ borderRadius: 2, py: 1.1 }}
-              >
-                <ListItemIcon sx={{ minWidth: 38 }}>
-                  <Logout fontSize="small" />
-                </ListItemIcon>
-                <ListItemText primary="Log out" />
-              </ListItemButton>
-            </List>
-          )}
         </Drawer>
       )}
 
@@ -508,14 +486,15 @@ export function Layout() {
             {view === 'markets' && <Markets shell={shell} />}
             {view === 'jobs' && <Jobs shell={shell} />}
             {view === 'logs' && <Logs shell={shell} />}
-            {view === 'users' && (
-              <Users
+            {view === 'users' && reads && (
+              <Users shell={shell} me={me} onMe={() => setMeRead((n) => n + 1)} />
+            )}
+            {view === 'user' && (
+              <Me
                 shell={shell}
                 me={me}
                 onMe={() => setMeRead((n) => n + 1)}
-                onLogout={logout}
-                onSignedOut={signOut}
-                onSession={keep}
+                own={{ onLogout: logout, onSignedOut: signOut, onSession: keep }}
               />
             )}
             {view === 'docs' && <Docs shell={shell} secured />}

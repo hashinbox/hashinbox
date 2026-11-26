@@ -65,7 +65,7 @@ impl From<Nodes> for EndpointsResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/endpoints",
-    operation_id = "list_network_endpoints",
+    operation_id = "network_endpoints_list",
     summary = "List a network's RPC nodes",
     description = "Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) \
         and position, its calls (`stats`, each written as it finishes) and, while disabled, \
@@ -114,7 +114,7 @@ impl NodesRequest {
 #[scope::utoipa(
     post,
     path = "/v1/networks/{chain}/{network}/endpoints",
-    operation_id = "add_network_endpoints",
+    operation_id = "network_endpoints_create",
     summary = "Add RPC nodes to a network",
     description = "Appends the nodes after the network's current ones, stores the list, then \
         sends every later call of the network to it.",
@@ -148,7 +148,7 @@ async fn add(
 #[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/endpoints",
-    operation_id = "replace_network_endpoints",
+    operation_id = "network_endpoints_replace",
     summary = "Replace a network's RPC nodes",
     description = "Stores the nodes, then sends every later call of the network (indexing, \
         wallets, broadcast) to them: the healthy node with the highest tip first, then the \
@@ -206,7 +206,7 @@ struct TestResponse {
 #[scope::utoipa(
     post,
     path = "/v1/networks/{chain}/{network}/endpoints/test",
-    operation_id = "test_network_endpoint",
+    operation_id = "network_endpoint_test",
     summary = "Test an RPC node against a network, without adding it",
     description = "Asks the node its chain and tip once, as adding it would, and answers \
         them; nothing is stored. A node that fails, or serves another chain, is refused \
@@ -275,7 +275,7 @@ impl AddManyRequest {
 
 /// The networks a change touched.
 #[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-#[schema(as = NetworkEndpointsList)]
+#[schema(as = NetworkEndpointsChanged)]
 struct AddManyResponse {
     /// Networks in chain, then name, order.
     networks: Vec<EndpointsResponse>,
@@ -284,7 +284,7 @@ struct AddManyResponse {
 #[scope::utoipa(
     post,
     path = "/v1/networks/endpoints",
-    operation_id = "add_endpoints",
+    operation_id = "endpoints_create",
     summary = "Add RPC nodes to one or more networks",
     description = "Appends each node after its network's current ones, stores every changed \
         list in one write (all or none), then sends every later call of those networks to \
@@ -327,7 +327,7 @@ struct NodePath {
 #[scope::utoipa(
     delete,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}",
-    operation_id = "remove_network_endpoint",
+    operation_id = "network_endpoint_delete",
     summary = "Remove one RPC node of a network",
     description = "Removes the node `id` and its routes, stores the rest and uses them from \
         now on. A network's last node cannot be removed.",
@@ -382,7 +382,7 @@ struct StateRequest {
 #[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}/state",
-    operation_id = "set_network_endpoint_state",
+    operation_id = "network_endpoint_state_update",
     summary = "Enable or disable one RPC node of a network",
     description = "Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call \
         of the network to its enabled nodes only; a route skips a disabled node. Disabling the last \
@@ -440,7 +440,7 @@ struct FailuresResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
-    operation_id = "list_network_endpoint_failures",
+    operation_id = "network_endpoint_failures_list",
     summary = "List what disabled or enabled one RPC node",
     description = "Every failure of the node it cannot recover from (which disabled it: \
         `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by \

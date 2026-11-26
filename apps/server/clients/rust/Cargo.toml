@@ -1,0 +1,30 @@
+[package]
+name = "hashinbox-client"
+version = "0.1.0"
+edition = "2024"
+description = "A typed client of the hashinbox API: generated models and operations, key sessions, and a reqwest transport."
+publish = false
+
+[features]
+default = ["reqwest"]
+# The default transport: `Client::builder(url)…build()`.
+reqwest = ["dep:reqwest", "dep:futures-util"]
+
+[dependencies]
+base64 = "0.22"
+bs58 = "0.5"
+crc = "3"
+futures-core = "0.3"
+futures-util = { version = "0.3", default-features = false, optional = true }
+hmac = "0.12"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+scope = { path = "../../../../packages/scope" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+
+# Not a member of the server's workspace.
+[workspace]

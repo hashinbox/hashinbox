@@ -1,0 +1,339 @@
+{
+  "covers": [
+    {
+      "covers": true,
+      "ours": "a.wallets.$read",
+      "theirs": "a.wallets[x].$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.wallets[x].$read",
+      "theirs": "a.wallets[x].$read"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets[x].$read",
+      "theirs": "a.wallets.$read"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets[x].$read",
+      "theirs": "a.wallets[y].$read"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets[x].$read",
+      "theirs": "a.wallets[x].legs.$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.*.$read",
+      "theirs": "a.wallets[x].legs.$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.wallets.*.$read",
+      "theirs": "a.wallets.$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.*.legs.$read",
+      "theirs": "a.wallets.legs.$read"
+    },
+    {
+      "covers": false,
+      "ours": "a.*.legs.$read",
+      "theirs": "a.wallets.x.legs.$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.wallets.$*",
+      "theirs": "a.wallets.$write"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets.$read",
+      "theirs": "a.wallets.$*"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets.$read",
+      "theirs": "a.wallets.$write"
+    },
+    {
+      "covers": false,
+      "ours": "a.wallets.legs.$read",
+      "theirs": "a.wallets.*.$read"
+    },
+    {
+      "covers": true,
+      "ours": "*.$*",
+      "theirs": "a.b[c].d.$read"
+    },
+    {
+      "covers": true,
+      "ours": "a.*.$read",
+      "theirs": "a.$read"
+    },
+    {
+      "covers": false,
+      "ours": "a.$read",
+      "theirs": "a.b.$read"
+    }
+  ],
+  "escape": [
+    {
+      "id": "a,b] c%d",
+      "text": "a,b%5D%20c%25d"
+    },
+    {
+      "id": "ethereum.mainnet.0xabc",
+      "text": "ethereum.mainnet.0xabc"
+    },
+    {
+      "id": "hip/abc",
+      "text": "hip/abc"
+    },
+    {
+      "id": "tab\there\nnew\u0000",
+      "text": "tab%09here%0Anew%7F%00"
+    },
+    {
+      "id": "[é]",
+      "text": "%5Bé%5D"
+    },
+    {
+      "id": " ",
+      "text": " "
+    }
+  ],
+  "first_uncovered": [
+    {
+      "asked": "a.wallets[x].$read",
+      "first_uncovered": null,
+      "granted": "a.wallets.$* a.markets.$read"
+    },
+    {
+      "asked": "a.wallets[x].$read a.networks.$read",
+      "first_uncovered": "a.networks.$read",
+      "granted": "a.wallets.$* a.markets.$read"
+    },
+    {
+      "asked": "a.$read",
+      "first_uncovered": "a.$read",
+      "granted": ""
+    },
+    {
+      "asked": "",
+      "first_uncovered": null,
+      "granted": "a.$read"
+    }
+  ],
+  "parse": [
+    {
+      "display": "com.hashinbox.wallets.$read",
+      "text": "com.hashinbox.wallets.$read"
+    },
+    {
+      "display": "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read",
+      "text": "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read"
+    },
+    {
+      "display": "com.hashinbox.wallets[a].legs[b].legs.$read",
+      "text": "com.hashinbox.wallets[a].legs[b].legs.$read"
+    },
+    {
+      "display": "com.hashinbox.*.$read",
+      "text": "com.hashinbox.*.$read"
+    },
+    {
+      "display": "com.hashinbox.wallets.*.$*",
+      "text": "com.hashinbox.wallets.*.$*"
+    },
+    {
+      "display": "com.hashinbox.wallets[a,b%5D%20c%25d].$*",
+      "text": "com.hashinbox.wallets[a,b%5D%20c%25d].$*"
+    },
+    {
+      "display": "wallets[ab].$read",
+      "text": "wallets[%61%62].$read"
+    },
+    {
+      "display": "wallets[%05].$read",
+      "text": "wallets[%+5].$read"
+    },
+    {
+      "display": "wallets[a%5Db%5Bc].$read",
+      "text": "wallets[a]b[c].$read"
+    },
+    {
+      "display": "wallets[a%5Bb].$read",
+      "text": "wallets[a[b].$read"
+    },
+    {
+      "display": "wallets[é].$read",
+      "text": "wallets[%C3%A9].$read"
+    },
+    {
+      "display": "wallets[é%20ü].$read",
+      "text": "wallets[é ü].$read"
+    },
+    {
+      "display": "a-b_c.$x-y_z",
+      "text": "a-b_c.$x-y_z"
+    }
+  ],
+  "refuse": [
+    "",
+    "$read",
+    "wallets",
+    "wallets.read",
+    "wallets[].$read",
+    "wallets[a.$read",
+    "wal lets.$read",
+    "wallets.$re ad",
+    "wallets[%zz].$read",
+    "wallets[%4].$read",
+    "wallets[%-5].$read",
+    "wallets[%C3].$read",
+    "wallets[a]x.$read",
+    ".wallets.$read",
+    "wallets..$read",
+    "wallets.$",
+    "wallets.$**",
+    "*[a].$read"
+  ],
+  "sets": [
+    {
+      "compressed": "",
+      "display": "",
+      "packed": {},
+      "scopes": ""
+    },
+    {
+      "compressed": "a.markets.$read a.wallets[x].$read a.wallets[y].$read a.wallets[z].$write",
+      "display": "a.wallets[x].$read a.wallets[y].$read a.wallets[x].$read a.markets.$read a.markets[btc].$read a.wallets[z].$write",
+      "packed": {
+        "a": [
+          "markets.$read",
+          "wallets[x].$read",
+          "wallets[y].$read",
+          "wallets[z].$write"
+        ]
+      },
+      "scopes": "a.wallets[x].$read a.wallets[y].$read a.wallets[x].$read a.markets.$read a.markets[btc].$read a.wallets[z].$write"
+    },
+    {
+      "compressed": "com.hashinbox.markets.$read com.hashinbox.wallets[x].$read com.hashinbox.wallets[x].legs.$read com.hashinbox.wallets[y].$read other.thing.$write",
+      "display": "com.hashinbox.wallets[x].$read com.hashinbox.wallets[y].$read com.hashinbox.wallets[x].legs.$read com.hashinbox.markets.$read other.thing.$write",
+      "packed": {
+        "com.hashinbox": [
+          "markets.$read",
+          "wallets[x].$read",
+          "wallets[x].legs.$read",
+          "wallets[y].$read"
+        ],
+        "other": [
+          "thing.$write"
+        ]
+      },
+      "scopes": "com.hashinbox.wallets[x].$read com.hashinbox.wallets[y].$read com.hashinbox.wallets[x].legs.$read com.hashinbox.markets.$read other.thing.$write"
+    },
+    {
+      "compressed": "a.b.$read a.b.c.$read",
+      "display": "a.b.c.$read a.b.$read",
+      "packed": {
+        "a": [
+          "b.$read",
+          "b.c.$read"
+        ]
+      },
+      "scopes": "a.b.c.$read a.b.$read"
+    },
+    {
+      "compressed": "a.wallets[x].$read a.wallets[y].$read a.*.$write",
+      "display": "a.wallets[x].$read a.wallets[y].$read a.*.$write a.wallets.$write",
+      "packed": {
+        "a": [
+          "wallets[x].$read",
+          "wallets[y].$read",
+          "*.$write"
+        ]
+      },
+      "scopes": "a.wallets[x].$read a.wallets[y].$read a.*.$write a.wallets.$write"
+    },
+    {
+      "compressed": "com.hashinbox.markets.$read com.hashinbox.wallets.*.$*",
+      "display": "com.hashinbox.wallets.*.$* com.hashinbox.markets.$read",
+      "packed": {
+        "com.hashinbox": [
+          "markets.$read",
+          "wallets.*.$*"
+        ]
+      },
+      "scopes": "com.hashinbox.wallets.*.$* com.hashinbox.markets.$read"
+    },
+    {
+      "compressed": "b.$* *.$read *.c.$write",
+      "display": "*.$read a[x].b.$read b.$* *.c.$write",
+      "packed": {
+        "": [
+          "b.$*",
+          "*.$read",
+          "*.c.$write"
+        ]
+      },
+      "scopes": "*.$read a[x].b.$read b.$* *.c.$write"
+    },
+    {
+      "compressed": "a.b.c.$read a.b[x].$read a.b[y].$read",
+      "display": "a.b[x].$read a.b[y].$read a.b.c.$read",
+      "packed": {
+        "a": [
+          "b.c.$read",
+          "b[x].$read",
+          "b[y].$read"
+        ]
+      },
+      "scopes": "a.b[x].$read a.b[y].$read a.b.c.$read"
+    },
+    {
+      "compressed": "x[z].$read x[ä].$read x[é].$read x[Ａ].$read x[😀].$read",
+      "display": "x[é].$read x[z].$read x[ä].$read x[😀].$read x[Ａ].$read",
+      "packed": {
+        "": [
+          "x[z].$read",
+          "x[ä].$read",
+          "x[é].$read",
+          "x[Ａ].$read",
+          "x[😀].$read"
+        ]
+      },
+      "scopes": "x[é].$read x[z].$read x[ä].$read x[%F0%9F%98%80].$read x[%EF%BC%A1].$read"
+    },
+    {
+      "compressed": "123.a.$read 123.b.$read 9.a.$read",
+      "display": "123.a.$read 123.b.$read 9.a.$read",
+      "packed": {
+        "123": [
+          "a.$read",
+          "b.$read"
+        ],
+        "9": [
+          "a.$read"
+        ]
+      },
+      "scopes": "123.a.$read 123.b.$read 9.a.$read"
+    },
+    {
+      "compressed": "a.$*",
+      "display": "a.$read a.$* a.$write",
+      "packed": {
+        "": [
+          "a.$*"
+        ]
+      },
+      "scopes": "a.$read a.$* a.$write"
+    }
+  ]
+}

@@ -135,7 +135,7 @@ fn page(index: Result<Query<IndexParams>, QueryRejection>) -> Result<Page<i64>, 
 #[scope::utoipa(
     get,
     path = "/v1/logs",
-    operation_id = "list_logs",
+    operation_id = "logs_list",
     summary = "List the kept log entries",
     description = "The kept entries the filters read, newest first, a page at a time: its \
         level, event (`target`), own message (null: its template's, \
@@ -180,7 +180,7 @@ struct TargetsResponse {
 #[scope::utoipa(
     get,
     path = "/v1/logs/targets",
-    operation_id = "list_log_targets",
+    operation_id = "log_targets_list",
     summary = "List the logged events",
     description = "Every event (`target`) a kept entry has, each once, in order: the values \
         the `target` filter of the log lists and the stream takes.",
@@ -215,7 +215,7 @@ struct MessagesResponse {
 #[scope::utoipa(
     get,
     path = "/v1/logs/messages",
-    operation_id = "list_log_messages",
+    operation_id = "log_messages_list",
     summary = "List the log message templates",
     description = "Every event's (`target`) message template, by which a log entry with no \
         `message` of its own reads: each `{key}` filled from its field `key`. An event \
@@ -249,7 +249,7 @@ struct Missed {
 #[scope::utoipa(
     get,
     path = "/v1/logs/stream",
-    operation_id = "stream_logs",
+    operation_id = "logs_stream",
     summary = "Stream new log entries",
     description = "`text/event-stream` of every entry kept from now on that the filters \
         read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: \

@@ -37,7 +37,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 
 /// `POST /v1/wallets/{id}/indexes` body.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = CreateWalletIndex)]
+#[schema(as = CreateWalletIndexRequest)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     /// The asset id to index the wallet in.
@@ -54,7 +54,7 @@ struct CreateRequest {
 #[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/indexes",
-    operation_id = "create_wallet_index",
+    operation_id = "wallet_indexes_create",
     summary = "Index a wallet in an asset",
     description = "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next \
         indexing step picks it). An asset already indexed keeps its first start (200). A \
@@ -115,7 +115,7 @@ impl IndexPath {
 
 /// `PATCH /v1/wallets/{id}/indexes/{asset}` body.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = UpdateWalletIndex)]
+#[schema(as = UpdateWalletIndexRequest)]
 #[serde(deny_unknown_fields)]
 struct UpdateRequest {
     /// `paused`: skipped, no facts kept for blocks while paused; `indexing`:
@@ -138,7 +138,7 @@ impl UpdateRequest {
 #[scope::utoipa(
     patch,
     path = "/v1/wallets/{id}/indexes/{asset}",
-    operation_id = "update_wallet_index",
+    operation_id = "wallet_index_update",
     summary = "Pause or resume a wallet's index",
     description = "`paused`: skipped, no facts kept for blocks while paused; what is kept \
         stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues \
@@ -175,7 +175,7 @@ async fn update(
 #[scope::utoipa(
     delete,
     path = "/v1/wallets/{id}/indexes/{asset}",
-    operation_id = "delete_wallet_index",
+    operation_id = "wallet_index_delete",
     summary = "Stop indexing a wallet in an asset",
     description = "Forgets the index and its progress: its balance and history are no longer \
         read. Creating it again starts from its new start.",
@@ -204,7 +204,7 @@ async fn remove(
 #[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/indexes/{asset}/reconcile",
-    operation_id = "reconcile_wallet_index",
+    operation_id = "wallet_index_reconcile",
     summary = "Reconcile a wallet's index with the chain's balance",
     description = "Deletes the index's mined legs above the chain's final block and \
         unsets its progress: its balances read null until the next indexing step reads \

@@ -42,7 +42,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/settings",
-    operation_id = "list_settings",
+    operation_id = "settings_list",
     summary = "List the settings",
     description = "Every setting the server declares: its key, value (its default when never \
         written), default, whether it is public, description and type. A secret setting \
@@ -75,7 +75,7 @@ struct SettingPath {
 
 /// `PUT /v1/settings/{key}` body.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = WriteSetting)]
+#[schema(as = WriteSettingRequest)]
 #[serde(deny_unknown_fields)]
 struct WriteRequest {
     /// Its new value: JSON of the setting's type.
@@ -85,7 +85,7 @@ struct WriteRequest {
 #[scope::utoipa(
     put,
     path = "/v1/settings/{key}",
-    operation_id = "write_setting",
+    operation_id = "setting_update",
     summary = "Write a setting",
     description = "Stores the setting's value once it parses as the setting's type and passes \
         its check. Whether it is public is the declaration's, never the request's. A secret \

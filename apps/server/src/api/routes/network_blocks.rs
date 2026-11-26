@@ -42,7 +42,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/blocks",
-    operation_id = "list_blocks",
+    operation_id = "network_blocks_list",
     summary = "List a network's last kept blocks",
     description = "Live kept blocks, latest first, a page at a time.",
     params(NetworkPath, IndexParams),
@@ -99,7 +99,7 @@ impl BlockPath {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/blocks/{position}",
-    operation_id = "read_block",
+    operation_id = "network_block_get",
     summary = "Read one kept block of a network",
     params(BlockPath),
     responses(

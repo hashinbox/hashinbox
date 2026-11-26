@@ -68,7 +68,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/markets",
-    operation_id = "list_markets",
+    operation_id = "markets_list",
     summary = "List the markets and the latest prices",
     description = "Every market data source: its name, whether it is asked for quotes \
         (`feed`), when it was last changed and when its last quote answered (`last_at`); \
@@ -107,7 +107,7 @@ struct MarketPath {
 
 /// `PATCH /v1/markets/{name}` body.
 #[derive(Clone, Deserialize, utoipa::ToSchema)]
-#[schema(as = SetMarket)]
+#[schema(as = SetMarketRequest)]
 #[serde(deny_unknown_fields)]
 struct SetRequest {
     /// Whether it is asked for quotes.
@@ -117,7 +117,7 @@ struct SetRequest {
 #[scope::utoipa(
     patch,
     path = "/v1/markets/{name}",
-    operation_id = "set_market",
+    operation_id = "market_update",
     summary = "Turn a market's feed on or off",
     description = "Stores whether the market is asked for quotes; the market job reads it \
         on its next tick (within 10 s).",
@@ -167,7 +167,7 @@ struct CandlesResponse {
 #[scope::utoipa(
     get,
     path = "/v1/markets/{name}/candles",
-    operation_id = "list_market_candles",
+    operation_id = "market_candles_list",
     summary = "List a market's hourly candles of an asset",
     description = "The market's own hourly USD candles of the asset (open, high, low and \
         close of its quotes) from `after` on, at most the last 7 days, oldest first; the \

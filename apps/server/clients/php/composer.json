@@ -1,0 +1,32 @@
+{
+    "name": "hashinbox/client",
+    "description": "A typed client of the hashinbox API: generated models and operations, scopes, key sessions and a curl client.",
+    "type": "library",
+    "require": {
+        "php": ">=8.2",
+        "ext-curl": "*",
+        "ext-hash": "*",
+        "ext-json": "*"
+    },
+    "require-dev": {
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Hashinbox\\": "src/"
+        },
+        "files": [
+            "src/Models.php",
+            "src/Operations.php"
+        ]
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Hashinbox\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}

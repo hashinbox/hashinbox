@@ -1,0 +1,39 @@
+{
+  "id": "hip/sLDDSz4DCdAn1W1xf36N2",
+  "secret": "his/SkB92YpWm4Q2ijQHH34cqbKkCZWszsiQgHVjtNeFF2GR8bEt",
+  "sessions": [
+    {
+      "exp": 1700000900,
+      "iat": 1700000000,
+      "scopes": "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read",
+      "sub": null,
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDA5MDAsInNjb3BlcyI6eyJjb20uaGFzaGluYm94IjpbIndhbGxldHNbZXRoZXJldW0ubWFpbm5ldC4weGFiY10uJHJlYWQiXX19.R4OnINTLO5ZnA-2vYB5XHQeHPSu16t5Wyrl7wX9i7Xs"
+    },
+    {
+      "exp": 1700086400,
+      "iat": 1700000000,
+      "scopes": "com.hashinbox.wallets[a,b%5D%20c%25d].$read com.hashinbox.markets.$read com.hashinbox.wallets[é].legs.$read other.thing.$write 123.a.$read",
+      "sub": "customer-1",
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwic3ViIjoiY3VzdG9tZXItMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDg2NDAwLCJzY29wZXMiOnsiMTIzIjpbImEuJHJlYWQiXSwiY29tLmhhc2hpbmJveCI6WyJtYXJrZXRzLiRyZWFkIiwid2FsbGV0c1thLGIlNUQlMjBjJTI1ZF0uJHJlYWQiLCJ3YWxsZXRzW8OpXS5sZWdzLiRyZWFkIl0sIm90aGVyIjpbInRoaW5nLiR3cml0ZSJdfX0.iy0PZND3LA6sFwtrZ_0pLt11Z_WlOFWVDlZkvk3Rbe4"
+    },
+    {
+      "exp": 1700000060,
+      "iat": 1700000000,
+      "scopes": "",
+      "sub": "\"quoted\" \\ ü",
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwic3ViIjoiXCJxdW90ZWRcIiBcXCDDvCIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDAwMDYwLCJzY29wZXMiOnt9fQ.nRLoFn4qMtsfRQhKE796YJpkgyZsuSJLvhTR3-RS5xI"
+    }
+  ],
+  "user": {
+    "amr": [
+      "pwd",
+      "otp"
+    ],
+    "exp": 1700003600,
+    "iat": 1700000000,
+    "iss": "user/0193a",
+    "scopes": "123.a.$read com.hashinbox.*.$*",
+    "sub": "0193a",
+    "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6InVzZXIvMDE5M2EifQ.eyJpc3MiOiJ1c2VyLzAxOTNhIiwic3ViIjoiMDE5M2EiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMzYwMCwianRpIjoiMDE5M2IiLCJzY29wZXMiOnsiMTIzIjpbImEuJHJlYWQiXSwiY29tLmhhc2hpbmJveCI6WyIqLiQqIl19LCJhbXIiOlsicHdkIiwib3RwIl19.fA68olq70CbbF7jziH0trwjZq1GVVhJqW67SrwSTQn4"
+  }
+}

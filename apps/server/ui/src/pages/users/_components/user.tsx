@@ -23,9 +23,18 @@ import { Row, Section } from './section';
 import { Sessions } from './sessions';
 import { TwoFactor } from './two-factor';
 
+/** What the logged-in user's own page reports back to the shell. */
+export interface Own {
+  onLogout: (everywhere: boolean) => void;
+  /** The server ended every session already (password changed, 2FA off). */
+  onSignedOut: () => void;
+  /** A fresh session for this tab (the password changed). */
+  onSession: (token: string) => void;
+}
+
 /**
- * One user: its profile, and on the logged-in user's own page its keys,
- * two-factor and session too.
+ * One user: its profile, and with `own` (the logged-in user's page) its
+ * password, keys, two-factor, session and recovery too.
  */
 export function UserDetail({
   shell,
@@ -33,29 +42,23 @@ export function UserDetail({
   user,
   resources,
   onChanged,
-  onLogout,
-  onSignedOut,
-  onSession,
+  own,
 }: {
   shell: Shell;
   me: UserRead;
   user: User;
   resources: Resources;
   onChanged: () => void;
-  onLogout: (everywhere: boolean) => void;
-  onSignedOut: () => void;
-  /** A fresh session for this tab (the password changed). */
-  onSession: (token: string) => void;
+  own?: Own;
 }) {
-  const self = user.id === me.user.id;
   const held = unpack(me.user.scopes);
-  const manages = !self && allows(held, `${ROOT}.users.$write`);
+  const manages = user.id !== me.user.id && allows(held, `${ROOT}.users.$write`);
   const disabled = user.disabled_at != null;
   const [password, setPassword] = useState(false);
   const [editing, setEditing] = useState(false);
   const [disabling, setDisabling] = useState(false);
 
-  const update = (body: Schemas['UpdateUser'], done: string) => {
+  const update = (body: Schemas['UpdateUserRequest'], done: string) => {
     call(client.PATCH('/v1/users/{id}', { params: { path: { id: user.id } }, body }))
       .then(() => {
         shell.notify(done);
@@ -81,7 +84,7 @@ export function UserDetail({
         title="Profile"
         actions={
           <>
-            {self && <Button onClick={() => setPassword(true)}>Change password</Button>}
+            {own && <Button onClick={() => setPassword(true)}>Change password</Button>}
             {manages && <Button onClick={() => setEditing(true)}>Change scopes</Button>}
             {manages &&
               (disabled ? (
@@ -111,29 +114,29 @@ export function UserDetail({
         </Row>
       </Section>
 
-      {self && (
+      {own && (
         <>
           <Keys shell={shell} held={held} resources={resources} />
           <TwoFactor
             shell={shell}
             state={me.two_factor}
             onChanged={onChanged}
-            onSignedOut={onSignedOut}
+            onSignedOut={own.onSignedOut}
           />
-          <Sessions shell={shell} onLogout={onLogout} />
+          <Sessions shell={shell} onLogout={own.onLogout} />
           {allows(held, `${ROOT}.recovery.$write`) && <Recovery shell={shell} />}
+          <Password
+            open={password}
+            onClose={() => setPassword(false)}
+            onChanged={(token) => {
+              setPassword(false);
+              own.onSession(token);
+              shell.notify('Password changed: your other sessions are signed out.');
+            }}
+          />
         </>
       )}
 
-      <Password
-        open={password}
-        onClose={() => setPassword(false)}
-        onChanged={(token) => {
-          setPassword(false);
-          onSession(token);
-          shell.notify('Password changed: your other sessions are signed out.');
-        }}
-      />
       <Dialog open={editing} onClose={() => setEditing(false)} fullWidth maxWidth="sm">
         <ScopesForm
           resources={resources}

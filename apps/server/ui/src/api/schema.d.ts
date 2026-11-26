@@ -15,7 +15,7 @@ export interface paths {
          * Read readiness and every indexed network's indexing
          * @description Public readiness: ready when at least one network has an index, every indexed network has an enabled RPC node, and no network's index job has a reason (`job_reason`: it failed, or goes again because of it). Reads the stored networks; no RPC.
          */
-        get: operations["read_health"];
+        get: operations["health_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -35,7 +35,7 @@ export interface paths {
          * Read this OpenAPI 3 document
          * @description The contract every route is generated from; public, like the health routes.
          */
-        get: operations["read_openapi_document"];
+        get: operations["openapi_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -55,7 +55,7 @@ export interface paths {
          * List every configured asset
          * @description Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
          */
-        get: operations["list_assets"];
+        get: operations["assets_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -72,7 +72,7 @@ export interface paths {
             cookie?: never;
         };
         /** List queued jobs */
-        get: operations["list_jobs"];
+        get: operations["jobs_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -92,7 +92,7 @@ export interface paths {
          * Read a queued job
          * @description The job's outcome, what it was given and what its worker has done; for a broadcast, the transaction it recorded and whether it was sent.
          */
-        get: operations["read_job"];
+        get: operations["job_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -112,7 +112,7 @@ export interface paths {
          * List the kept log entries
          * @description The kept entries the filters read, newest first, a page at a time: its level, event (`target`), own message (null: its template's, `/v1/logs/messages`) and fields, and its network, job, wallet, transaction, trigger and market when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.
          */
-        get: operations["list_logs"];
+        get: operations["logs_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -132,7 +132,7 @@ export interface paths {
          * List the log message templates
          * @description Every event's (`target`) message template, by which a log entry with no `message` of its own reads: each `{key}` filled from its field `key`. An event without a template reads as its code and its fields. They change only with the server, so the answer may be cached.
          */
-        get: operations["list_log_messages"];
+        get: operations["log_messages_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -152,7 +152,7 @@ export interface paths {
          * Stream new log entries
          * @description `text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{"missed": n}`, then the entries after. Comments keep the connection alive; the stream does not end.
          */
-        get: operations["stream_logs"];
+        get: operations["logs_stream"];
         put?: never;
         post?: never;
         delete?: never;
@@ -172,7 +172,7 @@ export interface paths {
          * List the logged events
          * @description Every event (`target`) a kept entry has, each once, in order: the values the `target` filter of the log lists and the stream takes.
          */
-        get: operations["list_log_targets"];
+        get: operations["log_targets_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -192,7 +192,7 @@ export interface paths {
          * List the markets and the latest prices
          * @description Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
          */
-        get: operations["list_markets"];
+        get: operations["markets_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -218,7 +218,7 @@ export interface paths {
          * Turn a market's feed on or off
          * @description Stores whether the market is asked for quotes; the market job reads it on its next tick (within 10 s).
          */
-        patch: operations["set_market"];
+        patch: operations["market_update"];
         trace?: never;
     };
     "/v1/markets/{name}/candles": {
@@ -232,7 +232,7 @@ export interface paths {
          * List a market's hourly candles of an asset
          * @description The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
          */
-        get: operations["list_market_candles"];
+        get: operations["market_candles_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -252,13 +252,13 @@ export interface paths {
          * List every network, its assets, its RPC nodes, its indexing and its tip
          * @description Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, kept in memory: no node is asked.
          */
-        get: operations["list_networks"];
+        get: operations["networks_list"];
         put?: never;
         /**
          * Add a network
          * @description Stores a network and its native currency in one write, checked by its chain as a start reads it, then registers it at once, with no node: add its nodes with `POST /v1/networks/{chain}/{network}/endpoints`, and it indexes from then on.
          */
-        post: operations["create_network"];
+        post: operations["networks_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -278,7 +278,7 @@ export interface paths {
          * Add RPC nodes to one or more networks
          * @description Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.
          */
-        post: operations["add_endpoints"];
+        post: operations["endpoints_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -296,7 +296,7 @@ export interface paths {
          * List a network's last kept blocks
          * @description Live kept blocks, latest first, a page at a time.
          */
-        get: operations["list_blocks"];
+        get: operations["network_blocks_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -313,7 +313,7 @@ export interface paths {
             cookie?: never;
         };
         /** Read one kept block of a network */
-        get: operations["read_block"];
+        get: operations["network_block_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -330,7 +330,7 @@ export interface paths {
             cookie?: never;
         };
         /** List a live block's kept transactions */
-        get: operations["list_block_transactions"];
+        get: operations["network_block_transactions_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -350,17 +350,17 @@ export interface paths {
          * List a network's RPC nodes
          * @description Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) and position, its calls (`stats`, each written as it finishes) and, while disabled, the record that disabled it (`disabled`: its kind and why; null: enabled).
          */
-        get: operations["list_network_endpoints"];
+        get: operations["network_endpoints_list"];
         /**
          * Replace a network's RPC nodes
          * @description Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them: the healthy node with the highest tip first, then the others in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id, routes and state; one left out is removed with its routes.
          */
-        put: operations["replace_network_endpoints"];
+        put: operations["network_endpoints_replace"];
         /**
          * Add RPC nodes to a network
          * @description Appends the nodes after the network's current ones, stores the list, then sends every later call of the network to it.
          */
-        post: operations["add_network_endpoints"];
+        post: operations["network_endpoints_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -380,7 +380,7 @@ export interface paths {
          * Test an RPC node against a network, without adding it
          * @description Asks the node its chain and tip once, as adding it would, and answers them; nothing is stored. A node that fails, or serves another chain, is refused with why (its chain id said).
          */
-        post: operations["test_network_endpoint"];
+        post: operations["network_endpoint_test"];
         delete?: never;
         options?: never;
         head?: never;
@@ -401,7 +401,7 @@ export interface paths {
          * Remove one RPC node of a network
          * @description Removes the node `id` and its routes, stores the rest and uses them from now on. A network's last node cannot be removed.
          */
-        delete: operations["remove_network_endpoint"];
+        delete: operations["network_endpoint_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -418,7 +418,7 @@ export interface paths {
          * List what disabled or enabled one RPC node
          * @description Every failure of the node it cannot recover from (which disabled it: `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).
          */
-        get: operations["list_network_endpoint_failures"];
+        get: operations["network_endpoint_failures_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -439,7 +439,7 @@ export interface paths {
          * Enable or disable one RPC node of a network
          * @description Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call of the network to its enabled nodes only; a route skips a disabled node. Disabling the last enabled node is allowed: the network's index job idles and its payments wait until one is enabled again. Asks no node.
          */
-        put: operations["set_network_endpoint_state"];
+        put: operations["network_endpoint_state_update"];
         post?: never;
         delete?: never;
         options?: never;
@@ -458,12 +458,12 @@ export interface paths {
          * List a network's routed methods
          * @description Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's healthy node with the highest tip.
          */
-        get: operations["list_network_routes"];
+        get: operations["network_routes_list"];
         /**
          * Replace a network's routed methods
          * @description Stores the routes, then sends each routed method round robin over its nodes, and every other method to the healthy node with the highest tip. A routed call failing retryably moves to the next node, then to the network's other nodes. No node is asked.
          */
-        put: operations["replace_network_routes"];
+        put: operations["network_routes_replace"];
         post?: never;
         delete?: never;
         options?: never;
@@ -482,7 +482,7 @@ export interface paths {
          * Find a network's last block at or before a time, streaming the search
          * @description `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.
          */
-        get: operations["search_tip"];
+        get: operations["network_tip_search"];
         put?: never;
         post?: never;
         delete?: never;
@@ -499,7 +499,7 @@ export interface paths {
             cookie?: never;
         };
         /** List a network's transactions, or only its pending ones */
-        get: operations["list_network_transactions"];
+        get: operations["network_transactions_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -519,18 +519,18 @@ export interface paths {
          * Read whether the recovery passphrase is set
          * @description Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
          */
-        get: operations["read_recovery"];
+        get: operations["recovery_get"];
         put?: never;
         /**
          * Create or replace the recovery passphrase
          * @description 12 new BIP39 words, answered this once, in place of any passphrase set; only their argon2id hash is kept. Replacing ends every session the old words made (`session_expired`). They sign in as any user (`POST /v1/session` with `passphrase`), two-factor still asked: whoever holds them is every user without two-factor.
          */
-        post: operations["create_recovery"];
+        post: operations["recovery_create"];
         /**
          * Remove the recovery passphrase
          * @description Passphrase logins are off (refused as wrong credentials) and every session the words made ends (`session_expired`). 204 when none is set too.
          */
-        delete: operations["remove_recovery"];
+        delete: operations["recovery_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -547,18 +547,18 @@ export interface paths {
          * Read the caller's session
          * @description The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
          */
-        get: operations["read_session"];
+        get: operations["session_get"];
         put?: never;
         /**
          * Log in, or sign a key's session
          * @description With `email` and `password` or `passphrase` (the recovery passphrase, any user's email; and `totp` once two-factor is on) and no `Authorization`: a session of the user, its scopes or fewer, its `amr` `pwd` or `passphrase` (and `otp`). A wrong email, password, passphrase or code answers the same 401; the rest right without the code answers 401 `totp_required`. With `Authorization: Bearer his/…`: a session of the key, signed here, for a caller that cannot sign (`sub`, `scopes` covered by the key's).
          */
-        post: operations["create_session"];
+        post: operations["session_create"];
         /**
          * Log out
          * @description Alone, nothing: the client forgets its token. With `all=true`, every session the caller's issuer (its user, or its key) issued until now answers 401, this one too.
          */
-        delete: operations["delete_session"];
+        delete: operations["session_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -575,7 +575,7 @@ export interface paths {
          * List the settings
          * @description Every setting the server declares: its key, value (its default when never written), default, whether it is public, description and type. A secret setting (`recovery_passphrase`) shows only its key, whether it is set and its description.
          */
-        get: operations["list_settings"];
+        get: operations["settings_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -596,7 +596,7 @@ export interface paths {
          * Write a setting
          * @description Stores the setting's value once it parses as the setting's type and passes its check. Whether it is public is the declaration's, never the request's. A secret setting is never written here: 403 `permission_denied`.
          */
-        put: operations["write_setting"];
+        put: operations["setting_update"];
         post?: never;
         delete?: never;
         options?: never;
@@ -615,7 +615,7 @@ export interface paths {
          * Read what the store holds and its last day
          * @description Counts across every network, and per hour over the last day: blocks and transactions by chain time (up to the newest kept block), jobs and trigger runs by this server's time.
          */
-        get: operations["read_stats"];
+        get: operations["stats_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -632,13 +632,13 @@ export interface paths {
             cookie?: never;
         };
         /** List triggers */
-        get: operations["list_triggers"];
+        get: operations["triggers_list"];
         put?: never;
         /**
          * Create triggers
          * @description Stores every trigger or none, all on one configured network, each with an `id` chosen here that never changes: a template of several triggers (gas funding and sweep) never lands half.
          */
-        post: operations["create_triggers"];
+        post: operations["triggers_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -653,15 +653,15 @@ export interface paths {
             cookie?: never;
         };
         /** Read a trigger */
-        get: operations["read_trigger"];
+        get: operations["trigger_get"];
         /**
          * Replace a trigger
          * @description Replaces everything but its id and creation time; a body `id` is refused. Setting `enabled` to false pauses it.
          */
-        put: operations["replace_trigger"];
+        put: operations["trigger_replace"];
         post?: never;
         /** Delete a trigger and its runs */
-        delete: operations["delete_trigger"];
+        delete: operations["trigger_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -675,7 +675,7 @@ export interface paths {
             cookie?: never;
         };
         /** List a trigger's latest runs */
-        get: operations["list_trigger_runs"];
+        get: operations["trigger_runs_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -695,12 +695,12 @@ export interface paths {
          * Read the logged-in user
          * @description The caller's user, its scopes and its two-factor; the calling key too, when a key calls.
          */
-        get: operations["read_user"];
+        get: operations["own_user_get"];
         /**
          * Change the logged-in user's password
          * @description Sets a new password, checked as at signup; the current one is not asked, so any session of the user (a passphrase login too) may. Every other session it and its keys issued ends (401); the answer is a fresh session, the caller's scopes and `amr`.
          */
-        put: operations["update_own_user"];
+        put: operations["own_user_update"];
         post?: never;
         delete?: never;
         options?: never;
@@ -721,12 +721,12 @@ export interface paths {
          * Start two-factor
          * @description A new TOTP secret, pending until its first code is confirmed (`POST /v1/user/2fa/confirm`); starting again replaces a pending one.
          */
-        post: operations["start_two_factor"];
+        post: operations["two_factor_start"];
         /**
          * Turn two-factor off
          * @description Needs a valid code; logs the user out everywhere.
          */
-        delete: operations["stop_two_factor"];
+        delete: operations["two_factor_stop"];
         options?: never;
         head?: never;
         patch?: never;
@@ -745,7 +745,7 @@ export interface paths {
          * Confirm two-factor
          * @description Its first valid code turns two-factor on: a login needs a code from now.
          */
-        post: operations["confirm_two_factor"];
+        post: operations["two_factor_confirm"];
         delete?: never;
         options?: never;
         head?: never;
@@ -763,13 +763,13 @@ export interface paths {
          * List the keys
          * @description The caller's user's keys, revoked ones too, a page in id order; never a secret.
          */
-        get: operations["list_keys"];
+        get: operations["keys_list"];
         put?: never;
         /**
          * Create a key
          * @description A key of the caller's user, its scopes covered by the caller's. Its secret is in this answer only.
          */
-        post: operations["create_key"];
+        post: operations["keys_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -790,7 +790,7 @@ export interface paths {
          * Revoke a key
          * @description The key (its secret) and every session it signed answer 401 for good. `id` is the key's id without `hip/`.
          */
-        delete: operations["revoke_key"];
+        delete: operations["key_revoke"];
         options?: never;
         head?: never;
         patch?: never;
@@ -809,7 +809,7 @@ export interface paths {
          * Rotate a key's sessions
          * @description Every session the key signed until now answers 401; the key itself keeps working. `id` is the key's id without `hip/`.
          */
-        post: operations["rotate_key"];
+        post: operations["key_rotate"];
         delete?: never;
         options?: never;
         head?: never;
@@ -827,13 +827,13 @@ export interface paths {
          * List the users
          * @description Every user, a page in id order; never a password or a secret.
          */
-        get: operations["list_users"];
+        get: operations["users_list"];
         put?: never;
         /**
          * Create a user, or the root user on a fresh install
          * @description With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
          */
-        post: operations["create_user"];
+        post: operations["users_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -857,7 +857,7 @@ export interface paths {
          * Change a user's scopes, or disable it
          * @description Narrowing a user narrows its keys and sessions at once: one wider than its user answers 401 from the next request on.
          */
-        patch: operations["update_user"];
+        patch: operations["user_update"];
         trace?: never;
     };
     "/v1/version": {
@@ -871,7 +871,7 @@ export interface paths {
          * Read the server's version
          * @description Public: the version this server was built as, `missing_root` while no user exists (`POST /v1/users` creates the root) and every public setting's value. A 200 means the server is up and serving.
          */
-        get: operations["read_version"];
+        get: operations["version_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -891,13 +891,13 @@ export interface paths {
          * List the wallets
          * @description Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs. A caller granted only some wallets reads each by its ID.
          */
-        get: operations["list_wallets"];
+        get: operations["wallets_list"];
         put?: never;
         /**
          * Import a wallet's key, watch an address, or generate a wallet, in one configured network
          * @description With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none; another `external_id` than the kept one is refused (409); its tags and indexes stay.
          */
-        post: operations["create_wallet"];
+        post: operations["wallets_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -912,7 +912,7 @@ export interface paths {
             cookie?: never;
         };
         /** List the tags in use */
-        get: operations["list_tags"];
+        get: operations["tags_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -932,7 +932,7 @@ export interface paths {
          * Read one wallet's public metadata
          * @description The wallet's network, canonical address, whether it is keyed, the assets it is indexed in and how far each is; never its key.
          */
-        get: operations["read_wallet"];
+        get: operations["wallet_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -954,7 +954,7 @@ export interface paths {
          * Index a wallet in an asset
          * @description Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` above the chain's tip, or below it less the network's `max_depth`, is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.
          */
-        post: operations["create_wallet_index"];
+        post: operations["wallet_indexes_create"];
         delete?: never;
         options?: never;
         head?: never;
@@ -975,14 +975,14 @@ export interface paths {
          * Stop indexing a wallet in an asset
          * @description Forgets the index and its progress: its balance and history are no longer read. Creating it again starts from its new start.
          */
-        delete: operations["delete_wallet_index"];
+        delete: operations["wallet_index_delete"];
         options?: never;
         head?: never;
         /**
          * Pause or resume a wallet's index
          * @description `paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed. On a chain that reads balances (Solana, Ethereum) one left behind the chain's final block is not read back: its balance is read there and one `adjustment` leg closes the gap.
          */
-        patch: operations["update_wallet_index"];
+        patch: operations["wallet_index_update"];
         trace?: never;
     };
     "/v1/wallets/{id}/indexes/{asset}/legs": {
@@ -996,7 +996,7 @@ export interface paths {
          * List an index's mined legs
          * @description The index's legs in live blocks, latest first, each with the balance right after it. Its pending legs are on the index itself.
          */
-        get: operations["list_wallet_index_legs"];
+        get: operations["wallet_index_legs_list"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1018,7 +1018,7 @@ export interface paths {
          * Reconcile a wallet's index with the chain's balance
          * @description Deletes the index's mined legs above the chain's final block and unsets its progress: its balances read null until the next indexing step reads the chain's balance at a final block, appends one `adjustment` leg of the difference and reads on from there. Pending legs stay. Corrects what indexing cannot see, such as ether a contract sent. Only on chains that read balances (Solana, Ethereum).
          */
-        post: operations["reconcile_wallet_index"];
+        post: operations["wallet_index_reconcile"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1037,13 +1037,13 @@ export interface paths {
          * Tag a wallet
          * @description Tags the wallet, keyed or watch-only; tagging twice keeps one tag.
          */
-        put: operations["add_wallet_tag"];
+        put: operations["wallet_tag_add"];
         post?: never;
         /**
          * Untag a wallet
          * @description Removes the tag from the wallet.
          */
-        delete: operations["remove_wallet_tag"];
+        delete: operations["wallet_tag_remove"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1062,7 +1062,7 @@ export interface paths {
          * Enqueue a payment from a wallet
          * @description Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422, as does a wallet whose index of `asset` (and, for a token, of `native`, which pays the fee) is missing: there is no balance to check. A paused index still sends, and its transaction is recorded once mined.
          */
-        post: operations["send_payment"];
+        post: operations["wallet_payment_send"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1186,7 +1186,7 @@ export interface components {
             tip: components["schemas"]["LiveTip"];
         };
         /** @description `POST /v1/user/keys` body. */
-        CreateKey: {
+        CreateKeyRequest: {
             /**
              * Format: int64
              * @description Unix ms it stops working; never when absent.
@@ -1207,7 +1207,7 @@ export interface components {
          *     `totp`) log in; with `Authorization: Bearer his/…`, the key's session,
          *     for `sub`.
          */
-        CreateSession: {
+        CreateSessionRequest: {
             /** @description A login: the user's email. */
             email?: string;
             /**
@@ -1239,7 +1239,7 @@ export interface components {
             ttl?: number;
         };
         /** @description `POST /v1/users` body. */
-        CreateUser: {
+        CreateUserRequest: {
             /** @description Its login, unique. */
             email: string;
             /** @description Its name, 1 to 128 characters. */
@@ -1257,13 +1257,26 @@ export interface components {
                 [key: string]: string[];
             };
         };
+        /** @description `POST /v1/wallets/{id}/indexes` body. */
+        CreateWalletIndexRequest: {
+            /** @description The asset id to index the wallet in. */
+            asset: string;
+            /**
+             * Format: int64
+             * @description The native position to index from, at or below the chain's tip and
+             *     at or above the tip less the network's `max_depth` (a chain that
+             *     reads balances starts at its final block instead). Absent: from the chain's tip, as a generated
+             *     wallet (it has no past) must be.
+             */
+            start?: number;
+        };
         /**
          * @description `POST /v1/wallets` body: a wallet in one network, created without
          *     indexes. With `secret`, its key is imported and kept; else with
          *     `address`, the address is watched without a key; with neither, a new key
          *     is generated and kept.
          */
-        CreateWallet: {
+        CreateWalletRequest: {
             /**
              * @description Address text in any form the chain accepts; with `secret`, the
              *     address the key must derive.
@@ -1283,19 +1296,6 @@ export interface components {
              *     Base58 secret or keypair, Bitcoin WIF.
              */
             secret?: string;
-        };
-        /** @description `POST /v1/wallets/{id}/indexes` body. */
-        CreateWalletIndex: {
-            /** @description The asset id to index the wallet in. */
-            asset: string;
-            /**
-             * Format: int64
-             * @description The native position to index from, at or below the chain's tip and
-             *     at or above the tip less the network's `max_depth` (a chain that
-             *     reads balances starts at its final block instead). Absent: from the chain's tip, as a generated
-             *     wallet (it has no past) must be.
-             */
-            start?: number;
         };
         /** @description A key created, and its secret, shown this once. */
         CreatedKey: {
@@ -1372,6 +1372,11 @@ export interface components {
             /** @description The logged-in user (a login only). */
             user?: components["schemas"]["User"];
         };
+        /**
+         * @description Who issued a session.
+         * @enum {string}
+         */
+        Issuer: "user" | "key";
         /** @description One job of the queue. */
         Job: {
             /** @description Whether it was sent: a node accepted it, or may hold it (false for other kinds). */
@@ -1821,7 +1826,7 @@ export interface components {
             network: components["schemas"]["Network"];
         };
         /** @description The networks a change touched. */
-        NetworkEndpointsList: {
+        NetworkEndpointsChanged: {
             /** @description Networks in chain, then name, order. */
             networks: components["schemas"]["NetworkEndpoints"][];
         };
@@ -2195,7 +2200,7 @@ export interface components {
             /** @description Its key, when a key issued it. */
             key?: components["schemas"]["UserKey"];
             /** @description Who issued it. */
-            kind: components["schemas"]["Kind"];
+            kind: components["schemas"]["Issuer"];
             /** @description What it may do, packed. */
             scopes: {
                 [key: string]: string[];
@@ -2206,7 +2211,7 @@ export interface components {
             user: components["schemas"]["User"];
         };
         /** @description `PATCH /v1/markets/{name}` body. */
-        SetMarket: {
+        SetMarketRequest: {
             /** @description Whether it is asked for quotes. */
             feed: boolean;
         };
@@ -2572,7 +2577,7 @@ export interface components {
             uri: string;
         };
         /** @description `PUT /v1/user` body: what changes. */
-        UpdateOwnUser: {
+        UpdateOwnUserRequest: {
             /**
              * @description The new password, 8 characters at least; the current one is not
              *     asked.
@@ -2580,7 +2585,7 @@ export interface components {
             password: string;
         };
         /** @description `PATCH /v1/users/{id}` body: what changes. */
-        UpdateUser: {
+        UpdateUserRequest: {
             /** @description Disabled (it, its keys and every session refused), or enabled again. */
             disabled?: boolean;
             /** @description Its new scopes, packed, covered by the caller's. */
@@ -2589,7 +2594,7 @@ export interface components {
             };
         };
         /** @description `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
-        UpdateWalletIndex: {
+        UpdateWalletIndexRequest: {
             /**
              * @description `paused`: skipped, no facts kept for blocks while paused; `indexing`:
              *     resumed from `paused` or `no_data` (clearing its reason), backfilling
@@ -2827,7 +2832,7 @@ export interface components {
             wallets: components["schemas"]["Wallet"][];
         };
         /** @description `PUT /v1/settings/{key}` body. */
-        WriteSetting: {
+        WriteSettingRequest: {
             /** @description Its new value: JSON of the setting's type. */
             value: unknown;
         };
@@ -2840,7 +2845,7 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
-    read_health: {
+    health_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2869,7 +2874,7 @@ export interface operations {
             };
         };
     };
-    read_openapi_document: {
+    openapi_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -2898,7 +2903,7 @@ export interface operations {
             };
         };
     };
-    list_assets: {
+    assets_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -2936,7 +2941,7 @@ export interface operations {
             };
         };
     };
-    list_jobs: {
+    jobs_list: {
         parameters: {
             query?: {
                 /** @description Only jobs of this chain; with `network`. */
@@ -3005,7 +3010,7 @@ export interface operations {
             };
         };
     };
-    read_job: {
+    job_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3064,7 +3069,7 @@ export interface operations {
             };
         };
     };
-    list_logs: {
+    logs_list: {
         parameters: {
             query?: {
                 /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
@@ -3150,7 +3155,7 @@ export interface operations {
             };
         };
     };
-    list_log_messages: {
+    log_messages_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3188,7 +3193,7 @@ export interface operations {
             };
         };
     };
-    stream_logs: {
+    logs_stream: {
         parameters: {
             query?: {
                 /** @description Only entries of this network, `chain/name` (`bitcoin/regtest`). */
@@ -3261,7 +3266,7 @@ export interface operations {
             };
         };
     };
-    list_log_targets: {
+    log_targets_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3308,7 +3313,7 @@ export interface operations {
             };
         };
     };
-    list_markets: {
+    markets_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3355,7 +3360,7 @@ export interface operations {
             };
         };
     };
-    set_market: {
+    market_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -3367,7 +3372,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SetMarket"];
+                "application/json": components["schemas"]["SetMarketRequest"];
             };
         };
         responses: {
@@ -3427,7 +3432,7 @@ export interface operations {
             };
         };
     };
-    list_market_candles: {
+    market_candles_list: {
         parameters: {
             query: {
                 /** @description The asset's ticker (`BTC`). */
@@ -3503,7 +3508,7 @@ export interface operations {
             };
         };
     };
-    list_networks: {
+    networks_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3550,7 +3555,7 @@ export interface operations {
             };
         };
     };
-    create_network: {
+    networks_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -3619,7 +3624,7 @@ export interface operations {
             };
         };
     };
-    add_endpoints: {
+    endpoints_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -3638,7 +3643,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NetworkEndpointsList"];
+                    "application/json": components["schemas"]["NetworkEndpointsChanged"];
                 };
             };
             /** @description Malformed node, a list above 16 nodes, or a node that fails or serves another chain */
@@ -3688,7 +3693,7 @@ export interface operations {
             };
         };
     };
-    list_blocks: {
+    network_blocks_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -3763,7 +3768,7 @@ export interface operations {
             };
         };
     };
-    read_block: {
+    network_block_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -3826,7 +3831,7 @@ export interface operations {
             };
         };
     };
-    list_block_transactions: {
+    network_block_transactions_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -3903,7 +3908,7 @@ export interface operations {
             };
         };
     };
-    list_network_endpoints: {
+    network_endpoints_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -3964,7 +3969,7 @@ export interface operations {
             };
         };
     };
-    replace_network_endpoints: {
+    network_endpoints_replace: {
         parameters: {
             query?: never;
             header?: never;
@@ -4038,7 +4043,7 @@ export interface operations {
             };
         };
     };
-    add_network_endpoints: {
+    network_endpoints_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -4112,7 +4117,7 @@ export interface operations {
             };
         };
     };
-    test_network_endpoint: {
+    network_endpoint_test: {
         parameters: {
             query?: never;
             header?: never;
@@ -4177,7 +4182,7 @@ export interface operations {
             };
         };
     };
-    remove_network_endpoint: {
+    network_endpoint_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4247,7 +4252,7 @@ export interface operations {
             };
         };
     };
-    list_network_endpoint_failures: {
+    network_endpoint_failures_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -4322,7 +4327,7 @@ export interface operations {
             };
         };
     };
-    set_network_endpoint_state: {
+    network_endpoint_state_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -4396,7 +4401,7 @@ export interface operations {
             };
         };
     };
-    list_network_routes: {
+    network_routes_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -4457,7 +4462,7 @@ export interface operations {
             };
         };
     };
-    replace_network_routes: {
+    network_routes_replace: {
         parameters: {
             query?: never;
             header?: never;
@@ -4531,7 +4536,7 @@ export interface operations {
             };
         };
     };
-    search_tip: {
+    network_tip_search: {
         parameters: {
             query: {
                 /**
@@ -4598,7 +4603,7 @@ export interface operations {
             };
         };
     };
-    list_network_transactions: {
+    network_transactions_list: {
         parameters: {
             query?: {
                 /**
@@ -4678,7 +4683,7 @@ export interface operations {
             };
         };
     };
-    read_recovery: {
+    recovery_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4725,7 +4730,7 @@ export interface operations {
             };
         };
     };
-    create_recovery: {
+    recovery_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -4772,7 +4777,7 @@ export interface operations {
             };
         };
     };
-    remove_recovery: {
+    recovery_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -4817,7 +4822,7 @@ export interface operations {
             };
         };
     };
-    read_session: {
+    session_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -4846,7 +4851,7 @@ export interface operations {
             };
         };
     };
-    create_session: {
+    session_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -4855,7 +4860,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateSession"];
+                "application/json": components["schemas"]["CreateSessionRequest"];
             };
         };
         responses: {
@@ -4906,7 +4911,7 @@ export interface operations {
             };
         };
     };
-    delete_session: {
+    session_delete: {
         parameters: {
             query?: {
                 /**
@@ -4957,7 +4962,7 @@ export interface operations {
             };
         };
     };
-    list_settings: {
+    settings_list: {
         parameters: {
             query?: never;
             header?: never;
@@ -5004,7 +5009,7 @@ export interface operations {
             };
         };
     };
-    write_setting: {
+    setting_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -5016,7 +5021,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["WriteSetting"];
+                "application/json": components["schemas"]["WriteSettingRequest"];
             };
         };
         responses: {
@@ -5067,7 +5072,7 @@ export interface operations {
             };
         };
     };
-    read_stats: {
+    stats_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -5114,7 +5119,7 @@ export interface operations {
             };
         };
     };
-    list_triggers: {
+    triggers_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -5175,7 +5180,7 @@ export interface operations {
             };
         };
     };
-    create_triggers: {
+    triggers_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -5253,7 +5258,7 @@ export interface operations {
             };
         };
     };
-    read_trigger: {
+    trigger_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -5312,7 +5317,7 @@ export interface operations {
             };
         };
     };
-    replace_trigger: {
+    trigger_replace: {
         parameters: {
             query?: never;
             header?: never;
@@ -5384,7 +5389,7 @@ export interface operations {
             };
         };
     };
-    delete_trigger: {
+    trigger_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -5441,7 +5446,7 @@ export interface operations {
             };
         };
     };
-    list_trigger_runs: {
+    trigger_runs_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -5505,7 +5510,7 @@ export interface operations {
             };
         };
     };
-    read_user: {
+    own_user_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -5543,7 +5548,7 @@ export interface operations {
             };
         };
     };
-    update_own_user: {
+    own_user_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -5552,7 +5557,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UpdateOwnUser"];
+                "application/json": components["schemas"]["UpdateOwnUserRequest"];
             };
         };
         responses: {
@@ -5603,7 +5608,7 @@ export interface operations {
             };
         };
     };
-    start_two_factor: {
+    two_factor_start: {
         parameters: {
             query?: never;
             header?: never;
@@ -5659,7 +5664,7 @@ export interface operations {
             };
         };
     };
-    stop_two_factor: {
+    two_factor_stop: {
         parameters: {
             query?: never;
             header?: never;
@@ -5726,7 +5731,7 @@ export interface operations {
             };
         };
     };
-    confirm_two_factor: {
+    two_factor_confirm: {
         parameters: {
             query?: never;
             header?: never;
@@ -5793,7 +5798,7 @@ export interface operations {
             };
         };
     };
-    list_keys: {
+    keys_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -5854,7 +5859,7 @@ export interface operations {
             };
         };
     };
-    create_key: {
+    keys_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -5863,7 +5868,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateKey"];
+                "application/json": components["schemas"]["CreateKeyRequest"];
             };
         };
         responses: {
@@ -5914,7 +5919,7 @@ export interface operations {
             };
         };
     };
-    revoke_key: {
+    key_revoke: {
         parameters: {
             query?: never;
             header?: never;
@@ -5971,7 +5976,7 @@ export interface operations {
             };
         };
     };
-    rotate_key: {
+    key_rotate: {
         parameters: {
             query?: never;
             header?: never;
@@ -6030,7 +6035,7 @@ export interface operations {
             };
         };
     };
-    list_users: {
+    users_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -6091,7 +6096,7 @@ export interface operations {
             };
         };
     };
-    create_user: {
+    users_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -6100,7 +6105,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateUser"];
+                "application/json": components["schemas"]["CreateUserRequest"];
             };
         };
         responses: {
@@ -6160,7 +6165,7 @@ export interface operations {
             };
         };
     };
-    update_user: {
+    user_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -6172,7 +6177,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UpdateUser"];
+                "application/json": components["schemas"]["UpdateUserRequest"];
             };
         };
         responses: {
@@ -6232,7 +6237,7 @@ export interface operations {
             };
         };
     };
-    read_version: {
+    version_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -6261,7 +6266,7 @@ export interface operations {
             };
         };
     };
-    list_wallets: {
+    wallets_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -6322,7 +6327,7 @@ export interface operations {
             };
         };
     };
-    create_wallet: {
+    wallets_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -6331,7 +6336,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateWallet"];
+                "application/json": components["schemas"]["CreateWalletRequest"];
             };
         };
         responses: {
@@ -6409,7 +6414,7 @@ export interface operations {
             };
         };
     };
-    list_tags: {
+    tags_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -6470,7 +6475,7 @@ export interface operations {
             };
         };
     };
-    read_wallet: {
+    wallet_get: {
         parameters: {
             query?: never;
             header?: never;
@@ -6538,7 +6543,7 @@ export interface operations {
             };
         };
     };
-    create_wallet_index: {
+    wallet_indexes_create: {
         parameters: {
             query?: never;
             header?: never;
@@ -6550,7 +6555,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateWalletIndex"];
+                "application/json": components["schemas"]["CreateWalletIndexRequest"];
             };
         };
         responses: {
@@ -6619,7 +6624,7 @@ export interface operations {
             };
         };
     };
-    delete_wallet_index: {
+    wallet_index_delete: {
         parameters: {
             query?: never;
             header?: never;
@@ -6687,7 +6692,7 @@ export interface operations {
             };
         };
     };
-    update_wallet_index: {
+    wallet_index_update: {
         parameters: {
             query?: never;
             header?: never;
@@ -6701,7 +6706,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["UpdateWalletIndex"];
+                "application/json": components["schemas"]["UpdateWalletIndexRequest"];
             };
         };
         responses: {
@@ -6761,7 +6766,7 @@ export interface operations {
             };
         };
     };
-    list_wallet_index_legs: {
+    wallet_index_legs_list: {
         parameters: {
             query?: {
                 /** @description `next_cursor` of the previous page; absent for the first page. */
@@ -6827,7 +6832,7 @@ export interface operations {
             };
         };
     };
-    reconcile_wallet_index: {
+    wallet_index_reconcile: {
         parameters: {
             query?: never;
             header?: never;
@@ -6906,7 +6911,7 @@ export interface operations {
             };
         };
     };
-    add_wallet_tag: {
+    wallet_tag_add: {
         parameters: {
             query?: never;
             header?: never;
@@ -6974,7 +6979,7 @@ export interface operations {
             };
         };
     };
-    remove_wallet_tag: {
+    wallet_tag_remove: {
         parameters: {
             query?: never;
             header?: never;
@@ -7042,7 +7047,7 @@ export interface operations {
             };
         };
     };
-    send_payment: {
+    wallet_payment_send: {
         parameters: {
             query?: never;
             header?: never;

@@ -85,7 +85,7 @@ struct Failed {
 #[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/tip/search",
-    operation_id = "search_tip",
+    operation_id = "network_tip_search",
     summary = "Find a network's last block at or before a time, streaming the search",
     description = "`text/event-stream`, read from the node: `event: probe` with \
         `{\"low\":{\"position\",\"timestamp\"},\"high\":{…}}` after each step of the binary \

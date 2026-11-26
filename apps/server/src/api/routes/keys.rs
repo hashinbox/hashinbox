@@ -49,7 +49,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/user/keys",
-    operation_id = "list_keys",
+    operation_id = "keys_list",
     summary = "List the keys",
     description = "The caller's user's keys, revoked ones too, a page in id order; never a \
         secret.",
@@ -81,7 +81,7 @@ async fn list(
 
 /// `POST /v1/user/keys` body.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = CreateKey)]
+#[schema(as = CreateKeyRequest)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     /// What it is for, 1 to 128 characters: `shop backend`.
@@ -112,7 +112,7 @@ struct CreateResponse {
 #[scope::utoipa(
     post,
     path = "/v1/user/keys",
-    operation_id = "create_key",
+    operation_id = "keys_create",
     summary = "Create a key",
     description = "A key of the caller's user, its scopes covered by the caller's. Its secret \
         is in this answer only.",
@@ -167,7 +167,7 @@ impl KeyPath {
 #[scope::utoipa(
     delete,
     path = "/v1/user/keys/{id}",
-    operation_id = "revoke_key",
+    operation_id = "key_revoke",
     summary = "Revoke a key",
     description = "The key (its secret) and every session it signed answer 401 for good. `id` \
         is the key's id without `hip/`.",
@@ -195,7 +195,7 @@ async fn revoke(
 #[scope::utoipa(
     post,
     path = "/v1/user/keys/{id}/rotate",
-    operation_id = "rotate_key",
+    operation_id = "key_rotate",
     summary = "Rotate a key's sessions",
     description = "Every session the key signed until now answers 401; the key itself keeps \
         working. `id` is the key's id without `hip/`.",

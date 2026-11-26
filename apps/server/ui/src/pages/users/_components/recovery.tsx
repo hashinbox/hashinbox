@@ -155,7 +155,7 @@ export function RecoveryBanner() {
   }, []);
 
   if (!shown) return null;
-  const target = `${href(['users', 'me'])}#${ANCHOR}`;
+  const target = `${href(['user'])}#${ANCHOR}`;
   return (
     <Alert
       severity="warning"
@@ -174,7 +174,7 @@ export function RecoveryBanner() {
         href={target}
         onClick={(e) => {
           e.preventDefault();
-          go(['users', 'me']);
+          go(['user']);
           window.history.replaceState(null, '', target);
         }}
       >

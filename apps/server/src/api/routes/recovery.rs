@@ -29,7 +29,7 @@ struct ReadResponse {
 #[scope::utoipa(
     get,
     path = "/v1/recovery",
-    operation_id = "read_recovery",
+    operation_id = "recovery_get",
     summary = "Read whether the recovery passphrase is set",
     description = "Whether a passphrase is set and when it was created; never its words or \
         hash. Needs `recovery.$write`, as the other recovery routes do.",
@@ -63,7 +63,7 @@ struct CreateResponse {
 #[scope::utoipa(
     post,
     path = "/v1/recovery",
-    operation_id = "create_recovery",
+    operation_id = "recovery_create",
     summary = "Create or replace the recovery passphrase",
     description = "12 new BIP39 words, answered this once, in place of any passphrase set; \
         only their argon2id hash is kept. Replacing ends every session the old words made \
@@ -90,7 +90,7 @@ async fn create(
 #[scope::utoipa(
     delete,
     path = "/v1/recovery",
-    operation_id = "remove_recovery",
+    operation_id = "recovery_delete",
     summary = "Remove the recovery passphrase",
     description = "Passphrase logins are off (refused as wrong credentials) and every session \
         the words made ends (`session_expired`). 204 when none is set too.",

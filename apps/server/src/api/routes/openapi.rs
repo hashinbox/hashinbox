@@ -13,7 +13,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
 #[utoipa::path(
     get,
     path = "/openapi.json",
-    operation_id = "read_openapi_document",
+    operation_id = "openapi_get",
     summary = "Read this OpenAPI 3 document",
     description = "The contract every route is generated from; public, like the health routes.",
     responses(

@@ -1,0 +1,188 @@
+{
+  "openapi": "3.1.0",
+  "info": { "title": "mini-api", "version": "1.2.3" },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "summary": "Read the health",
+        "operationId": "health_get",
+        "responses": {
+          "200": {
+            "description": "It is up",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status"],
+                  "properties": { "status": { "type": "string" } }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/pets": {
+      "get": {
+        "tags": ["pets"],
+        "summary": "List pets",
+        "description": "Newest first.",
+        "operationId": "pets_list",
+        "parameters": [
+          { "name": "cursor", "in": "query", "description": "Where the page starts.", "schema": { "type": "string" } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "format": "int64", "minimum": 1 } },
+          { "name": "kind", "in": "query", "schema": { "$ref": "#/components/schemas/Kind" } }
+        ],
+        "responses": {
+          "200": { "description": "A page", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PetList" } } } },
+          "400": { "description": "Bad cursor", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        },
+        "security": [{ "bearer": ["mini.pets.$read"] }]
+      },
+      "post": {
+        "tags": ["pets"],
+        "summary": "Create a pet",
+        "operationId": "pets_create",
+        "requestBody": {
+          "description": "The pet.",
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } },
+          "required": true
+        },
+        "responses": {
+          "200": { "description": "Known", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } },
+          "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } }
+        },
+        "security": [{ "bearer": ["mini.pets.$write", "mini.owners.$read"] }]
+      }
+    },
+    "/v1/pets/{id}": {
+      "get": {
+        "tags": ["pets"],
+        "summary": "Read one pet",
+        "operationId": "pet_get",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "description": "Its id.", "schema": { "type": "string" } }],
+        "responses": {
+          "200": { "description": "The pet", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } },
+          "404": { "description": "Unknown", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
+        },
+        "security": [{ "bearer": ["mini.pets[{id}].$read"] }]
+      },
+      "delete": {
+        "tags": ["pets"],
+        "summary": "Delete one pet",
+        "operationId": "pet_delete",
+        "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
+        "responses": { "204": { "description": "Gone" } },
+        "security": [{ "bearer": ["mini.pets[{id}].$write"] }]
+      }
+    },
+    "/v1/pets/{id}/events": {
+      "get": {
+        "tags": ["pets"],
+        "summary": "Stream a pet's events",
+        "operationId": "pet_events_stream",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "since", "in": "query", "description": "Unix ms.", "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The events",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" },
+                "x-events": { "bark": { "$ref": "#/components/schemas/Bark" }, "missed": { "$ref": "#/components/schemas/Missed" } }
+              }
+            }
+          }
+        },
+        "security": [{ "bearer": ["mini.pets[{id}].$read"] }]
+      }
+    },
+    "/v1/logs/stream": {
+      "get": {
+        "tags": ["animals"],
+        "summary": "Stream the logs",
+        "operationId": "logs_stream",
+        "responses": { "200": { "description": "Lines", "content": { "text/event-stream": { "schema": { "type": "string" } } } } },
+        "security": [{ "bearer": ["mini.logs.$read"] }]
+      }
+    },
+    "/v1/animals": {
+      "get": {
+        "tags": ["animals"],
+        "summary": "List every animal",
+        "operationId": "animals_list",
+        "responses": {
+          "200": {
+            "description": "Them all",
+            "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Animal" } } } }
+          }
+        },
+        "security": [{ "bearer": [] }]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Animal": {
+        "description": "A pet or a robot.",
+        "oneOf": [{ "$ref": "#/components/schemas/Pet" }, { "$ref": "#/components/schemas/Robot" }]
+      },
+      "Bark": {
+        "type": "object",
+        "required": ["loud"],
+        "properties": { "loud": { "type": "boolean" } }
+      },
+      "Kind": { "type": "string", "description": "What a pet is.", "enum": ["cat", "dog", "no_data"] },
+      "Missed": {
+        "type": "object",
+        "required": ["missed"],
+        "properties": { "missed": { "type": "integer", "format": "int32", "description": "How many." } }
+      },
+      "Owner": {
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } }
+      },
+      "Pet": {
+        "type": "object",
+        "description": "A pet.",
+        "required": ["id", "kind", "owner", "born_at"],
+        "properties": {
+          "attributes": { "type": "object", "description": "Free text by key.", "additionalProperties": { "type": "string" } },
+          "born_at": { "type": ["integer", "null"], "format": "int64", "description": "Unix ms; null: unknown." },
+          "id": { "type": "string" },
+          "kind": { "$ref": "#/components/schemas/Kind" },
+          "name": { "type": "string", "description": "What it answers to." },
+          "owner": { "oneOf": [{ "type": "null" }, { "$ref": "#/components/schemas/Owner" }] },
+          "tags": { "type": "array", "items": { "type": "string" } },
+          "weight": { "type": "number" }
+        },
+        "additionalProperties": false
+      },
+      "PetList": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Page" },
+          { "type": "object", "required": ["items"], "properties": { "items": { "type": "array", "items": { "$ref": "#/components/schemas/Pet" } } } }
+        ]
+      },
+      "Page": {
+        "type": "object",
+        "required": ["next_cursor"],
+        "properties": { "next_cursor": { "type": ["string", "null"], "description": "The next page's cursor." } }
+      },
+      "Problem": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" }, "details": {} }
+      },
+      "Robot": {
+        "type": "object",
+        "required": ["serial"],
+        "properties": { "serial": { "type": "string" } }
+      }
+    },
+    "securitySchemes": { "bearer": { "type": "http", "scheme": "bearer" } }
+  }
+}

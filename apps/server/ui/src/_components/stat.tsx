@@ -23,6 +23,8 @@ export function Stat({
         border: 1,
         borderColor: 'divider',
         borderRadius: '8px',
+        // A solid fill, the theme's card surface: the dashboard watermark stays behind it.
+        bgcolor: 'background.paper',
         minWidth: 0,
         display: 'flex',
         flexDirection: 'column',

@@ -172,7 +172,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/jobs",
-    operation_id = "list_jobs",
+    operation_id = "jobs_list",
     summary = "List queued jobs",
     params(ListQuery, IndexParams),
     responses(
@@ -216,7 +216,7 @@ struct JobPath {
 #[scope::utoipa(
     get,
     path = "/v1/jobs/{id}",
-    operation_id = "read_job",
+    operation_id = "job_get",
     summary = "Read a queued job",
     description = "The job's outcome, what it was given and what its worker has done; for a \
         broadcast, the transaction it recorded and whether it was sent.",

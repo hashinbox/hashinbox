@@ -41,7 +41,7 @@ struct LegsResponse {
 #[scope::utoipa(
     get,
     path = "/v1/wallets/{id}/indexes/{asset}/legs",
-    operation_id = "list_wallet_index_legs",
+    operation_id = "wallet_index_legs_list",
     summary = "List an index's mined legs",
     description = "The index's legs in live blocks, latest first, each with the balance right \
         after it. Its pending legs are on the index itself.",

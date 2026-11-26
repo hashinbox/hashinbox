@@ -41,7 +41,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/assets",
-    operation_id = "list_assets",
+    operation_id = "assets_list",
     summary = "List every configured asset",
     description = "Every asset of every configured network, with its metadata. This is the \
         only list of assets the wallet routes accept.",

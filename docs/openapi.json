@@ -22,7 +22,7 @@
         ],
         "summary": "Read readiness and every indexed network's indexing",
         "description": "Public readiness: ready when at least one network has an index, every indexed network has an enabled RPC node, and no network's index job has a reason (`job_reason`: it failed, or goes again because of it). Reads the stored networks; no RPC.",
-        "operationId": "read_health",
+        "operationId": "health_get",
         "responses": {
           "200": {
             "description": "Ready",
@@ -54,7 +54,7 @@
         ],
         "summary": "Read this OpenAPI 3 document",
         "description": "The contract every route is generated from; public, like the health routes.",
-        "operationId": "read_openapi_document",
+        "operationId": "openapi_get",
         "responses": {
           "200": {
             "description": "OpenAPI 3 contract",
@@ -86,7 +86,7 @@
         ],
         "summary": "List every configured asset",
         "description": "Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.",
-        "operationId": "list_assets",
+        "operationId": "assets_list",
         "responses": {
           "200": {
             "description": "Configured assets",
@@ -134,7 +134,7 @@
           "jobs"
         ],
         "summary": "List queued jobs",
-        "operationId": "list_jobs",
+        "operationId": "jobs_list",
         "parameters": [
           {
             "name": "chain",
@@ -263,7 +263,7 @@
         ],
         "summary": "Read a queued job",
         "description": "The job's outcome, what it was given and what its worker has done; for a broadcast, the transaction it recorded and whether it was sent.",
-        "operationId": "read_job",
+        "operationId": "job_get",
         "parameters": [
           {
             "name": "id",
@@ -343,7 +343,7 @@
         ],
         "summary": "List the kept log entries",
         "description": "The kept entries the filters read, newest first, a page at a time: its level, event (`target`), own message (null: its template's, `/v1/logs/messages`) and fields, and its network, job, wallet, transaction, trigger and market when it has them. With `after`, oldest first from that moment, so a reader can page forward from a time. Debug and trace entries are kept 24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's (or no network's) entries outside a job.",
-        "operationId": "list_logs",
+        "operationId": "logs_list",
         "parameters": [
           {
             "name": "network",
@@ -538,7 +538,7 @@
         ],
         "summary": "List the log message templates",
         "description": "Every event's (`target`) message template, by which a log entry with no `message` of its own reads: each `{key}` filled from its field `key`. An event without a template reads as its code and its fields. They change only with the server, so the answer may be cached.",
-        "operationId": "list_log_messages",
+        "operationId": "log_messages_list",
         "responses": {
           "200": {
             "description": "The templates",
@@ -587,7 +587,7 @@
         ],
         "summary": "Stream new log entries",
         "description": "`text/event-stream` of every entry kept from now on that the filters read (those of the list): one event per entry, its `data` a `LogEntry` (its `id` 0: not yet stored). A reader too slow for the feed gets `event: missed` with `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the stream does not end.",
-        "operationId": "stream_logs",
+        "operationId": "logs_stream",
         "parameters": [
           {
             "name": "network",
@@ -750,7 +750,7 @@
         ],
         "summary": "List the logged events",
         "description": "Every event (`target`) a kept entry has, each once, in order: the values the `target` filter of the log lists and the stream takes.",
-        "operationId": "list_log_targets",
+        "operationId": "log_targets_list",
         "responses": {
           "200": {
             "description": "The events",
@@ -809,7 +809,7 @@
         ],
         "summary": "List the markets and the latest prices",
         "description": "Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.",
-        "operationId": "list_markets",
+        "operationId": "markets_list",
         "responses": {
           "200": {
             "description": "The markets",
@@ -868,7 +868,7 @@
         ],
         "summary": "Turn a market's feed on or off",
         "description": "Stores whether the market is asked for quotes; the market job reads it on its next tick (within 10 s).",
-        "operationId": "set_market",
+        "operationId": "market_update",
         "parameters": [
           {
             "name": "name",
@@ -884,7 +884,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SetMarket"
+                "$ref": "#/components/schemas/SetMarketRequest"
               }
             }
           },
@@ -968,7 +968,7 @@
         ],
         "summary": "List a market's hourly candles of an asset",
         "description": "The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.",
-        "operationId": "list_market_candles",
+        "operationId": "market_candles_list",
         "parameters": [
           {
             "name": "name",
@@ -1077,7 +1077,7 @@
         ],
         "summary": "List every network, its assets, its RPC nodes, its indexing and its tip",
         "description": "Every stored network: its row, its assets, its routes, its nodes (each URL with its calls and, while disabled, the record that disabled it: `disabled`) and its `index` (its `network_index` row and why its index job last failed, `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, kept in memory: no node is asked.",
-        "operationId": "list_networks",
+        "operationId": "networks_list",
         "responses": {
           "200": {
             "description": "Every network",
@@ -1134,7 +1134,7 @@
         ],
         "summary": "Add a network",
         "description": "Stores a network and its native currency in one write, checked by its chain as a start reads it, then registers it at once, with no node: add its nodes with `POST /v1/networks/{chain}/{network}/endpoints`, and it indexes from then on.",
-        "operationId": "create_network",
+        "operationId": "networks_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1223,7 +1223,7 @@
         ],
         "summary": "Add RPC nodes to one or more networks",
         "description": "Appends each node after its network's current ones, stores every changed list in one write (all or none), then sends every later call of those networks to their new lists. A provider's nodes for several networks are added at once this way.",
-        "operationId": "add_endpoints",
+        "operationId": "endpoints_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1240,7 +1240,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NetworkEndpointsList"
+                  "$ref": "#/components/schemas/NetworkEndpointsChanged"
                 }
               }
             }
@@ -1312,7 +1312,7 @@
         ],
         "summary": "List a network's last kept blocks",
         "description": "Live kept blocks, latest first, a page at a time.",
-        "operationId": "list_blocks",
+        "operationId": "network_blocks_list",
         "parameters": [
           {
             "name": "chain",
@@ -1432,7 +1432,7 @@
           "networks"
         ],
         "summary": "Read one kept block of a network",
-        "operationId": "read_block",
+        "operationId": "network_block_get",
         "parameters": [
           {
             "name": "chain",
@@ -1531,7 +1531,7 @@
           "networks"
         ],
         "summary": "List a live block's kept transactions",
-        "operationId": "list_block_transactions",
+        "operationId": "network_block_transactions_list",
         "parameters": [
           {
             "name": "chain",
@@ -1663,7 +1663,7 @@
         ],
         "summary": "List a network's RPC nodes",
         "description": "Its stored nodes in stored order: each one's id, URL (as `PUT` takes it) and position, its calls (`stats`, each written as it finishes) and, while disabled, the record that disabled it (`disabled`: its kind and why; null: enabled).",
-        "operationId": "list_network_endpoints",
+        "operationId": "network_endpoints_list",
         "parameters": [
           {
             "name": "chain",
@@ -1750,7 +1750,7 @@
         ],
         "summary": "Replace a network's RPC nodes",
         "description": "Stores the nodes, then sends every later call of the network (indexing, wallets, broadcast) to them: the healthy node with the highest tip first, then the others in order; calls already sent finish on the node they reached. Each node is asked its chain and tip once, before storing. A URL already stored keeps its id, routes and state; one left out is removed with its routes.",
-        "operationId": "replace_network_endpoints",
+        "operationId": "network_endpoints_replace",
         "parameters": [
           {
             "name": "chain",
@@ -1857,7 +1857,7 @@
         ],
         "summary": "Add RPC nodes to a network",
         "description": "Appends the nodes after the network's current ones, stores the list, then sends every later call of the network to it.",
-        "operationId": "add_network_endpoints",
+        "operationId": "network_endpoints_create",
         "parameters": [
           {
             "name": "chain",
@@ -1966,7 +1966,7 @@
         ],
         "summary": "Test an RPC node against a network, without adding it",
         "description": "Asks the node its chain and tip once, as adding it would, and answers them; nothing is stored. A node that fails, or serves another chain, is refused with why (its chain id said).",
-        "operationId": "test_network_endpoint",
+        "operationId": "network_endpoint_test",
         "parameters": [
           {
             "name": "chain",
@@ -2065,7 +2065,7 @@
         ],
         "summary": "Remove one RPC node of a network",
         "description": "Removes the node `id` and its routes, stores the rest and uses them from now on. A network's last node cannot be removed.",
-        "operationId": "remove_network_endpoint",
+        "operationId": "network_endpoint_delete",
         "parameters": [
           {
             "name": "chain",
@@ -2172,7 +2172,7 @@
         ],
         "summary": "List what disabled or enabled one RPC node",
         "description": "Every failure of the node it cannot recover from (which disabled it: `http_401`, `http_403`, `http_404`, `wrong_chain`, ...) and every disable or enable by hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).",
-        "operationId": "list_network_endpoint_failures",
+        "operationId": "network_endpoint_failures_list",
         "parameters": [
           {
             "name": "chain",
@@ -2301,7 +2301,7 @@
         ],
         "summary": "Enable or disable one RPC node of a network",
         "description": "Stores why (a `manual` record disables, an `enabled` one enables), then sends every later call of the network to its enabled nodes only; a route skips a disabled node. Disabling the last enabled node is allowed: the network's index job idles and its payments wait until one is enabled again. Asks no node.",
-        "operationId": "set_network_endpoint_state",
+        "operationId": "network_endpoint_state_update",
         "parameters": [
           {
             "name": "chain",
@@ -2418,7 +2418,7 @@
         ],
         "summary": "List a network's routed methods",
         "description": "Each routed method and the nodes taking turns serving it, round robin. Every other method goes to the network's healthy node with the highest tip.",
-        "operationId": "list_network_routes",
+        "operationId": "network_routes_list",
         "parameters": [
           {
             "name": "chain",
@@ -2505,7 +2505,7 @@
         ],
         "summary": "Replace a network's routed methods",
         "description": "Stores the routes, then sends each routed method round robin over its nodes, and every other method to the healthy node with the highest tip. A routed call failing retryably moves to the next node, then to the network's other nodes. No node is asked.",
-        "operationId": "replace_network_routes",
+        "operationId": "network_routes_replace",
         "parameters": [
           {
             "name": "chain",
@@ -2614,7 +2614,7 @@
         ],
         "summary": "Find a network's last block at or before a time, streaming the search",
         "description": "`text/event-stream`, read from the node: `event: probe` with `{\"low\":{\"position\",\"timestamp\"},\"high\":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{\"position\",\"timestamp\"}`, or `event: error` with `{\"message\"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends.",
-        "operationId": "search_tip",
+        "operationId": "network_tip_search",
         "parameters": [
           {
             "name": "chain",
@@ -2711,7 +2711,7 @@
           "networks"
         ],
         "summary": "List a network's transactions, or only its pending ones",
-        "operationId": "list_network_transactions",
+        "operationId": "network_transactions_list",
         "parameters": [
           {
             "name": "chain",
@@ -2841,7 +2841,7 @@
         ],
         "summary": "Read whether the recovery passphrase is set",
         "description": "Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.",
-        "operationId": "read_recovery",
+        "operationId": "recovery_get",
         "responses": {
           "200": {
             "description": "Set or not",
@@ -2898,7 +2898,7 @@
         ],
         "summary": "Create or replace the recovery passphrase",
         "description": "12 new BIP39 words, answered this once, in place of any passphrase set; only their argon2id hash is kept. Replacing ends every session the old words made (`session_expired`). They sign in as any user (`POST /v1/session` with `passphrase`), two-factor still asked: whoever holds them is every user without two-factor.",
-        "operationId": "create_recovery",
+        "operationId": "recovery_create",
         "responses": {
           "201": {
             "description": "Created: the words, shown once",
@@ -2955,7 +2955,7 @@
         ],
         "summary": "Remove the recovery passphrase",
         "description": "Passphrase logins are off (refused as wrong credentials) and every session the words made ends (`session_expired`). 204 when none is set too.",
-        "operationId": "remove_recovery",
+        "operationId": "recovery_delete",
         "responses": {
           "204": {
             "description": "Removed"
@@ -3007,7 +3007,7 @@
         ],
         "summary": "Read the caller's session",
         "description": "The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.",
-        "operationId": "read_session",
+        "operationId": "session_get",
         "responses": {
           "200": {
             "description": "The session",
@@ -3042,12 +3042,12 @@
         ],
         "summary": "Log in, or sign a key's session",
         "description": "With `email` and `password` or `passphrase` (the recovery passphrase, any user's email; and `totp` once two-factor is on) and no `Authorization`: a session of the user, its scopes or fewer, its `amr` `pwd` or `passphrase` (and `otp`). A wrong email, password, passphrase or code answers the same 401; the rest right without the code answers 401 `totp_required`. With `Authorization: Bearer his/…`: a session of the key, signed here, for a caller that cannot sign (`sub`, `scopes` covered by the key's).",
-        "operationId": "create_session",
+        "operationId": "session_create",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateSession"
+                "$ref": "#/components/schemas/CreateSessionRequest"
               }
             }
           },
@@ -3112,7 +3112,7 @@
         ],
         "summary": "Log out",
         "description": "Alone, nothing: the client forgets its token. With `all=true`, every session the caller's issuer (its user, or its key) issued until now answers 401, this one too.",
-        "operationId": "delete_session",
+        "operationId": "session_delete",
         "parameters": [
           {
             "name": "all",
@@ -3173,7 +3173,7 @@
         ],
         "summary": "List the settings",
         "description": "Every setting the server declares: its key, value (its default when never written), default, whether it is public, description and type. A secret setting (`recovery_passphrase`) shows only its key, whether it is set and its description.",
-        "operationId": "list_settings",
+        "operationId": "settings_list",
         "responses": {
           "200": {
             "description": "Every setting",
@@ -3232,7 +3232,7 @@
         ],
         "summary": "Write a setting",
         "description": "Stores the setting's value once it parses as the setting's type and passes its check. Whether it is public is the declaration's, never the request's. A secret setting is never written here: 403 `permission_denied`.",
-        "operationId": "write_setting",
+        "operationId": "setting_update",
         "parameters": [
           {
             "name": "key",
@@ -3248,7 +3248,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/WriteSetting"
+                "$ref": "#/components/schemas/WriteSettingRequest"
               }
             }
           },
@@ -3322,7 +3322,7 @@
         ],
         "summary": "Read what the store holds and its last day",
         "description": "Counts across every network, and per hour over the last day: blocks and transactions by chain time (up to the newest kept block), jobs and trigger runs by this server's time.",
-        "operationId": "read_stats",
+        "operationId": "stats_get",
         "responses": {
           "200": {
             "description": "The stats",
@@ -3380,7 +3380,7 @@
           "triggers"
         ],
         "summary": "List triggers",
-        "operationId": "list_triggers",
+        "operationId": "triggers_list",
         "parameters": [
           {
             "name": "cursor",
@@ -3471,7 +3471,7 @@
         ],
         "summary": "Create triggers",
         "description": "Stores every trigger or none, all on one configured network, each with an `id` chosen here that never changes: a template of several triggers (gas funding and sweep) never lands half.",
-        "operationId": "create_triggers",
+        "operationId": "triggers_create",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3570,7 +3570,7 @@
           "triggers"
         ],
         "summary": "Read a trigger",
-        "operationId": "read_trigger",
+        "operationId": "trigger_get",
         "parameters": [
           {
             "name": "id",
@@ -3648,7 +3648,7 @@
         ],
         "summary": "Replace a trigger",
         "description": "Replaces everything but its id and creation time; a body `id` is refused. Setting `enabled` to false pauses it.",
-        "operationId": "replace_trigger",
+        "operationId": "trigger_replace",
         "parameters": [
           {
             "name": "id",
@@ -3746,7 +3746,7 @@
           "triggers"
         ],
         "summary": "Delete a trigger and its runs",
-        "operationId": "delete_trigger",
+        "operationId": "trigger_delete",
         "parameters": [
           {
             "name": "id",
@@ -3818,7 +3818,7 @@
           "triggers"
         ],
         "summary": "List a trigger's latest runs",
-        "operationId": "list_trigger_runs",
+        "operationId": "trigger_runs_list",
         "parameters": [
           {
             "name": "id",
@@ -3920,7 +3920,7 @@
         ],
         "summary": "Read the logged-in user",
         "description": "The caller's user, its scopes and its two-factor; the calling key too, when a key calls.",
-        "operationId": "read_user",
+        "operationId": "own_user_get",
         "responses": {
           "200": {
             "description": "The user",
@@ -3965,12 +3965,12 @@
         ],
         "summary": "Change the logged-in user's password",
         "description": "Sets a new password, checked as at signup; the current one is not asked, so any session of the user (a passphrase login too) may. Every other session it and its keys issued ends (401); the answer is a fresh session, the caller's scopes and `amr`.",
-        "operationId": "update_own_user",
+        "operationId": "own_user_update",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateOwnUser"
+                "$ref": "#/components/schemas/UpdateOwnUserRequest"
               }
             }
           },
@@ -4042,7 +4042,7 @@
         ],
         "summary": "Start two-factor",
         "description": "A new TOTP secret, pending until its first code is confirmed (`POST /v1/user/2fa/confirm`); starting again replaces a pending one.",
-        "operationId": "start_two_factor",
+        "operationId": "two_factor_start",
         "responses": {
           "201": {
             "description": "Started",
@@ -4107,7 +4107,7 @@
         ],
         "summary": "Turn two-factor off",
         "description": "Needs a valid code; logs the user out everywhere.",
-        "operationId": "stop_two_factor",
+        "operationId": "two_factor_stop",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4187,7 +4187,7 @@
         ],
         "summary": "Confirm two-factor",
         "description": "Its first valid code turns two-factor on: a login needs a code from now.",
-        "operationId": "confirm_two_factor",
+        "operationId": "two_factor_confirm",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4267,7 +4267,7 @@
         ],
         "summary": "List the keys",
         "description": "The caller's user's keys, revoked ones too, a page in id order; never a secret.",
-        "operationId": "list_keys",
+        "operationId": "keys_list",
         "parameters": [
           {
             "name": "cursor",
@@ -4358,12 +4358,12 @@
         ],
         "summary": "Create a key",
         "description": "A key of the caller's user, its scopes covered by the caller's. Its secret is in this answer only.",
-        "operationId": "create_key",
+        "operationId": "keys_create",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateKey"
+                "$ref": "#/components/schemas/CreateKeyRequest"
               }
             }
           },
@@ -4437,7 +4437,7 @@
         ],
         "summary": "Revoke a key",
         "description": "The key (its secret) and every session it signed answer 401 for good. `id` is the key's id without `hip/`.",
-        "operationId": "revoke_key",
+        "operationId": "key_revoke",
         "parameters": [
           {
             "name": "id",
@@ -4510,7 +4510,7 @@
         ],
         "summary": "Rotate a key's sessions",
         "description": "Every session the key signed until now answers 401; the key itself keeps working. `id` is the key's id without `hip/`.",
-        "operationId": "rotate_key",
+        "operationId": "key_rotate",
         "parameters": [
           {
             "name": "id",
@@ -4590,7 +4590,7 @@
         ],
         "summary": "List the users",
         "description": "Every user, a page in id order; never a password or a secret.",
-        "operationId": "list_users",
+        "operationId": "users_list",
         "parameters": [
           {
             "name": "cursor",
@@ -4681,12 +4681,12 @@
         ],
         "summary": "Create a user, or the root user on a fresh install",
         "description": "With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.",
-        "operationId": "create_user",
+        "operationId": "users_create",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateUser"
+                "$ref": "#/components/schemas/CreateUserRequest"
               }
             }
           },
@@ -4770,7 +4770,7 @@
         ],
         "summary": "Change a user's scopes, or disable it",
         "description": "Narrowing a user narrows its keys and sessions at once: one wider than its user answers 401 from the next request on.",
-        "operationId": "update_user",
+        "operationId": "user_update",
         "parameters": [
           {
             "name": "id",
@@ -4786,7 +4786,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateUser"
+                "$ref": "#/components/schemas/UpdateUserRequest"
               }
             }
           },
@@ -4870,7 +4870,7 @@
         ],
         "summary": "Read the server's version",
         "description": "Public: the version this server was built as, `missing_root` while no user exists (`POST /v1/users` creates the root) and every public setting's value. A 200 means the server is up and serving.",
-        "operationId": "read_version",
+        "operationId": "version_get",
         "responses": {
           "200": {
             "description": "The version",
@@ -4902,7 +4902,7 @@
         ],
         "summary": "List the wallets",
         "description": "Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs. A caller granted only some wallets reads each by its ID.",
-        "operationId": "list_wallets",
+        "operationId": "wallets_list",
         "parameters": [
           {
             "name": "cursor",
@@ -4993,12 +4993,12 @@
         ],
         "summary": "Import a wallet's key, watch an address, or generate a wallet, in one configured network",
         "description": "With `secret`, imports a raw private key and keeps it; with `address` too, the key must derive that address. With `address` alone, watches it without its key. With neither, generates a key and keeps it; retrying makes another wallet. The wallet is created without indexes (`POST /v1/wallets/{id}/index`). An address already kept answers its wallet as is (200), except that importing the key of a watch-only wallet keeps the key, and an `external_id` is kept on a wallet that has none; another `external_id` than the kept one is refused (409); its tags and indexes stay.",
-        "operationId": "create_wallet",
+        "operationId": "wallets_create",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateWallet"
+                "$ref": "#/components/schemas/CreateWalletRequest"
               }
             }
           },
@@ -5101,7 +5101,7 @@
           "triggers"
         ],
         "summary": "List the tags in use",
-        "operationId": "list_tags",
+        "operationId": "tags_list",
         "parameters": [
           {
             "name": "cursor",
@@ -5194,7 +5194,7 @@
         ],
         "summary": "Read one wallet's public metadata",
         "description": "The wallet's network, canonical address, whether it is keyed, the assets it is indexed in and how far each is; never its key.",
-        "operationId": "read_wallet",
+        "operationId": "wallet_get",
         "parameters": [
           {
             "name": "id",
@@ -5284,7 +5284,7 @@
         ],
         "summary": "Index a wallet in an asset",
         "description": "Indexes the wallet in `asset` from `start` (absent: the chain's tip), at once (the network's next indexing step picks it). An asset already indexed keeps its first start (200). A `start` above the chain's tip, or below it less the network's `max_depth`, is refused (400). On a chain that reads balances (Solana, Ethereum) the index starts at the chain's final block whatever `start` says (kept as `requested_from`): its balances are null until the chain's balance read there opens it with an `adjustment` leg. A start the node no longer serves moves forward to the first block it serves before indexing begins.",
-        "operationId": "create_wallet_index",
+        "operationId": "wallet_indexes_create",
         "parameters": [
           {
             "name": "id",
@@ -5300,7 +5300,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/CreateWalletIndex"
+                "$ref": "#/components/schemas/CreateWalletIndexRequest"
               }
             }
           },
@@ -5394,7 +5394,7 @@
         ],
         "summary": "Stop indexing a wallet in an asset",
         "description": "Forgets the index and its progress: its balance and history are no longer read. Creating it again starts from its new start.",
-        "operationId": "delete_wallet_index",
+        "operationId": "wallet_index_delete",
         "parameters": [
           {
             "name": "id",
@@ -5484,7 +5484,7 @@
         ],
         "summary": "Pause or resume a wallet's index",
         "description": "`paused`: skipped, no facts kept for blocks while paused; what is kept stays. `indexing`: from `paused` or `no_data` (clearing its reason), it continues from its last indexed block, backfilling what it missed. On a chain that reads balances (Solana, Ethereum) one left behind the chain's final block is not read back: its balance is read there and one `adjustment` leg closes the gap.",
-        "operationId": "update_wallet_index",
+        "operationId": "wallet_index_update",
         "parameters": [
           {
             "name": "id",
@@ -5509,7 +5509,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/UpdateWalletIndex"
+                "$ref": "#/components/schemas/UpdateWalletIndexRequest"
               }
             }
           },
@@ -5593,7 +5593,7 @@
         ],
         "summary": "List an index's mined legs",
         "description": "The index's legs in live blocks, latest first, each with the balance right after it. Its pending legs are on the index itself.",
-        "operationId": "list_wallet_index_legs",
+        "operationId": "wallet_index_legs_list",
         "parameters": [
           {
             "name": "id",
@@ -5704,7 +5704,7 @@
         ],
         "summary": "Reconcile a wallet's index with the chain's balance",
         "description": "Deletes the index's mined legs above the chain's final block and unsets its progress: its balances read null until the next indexing step reads the chain's balance at a final block, appends one `adjustment` leg of the difference and reads on from there. Pending legs stay. Corrects what indexing cannot see, such as ether a contract sent. Only on chains that read balances (Solana, Ethereum).",
-        "operationId": "reconcile_wallet_index",
+        "operationId": "wallet_index_reconcile",
         "parameters": [
           {
             "name": "id",
@@ -5813,7 +5813,7 @@
         ],
         "summary": "Tag a wallet",
         "description": "Tags the wallet, keyed or watch-only; tagging twice keeps one tag.",
-        "operationId": "add_wallet_tag",
+        "operationId": "wallet_tag_add",
         "parameters": [
           {
             "name": "id",
@@ -5903,7 +5903,7 @@
         ],
         "summary": "Untag a wallet",
         "description": "Removes the tag from the wallet.",
-        "operationId": "remove_wallet_tag",
+        "operationId": "wallet_tag_remove",
         "parameters": [
           {
             "name": "id",
@@ -5995,7 +5995,7 @@
         ],
         "summary": "Enqueue a payment from a wallet",
         "description": "Enqueues one send job of `asset` from the keyed wallet: one payment, signed as one transaction and broadcast. Several payments are several requests; a wallet's sends run one at a time, in order, and each fails on its own. A 202 response means queued, not submitted: `GET /v1/jobs/{id}` reports the outcome. Indexing records the transaction once it is mined, for the assets the wallet is watched in. A watch-only wallet answers 422, as does a wallet whose index of `asset` (and, for a token, of `native`, which pays the fee) is missing: there is no balance to check. A paused index still sends, and its transaction is recorded once mined.",
-        "operationId": "send_payment",
+        "operationId": "wallet_payment_send",
         "parameters": [
           {
             "name": "id",
@@ -6333,7 +6333,7 @@
         ],
         "description": "One stored network, and its tip as its nodes last told it."
       },
-      "CreateKey": {
+      "CreateKeyRequest": {
         "type": "object",
         "description": "`POST /v1/user/keys` body.",
         "required": [
@@ -6365,7 +6365,7 @@
         },
         "additionalProperties": false
       },
-      "CreateSession": {
+      "CreateSessionRequest": {
         "type": "object",
         "description": "`POST /v1/session` body: `email` and `password` or `passphrase` (and\n`totp`) log in; with `Authorization: Bearer his/…`, the key's session,\nfor `sub`.",
         "properties": {
@@ -6412,7 +6412,7 @@
         },
         "additionalProperties": false
       },
-      "CreateUser": {
+      "CreateUserRequest": {
         "type": "object",
         "description": "`POST /v1/users` body.",
         "required": [
@@ -6449,7 +6449,27 @@
         },
         "additionalProperties": false
       },
-      "CreateWallet": {
+      "CreateWalletIndexRequest": {
+        "type": "object",
+        "description": "`POST /v1/wallets/{id}/indexes` body.",
+        "required": [
+          "asset"
+        ],
+        "properties": {
+          "asset": {
+            "type": "string",
+            "description": "The asset id to index the wallet in."
+          },
+          "start": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The native position to index from, at or below the chain's tip and\nat or above the tip less the network's `max_depth` (a chain that\nreads balances starts at its final block instead). Absent: from the chain's tip, as a generated\nwallet (it has no past) must be.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateWalletRequest": {
         "type": "object",
         "description": "`POST /v1/wallets` body: a wallet in one network, created without\nindexes. With `secret`, its key is imported and kept; else with\n`address`, the address is watched without a key; with neither, a new key\nis generated and kept.",
         "required": [
@@ -6478,26 +6498,6 @@
           "secret": {
             "type": "string",
             "description": "A raw private key in the chain's import format: Ethereum hex, Solana\nBase58 secret or keypair, Bitcoin WIF."
-          }
-        },
-        "additionalProperties": false
-      },
-      "CreateWalletIndex": {
-        "type": "object",
-        "description": "`POST /v1/wallets/{id}/indexes` body.",
-        "required": [
-          "asset"
-        ],
-        "properties": {
-          "asset": {
-            "type": "string",
-            "description": "The asset id to index the wallet in."
-          },
-          "start": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The native position to index from, at or below the chain's tip and\nat or above the tip less the network's `max_depth` (a chain that\nreads balances starts at its final block instead). Absent: from the chain's tip, as a generated\nwallet (it has no past) must be.",
-            "minimum": 0
           }
         },
         "additionalProperties": false
@@ -6628,6 +6628,14 @@
             "description": "The logged-in user (a login only)."
           }
         }
+      },
+      "Issuer": {
+        "type": "string",
+        "description": "Who issued a session.",
+        "enum": [
+          "user",
+          "key"
+        ]
       },
       "Job": {
         "type": "object",
@@ -7545,7 +7553,7 @@
           }
         }
       },
-      "NetworkEndpointsList": {
+      "NetworkEndpointsChanged": {
         "type": "object",
         "description": "The networks a change touched.",
         "required": [
@@ -8285,7 +8293,7 @@
             "description": "Its key, when a key issued it."
           },
           "kind": {
-            "$ref": "#/components/schemas/Kind",
+            "$ref": "#/components/schemas/Issuer",
             "description": "Who issued it."
           },
           "scopes": {
@@ -8314,7 +8322,7 @@
           }
         }
       },
-      "SetMarket": {
+      "SetMarketRequest": {
         "type": "object",
         "description": "`PATCH /v1/markets/{name}` body.",
         "required": [
@@ -9047,7 +9055,7 @@
           }
         }
       },
-      "UpdateOwnUser": {
+      "UpdateOwnUserRequest": {
         "type": "object",
         "description": "`PUT /v1/user` body: what changes.",
         "required": [
@@ -9062,7 +9070,7 @@
         },
         "additionalProperties": false
       },
-      "UpdateUser": {
+      "UpdateUserRequest": {
         "type": "object",
         "description": "`PATCH /v1/users/{id}` body: what changes.",
         "properties": {
@@ -9086,7 +9094,7 @@
         },
         "additionalProperties": false
       },
-      "UpdateWalletIndex": {
+      "UpdateWalletIndexRequest": {
         "type": "object",
         "description": "`PATCH /v1/wallets/{id}/indexes/{asset}` body.",
         "required": [
@@ -9522,7 +9530,7 @@
           }
         }
       },
-      "WriteSetting": {
+      "WriteSettingRequest": {
         "type": "object",
         "description": "`PUT /v1/settings/{key}` body.",
         "required": [

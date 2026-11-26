@@ -48,7 +48,7 @@ struct ListResponse {
 #[scope::utoipa(
     get,
     path = "/v1/users",
-    operation_id = "list_users",
+    operation_id = "users_list",
     summary = "List the users",
     description = "Every user, a page in id order; never a password or a secret.",
     params(IndexParams),
@@ -79,7 +79,7 @@ async fn list(
 
 /// `POST /v1/users` body.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = CreateUser)]
+#[schema(as = CreateUserRequest)]
 #[serde(deny_unknown_fields)]
 struct CreateRequest {
     /// Its login, unique.
@@ -126,7 +126,7 @@ struct CreateResponse {
 #[scope::utoipa(
     post,
     path = "/v1/users",
-    operation_id = "create_user",
+    operation_id = "users_create",
     summary = "Create a user, or the root user on a fresh install",
     description = "With no user yet (`GET /v1/version` says `missing_root`), needs no \
         `Authorization`: creates the root user, holding every scope, logged in at once (its \
@@ -190,7 +190,7 @@ struct UserPath {
 
 /// `PATCH /v1/users/{id}` body: what changes.
 #[derive(Deserialize, utoipa::ToSchema)]
-#[schema(as = UpdateUser)]
+#[schema(as = UpdateUserRequest)]
 #[serde(deny_unknown_fields)]
 struct UpdateRequest {
     /// Its new scopes, packed, covered by the caller's.
@@ -206,7 +206,7 @@ struct UpdateRequest {
 #[scope::utoipa(
     patch,
     path = "/v1/users/{id}",
-    operation_id = "update_user",
+    operation_id = "user_update",
     summary = "Change a user's scopes, or disable it",
     description = "Narrowing a user narrows its keys and sessions at once: one wider than its \
         user answers 401 from the next request on.",
