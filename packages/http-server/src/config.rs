@@ -71,9 +71,8 @@ impl Config {
         }
     }
 
-    /// Rejects a non-loopback bind without upstream TLS, and a non-loopback
-    /// bind with no bearer token. A loopback listener may serve without a
-    /// token: only this machine can reach it.
+    /// Rejects a non-loopback bind without upstream TLS. The bearer token is
+    /// optional: an application may authenticate each request itself.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if !self.bind_addr.ip().is_loopback()
             && self.transport_security != TransportSecurity::TlsTerminatedUpstream
@@ -81,12 +80,6 @@ impl Config {
             return Err(ConfigError::new(
                 ConfigErrorKind::InsecureNonLoopbackBind,
                 "a non-loopback listener requires upstream TLS termination",
-            ));
-        }
-        if self.bearer_token.is_none() && !self.bind_addr.ip().is_loopback() {
-            return Err(ConfigError::new(
-                ConfigErrorKind::MissingBearerToken,
-                "a non-loopback listener requires a bearer token",
             ));
         }
         Ok(())
@@ -102,8 +95,6 @@ pub enum ConfigErrorKind {
     InvalidBearerToken,
     /// A non-loopback bind without [`TransportSecurity::TlsTerminatedUpstream`].
     InsecureNonLoopbackBind,
-    /// A non-loopback bind with no bearer token.
-    MissingBearerToken,
 }
 
 /// An unsafe or invalid server configuration, rejected before serving.
@@ -131,3 +122,30 @@ impl fmt::Display for ConfigError {
 }
 
 impl Error for ConfigError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(bind: &str, security: TransportSecurity) -> Config {
+        Config::new(
+            bind.parse().unwrap(),
+            security,
+            None,
+            RequestLimits::default(),
+        )
+    }
+
+    #[test]
+    fn non_loopback_needs_upstream_tls_not_a_token() {
+        let plaintext = config("0.0.0.0:8080", TransportSecurity::PlaintextLoopback);
+        assert_eq!(
+            plaintext.validate().unwrap_err().kind,
+            ConfigErrorKind::InsecureNonLoopbackBind
+        );
+        let upstream = config("0.0.0.0:8080", TransportSecurity::TlsTerminatedUpstream);
+        assert_eq!(upstream.validate(), Ok(()));
+        let loopback = config("127.0.0.1:8080", TransportSecurity::PlaintextLoopback);
+        assert_eq!(loopback.validate(), Ok(()));
+    }
+}

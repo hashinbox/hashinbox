@@ -1,0 +1,10 @@
+target/
+.git/
+.data/
+.claude/
+old/
+reference/
+node_modules/
+apps/server/ui/node_modules
+apps/server/ui/dist
+*.db*
