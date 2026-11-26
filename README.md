@@ -6,7 +6,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/hashinbox/hashinbox/actions/workflows/check.yml"><img alt="check" src="https://github.com/hashinbox/hashinbox/actions/workflows/check.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/hashinbox/hashinbox/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/hashinbox/hashinbox/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <img alt="Rust 1.91+" src="https://img.shields.io/badge/rust-1.91%2B-000000?logo=rust">
   <img alt="Bitcoin" src="https://img.shields.io/badge/Bitcoin-000000?logo=bitcoin&amp;logoColor=white">
   <img alt="Ethereum" src="https://img.shields.io/badge/Ethereum-000000?logo=ethereum&amp;logoColor=white">
