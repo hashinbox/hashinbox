@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Chain-neutral values and capabilities: canonical addresses, networks, assets, amounts, blocks, and broadcast."
-readme = "README.md"
 
 [features]
 default = []

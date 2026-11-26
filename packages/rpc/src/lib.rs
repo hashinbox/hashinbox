@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! A JSON-RPC client over HTTP, built from small decorators that are each a
+//! [`Client`]; callers are written against the trait, so a test can
+//! substitute a scripted node.
 
 mod client;
 mod decorators;

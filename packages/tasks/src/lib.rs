@@ -1,4 +1,5 @@
-#![doc = include_str!("../README.md")]
+//! A job queue: a worker per kind of job, a store with an in-memory default,
+//! and an executor running a queue per worker.
 
 pub mod events;
 #[cfg(feature = "runner")]

@@ -10,7 +10,7 @@ use serde::Serialize;
 
 /// Every file the server serves, by URL path: `ui/dist/` (written by
 /// `npm run build` in `ui/` and committed, so building the server never needs
-/// Node) at `/ui/…`, and `assets/` at `/assets/…` — a network asset's icon is
+/// Node) at the root (`/app.js`), and `assets/` at `/assets/…` — a network asset's icon is
 /// `/assets/crypto/<chain>.svg` (a native coin) or
 /// `/assets/crypto/<chain>_<asset>.svg` (a token), lowercase. Listed by
 /// `build.rs`.
@@ -55,7 +55,7 @@ impl Settings {
     fn page(&self) -> Result<String, &'static str> {
         let (_, page) = FILES
             .iter()
-            .find(|(url, _)| *url == "/ui/index.html")
+            .find(|(url, _)| *url == "/index.html")
             .ok_or("the UI is not built")?;
         let page = std::str::from_utf8(page).map_err(|_| "index.html is not UTF-8")?;
         let body = page
@@ -69,12 +69,12 @@ impl Settings {
         Ok(format!("{}{}{}", &page[..body], self.json(), &page[end..]))
     }
 
-    /// `GET /` and every page path (`/ui/networks/...`, which the page
-    /// reads) answer the page; an embedded file answers itself, and assets
-    /// (icons) are cached a year. The settings are written into the page once,
+    /// `GET /` and every other unrouted path (`/networks/...`, which the
+    /// page reads) answer the page; an embedded file answers itself, and
+    /// assets (icons) are cached a year; the API's routes win over both. The settings are written into the page once,
     /// here, so the page never has to be rebuilt to change them.
     pub(crate) fn routes(&self) -> Result<Router, &'static str> {
-        let ui = Mount::new("/ui", Embedded(FILES))
+        let ui = Mount::new("", Embedded(FILES))
             .fallback(self.page()?)
             .root(Root::Page);
         let assets = Mount::new("/assets", Embedded(FILES)).cache(Cache::Immutable);

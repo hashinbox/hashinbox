@@ -328,7 +328,7 @@ impl Indexes for WalletIndexer {
     }
 
     /// Closes the gaps of at most a few indexes whose next block is below
-    /// `line` ([`Self::close_one`]), at `confirmed`, the confirmed position;
+    /// `line` (`close_one`), at `confirmed`, the confirmed position;
     /// one failing does not stop the others, and the first failure, naming
     /// its index, is the answer. Each runs in an `index.close` span
     /// (`wallet asset`).

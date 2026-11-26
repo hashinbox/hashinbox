@@ -1,6 +1,6 @@
 //! `scope::require!` checks a scope written as a template, and
 //! `#[scope::utoipa]` writes a handler's `require!` templates into its
-//! OpenAPI `security`. Use both through the `scope` crate; see its README.
+//! OpenAPI `security`. Use both through the `scope` crate.
 
 use proc_macro::TokenStream;
 use proc_macro2::{TokenStream as Tokens, TokenTree};

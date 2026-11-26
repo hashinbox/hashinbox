@@ -3,11 +3,11 @@ import react from '@vitejs/plugin-react';
 import { fileURLToPath } from 'node:url';
 
 // The build lands in dist/ with fixed names, because the server embeds the
-// three files with include_str! and serves them at /ui/*.
+// files with include_bytes! and serves them at the root.
 export default defineConfig({
   plugins: [react()],
   resolve: { alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) } },
-  base: '/ui/',
+  base: '/',
   build: {
     outDir: 'dist',
     emptyOutDir: true,

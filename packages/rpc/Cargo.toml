@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Bounded JSON-RPC over HTTP: one URL per node; splitting, logging, counting, retry and routing as decorators."
-readme = "README.md"
 
 [features]
 default = []

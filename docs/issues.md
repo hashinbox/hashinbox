@@ -36,7 +36,7 @@ A fixed item is removed.
 ## By design
 
 - **Ether sent by contracts [X4]:** internal transfers appear in no transaction field or log, so
-  they are not indexed (`sdk/chains/ethereum/README.md`). Correct a balance with
+  they are not indexed. Correct a balance with
   `POST /v1/wallets/{id}/indexes/{asset}/reconcile`.
 - **A settle loses the history of the blocks it skips:** when an index falls below the line (an
   outage, a slow node), it settles: it reads the chain's balance at a final block and writes one

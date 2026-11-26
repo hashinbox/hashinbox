@@ -49,7 +49,7 @@ fn spacing(rps: f64) -> Option<Duration> {
 /// goes at once. It waits, never fails, for the limit. Clones share the
 /// bucket. `None`: no limit. A wait is logged as `rpc.wait` (`calls
 /// wait_ms`), debug, and is what [`crate::Traced`] under it reports as the
-/// request's `wait_ms` ([`waited`]).
+/// request's `wait_ms` (`waited`).
 ///
 /// [`crate::node`] puts it under [`crate::Split`], so it paces each request
 /// sent, and over [`crate::Http`], so a wait never counts toward a request's

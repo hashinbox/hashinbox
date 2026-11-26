@@ -1,21 +1,17 @@
-// The page's address as path segments under `/ui`, such as
-// `/ui/networks/ethereum/sepolia/blocks/12047224`: a reload or a shared link
+// The page's address as path segments, such as
+// `/networks/ethereum/sepolia/blocks/12047224`: a reload or a shared link
 // lands where it was. The server and the dev server answer every such path
 // with the page.
 import { useEffect, useState } from 'react';
 
-const BASE = '/ui';
-
 /** The segments of the current address, decoded. */
 export function segments(): string[] {
-  const path = window.location.pathname;
-  const rest = path.startsWith(BASE) ? path.slice(BASE.length) : path;
-  return rest.split('/').filter(Boolean).map(decodeURIComponent);
+  return window.location.pathname.split('/').filter(Boolean).map(decodeURIComponent);
 }
 
 /** The address of `parts`, for a link. */
 export function href(parts: string[]): string {
-  return `${BASE}/${parts.map(encodeURIComponent).join('/')}`;
+  return `/${parts.map(encodeURIComponent).join('/')}`;
 }
 
 /** Goes to `parts`: a new history entry, or the current one replaced. */

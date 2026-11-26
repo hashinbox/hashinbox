@@ -3,7 +3,7 @@
 //! One file per resource (`networks`, `wallets`, `triggers`, `jobs`,
 //! `stats`): functions over the container and the database (and the queue
 //! or the actions where they need them) that take typed inputs and answer
-//! models or plain results, or an [`Error`] by kind. Beside them, the ports:
+//! models or plain results, or an `Error` by kind. Beside them, the ports:
 //! `transport` is a network's nodes and the selection over them (each
 //! stored node built with `decorators`: guarded, which turns one that
 //! cannot recover off through its `nodes::NodeSwitch`, and counted), `logs` keeps the

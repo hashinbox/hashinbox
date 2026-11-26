@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! An exact base-10 amount of any size, for money that crosses a chain, a
+//! database row and an HTTP body as text: one canonical spelling, and atomic
+//! units without rounding.
 
 mod error;
 mod notation;
@@ -233,6 +235,19 @@ mod tests {
 
     fn value(text: &str) -> Decimal {
         text.parse().expect("decimal")
+    }
+
+    #[test]
+    fn atomic_units_convert_exactly_and_order_is_numeric() {
+        let amount = value("0.01500");
+        assert_eq!(amount.to_string(), "0.015");
+        assert_eq!(amount.to_atomic_u64(8), Ok(1_500_000));
+        assert!(amount.to_atomic(2).is_err());
+        assert_eq!(
+            Decimal::from_atomic(1_u32.into(), 8).to_string(),
+            "0.00000001"
+        );
+        assert!(value("0.00059859") < value("0.0006"));
     }
 
     #[test]

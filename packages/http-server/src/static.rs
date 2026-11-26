@@ -23,7 +23,7 @@ use axum::{
     routing::get,
 };
 
-/// Where a mount's files come from, keyed by full URL path (`/ui/app.js`).
+/// Where a mount's files come from, keyed by full URL path (`/app.js`).
 ///
 /// Implement it to serve from anywhere else; [`Embedded`] and [`Disk`] ship
 /// with the crate.
@@ -44,7 +44,7 @@ impl Source for Embedded {
     }
 }
 
-/// Files under a directory: URL `/ui/app.js` reads `<root>/ui/app.js`.
+/// Files under a directory: URL `/app.js` reads `<root>/app.js`.
 /// Paths with `..` or any other non-plain component are refused.
 #[derive(Clone)]
 pub struct Disk(pub PathBuf);
@@ -118,8 +118,8 @@ pub struct Mount<S> {
 }
 
 impl<S: Source> Mount<S> {
-    /// Serves `source`'s files under `prefix` (`/ui`; empty or `/` for the
-    /// whole site).
+    /// Serves `source`'s files under `prefix` (`/assets`; empty or `/` for the
+    /// whole site, where the API's own routes still win).
     pub fn new(prefix: &str, source: S) -> Self {
         Self {
             prefix: prefix.trim_end_matches('/').to_owned(),
@@ -261,8 +261,8 @@ mod tests {
     use super::*;
 
     const FILES: &[(&str, &[u8])] = &[
-        ("/ui/app.js", b"js"),
-        ("/ui/app.wasm", b"wasm"),
+        ("/app.js", b"js"),
+        ("/app.wasm", b"wasm"),
         ("/assets/icon.svg", b"<svg/>"),
     ];
 
@@ -279,7 +279,7 @@ mod tests {
     }
 
     fn spa() -> Router {
-        Mount::new("/ui", Embedded(FILES))
+        Mount::new("", Embedded(FILES))
             .fallback("<html>index</html>")
             .root(Root::Page)
             .router()
@@ -292,7 +292,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_embedded_file_is_served_with_its_type() {
-        let response = call(&spa(), "/ui/app.js").await;
+        let response = call(&spa(), "/app.js").await;
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers()[CONTENT_TYPE],
@@ -305,7 +305,7 @@ mod tests {
     #[tokio::test]
     async fn an_unknown_page_path_and_the_root_answer_the_fallback() {
         let router = spa();
-        for uri in ["/", "/ui", "/ui/networks/btc"] {
+        for uri in ["/", "/networks", "/networks/btc", "/networks/"] {
             let response = call(&router, uri).await;
             assert_eq!(response.status(), StatusCode::OK, "{uri}");
             assert_eq!(response.headers()[CONTENT_TYPE], "text/html; charset=utf-8");
@@ -330,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_rule_media_type_and_header_are_the_callers() {
-        let router = Mount::new("/ui", Embedded(FILES))
+        let router = Mount::new("", Embedded(FILES))
             .cache_with(|path| {
                 if path.ends_with(".wasm") {
                     Cache::MaxAge(Duration::from_secs(60))
@@ -344,11 +344,11 @@ mod tests {
                 HeaderValue::from_static("DENY"),
             )
             .router();
-        let wasm = call(&router, "/ui/app.wasm").await;
+        let wasm = call(&router, "/app.wasm").await;
         assert_eq!(wasm.headers()[CONTENT_TYPE], "application/wasm");
         assert_eq!(wasm.headers()[CACHE_CONTROL], "public, max-age=60");
         assert_eq!(wasm.headers()["x-frame-options"], "DENY");
-        let js = call(&router, "/ui/app.js").await;
+        let js = call(&router, "/app.js").await;
         assert_eq!(js.headers()[CACHE_CONTROL], "no-store");
     }
 

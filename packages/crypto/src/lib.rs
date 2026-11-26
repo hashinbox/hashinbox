@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Secret keys and signing, one type per scheme: `Secp256k1Ecdsa`,
+//! `Secp256k1Schnorr` (BIP-340, `tweaked` for BIP-341) and `Ed25519`, all
+//! behind `PrivateKey`. Keys zeroize on drop; `Debug` is redacted.
 
 pub mod base58;
 mod curve;

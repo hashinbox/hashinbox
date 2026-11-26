@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Solana for hashinbox: blocks as base legs, Ed25519 wallets, SOL and SPL transfers, broadcast."
-readme = "README.md"
 
 [features]
 default = []

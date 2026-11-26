@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Access scopes as text (`com.hashinbox.wallets[w1].$read`): what an API key
+//! or a token holds, whether one set covers another, `schema!` for the known
+//! ones, and `require!`/`#[scope::utoipa]` for a handler's check.
 
 mod macros;
 mod schema;

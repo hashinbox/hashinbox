@@ -375,7 +375,7 @@ export function Layout() {
               <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
                 <Button
                   color="inherit"
-                  href="/ui/users/me"
+                  href="/users/me"
                   onClick={(e) => {
                     e.preventDefault();
                     go(['users', 'me']);

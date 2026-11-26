@@ -4,7 +4,6 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "The hashinbox binary: the workspace's single composition root of chains, storage, and the HTTP API."
-readme = "README.md"
 autotests = false
 
 [[bin]]

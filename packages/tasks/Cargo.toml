@@ -3,7 +3,6 @@ name = "tasks"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-readme = "README.md"
 description = "A job queue: workers, a store port with an in-memory default, and an executor."
 
 [features]

@@ -23,7 +23,7 @@ cd hashinbox
 cargo run --locked --release -p hashinbox -- serve --bind 127.0.0.1:3000
 ```
 
-Open <http://127.0.0.1:3000/ui/>. The first start creates `.data/hashinbox.db`, and the
+Open <http://127.0.0.1:3000/>. The first start creates `.data/hashinbox.db`, and the
 dashboard asks for the first account.
 
 To skip that step, preset the first account with `HASHINBOX_CONFIG`, as inline JSON or the path
@@ -34,4 +34,35 @@ HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"change
   cargo run --locked --release -p hashinbox -- serve
 ```
 
-More options: [apps/server](apps/server/README.md).
+## Docker
+
+```bash
+docker run -p 8080:8080 -v hashinbox:/data ghcr.io/hashinbox/hashinbox:latest
+# with a preset first account
+docker run -p 8080:8080 -v hashinbox:/data \
+  -e HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"change-me"}}' \
+  ghcr.io/hashinbox/hashinbox:latest
+```
+
+The image serves plain HTTP: put a TLS-terminating proxy (Caddy, Traefik, a load balancer) in
+front, never expose port 8080 to the internet.
+
+## Options
+
+Each flag of `serve` has an env fallback:
+
+- `--db` (`HASHINBOX_DB`): the SQLite file, default `.data/hashinbox.db`; image: `/data/hashinbox.db`.
+- `--bind` (`HASHINBOX_BIND`): default `127.0.0.1:8080`; image: `0.0.0.0:8080`, port 8080.
+- `--tls-terminated-upstream` (`HASHINBOX_TLS_TERMINATED_UPSTREAM`): allows a non-loopback bind;
+  the image runs with it.
+- `--config` (`HASHINBOX_CONFIG`): the first-account preset; `--log-level` (`HASHINBOX_LOG_LEVEL`).
+- Image: volume `/data`, uid 10001; health check `GET /health`.
+
+## Develop
+
+```bash
+cargo run -p hashinbox -- serve       # the API on 127.0.0.1:8080
+cd apps/server/ui && npx vite         # the dashboard, proxying the API
+```
+
+Open <http://localhost:5173/>.

@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Ethereum for hashinbox: reads blocks as `base` blocks with every leg of
+//! ether and the allowlisted ERC-20 tokens, and builds, signs and broadcasts
+//! ETH and token transfers as EIP-1559 transactions.
 
 mod address;
 mod builder;

@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! The chain-neutral vocabulary every other SDK crate shares: networks,
+//! addresses, assets, exact amounts, blocks and transaction identities, and
+//! the small traits a chain implements to build and broadcast a transaction.
 
 mod address;
 mod asset;

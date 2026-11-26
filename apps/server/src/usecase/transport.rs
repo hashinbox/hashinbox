@@ -31,7 +31,7 @@
 //!
 //! A node's tip and failure streak live here, in memory; whether a stored
 //! node is enabled, and its counts, live in the database: its `Guard` and
-//! wrong-chain probe turn it off there (its [`NodeSwitch`]), its `Counter`
+//! wrong-chain probe turn it off there (its `NodeSwitch`), its `Counter`
 //! counts there.
 
 use std::sync::{

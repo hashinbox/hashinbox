@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Bitcoin for hashinbox: reads blocks as `base` blocks with every leg, and
+//! builds, signs and broadcasts BTC transfers from P2WPKH and P2TR wallets.
+//! `native` is the protocol code alone, usable without the rest of the SDK.
 
 mod address;
 mod builder;

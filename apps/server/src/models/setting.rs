@@ -1,6 +1,6 @@
 //! `setting`: the instance's settings, one row per key written; a key with
 //! no row is its default. Every key is declared here, in code, by
-//! [`settings!`]: its description, type, default, visibility (public,
+//! `settings!`: its description, type, default, visibility (public,
 //! private or secret) and its check. A row's `public` mirrors the
 //! declaration on each write and is never taken from a request.
 
@@ -23,7 +23,7 @@ use crate::error::Error;
 /// and generates, from them:
 /// - `name(connection)`: the key's typed value, its default when no row is
 ///   kept (the doc comment is the function's);
-/// - [`write`]: a key's JSON value parsed into its type and checked by its
+/// - `write`: a key's JSON value parsed into its type and checked by its
 ///   `valid`, then kept; an unknown key, a wrong type or a failed check is
 ///   [`Error::invalid_argument`], a secret key [`Error::permission_denied`];
 /// - [`put`]: the same for server code, a secret key too;
@@ -161,7 +161,7 @@ pub(crate) fn write(
     Ok(setting)
 }
 
-/// Keeps `value` as `key`'s at `now` (Unix ms), checked as [`write`]
+/// Keeps `value` as `key`'s at `now` (Unix ms), checked as `write`
 /// checks it, replacing the row when there is one: server code's writer, a
 /// secret key too. Whether it replaced one.
 ///

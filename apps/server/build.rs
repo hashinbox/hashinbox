@@ -1,4 +1,4 @@
-//! Embeds every file the server serves: `ui/dist/` at `/ui/…` and `assets/`
+//! Embeds every file the server serves: `ui/dist/` at the root and `assets/`
 //! at `/assets/…`. Writes their `(url path, include_bytes!(file))` table
 //! (`ui::FILES`), so a new file in either folder needs no code.
 //!
@@ -66,7 +66,7 @@ fn main() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     println!("cargo:rustc-env=HASHINBOX_VERSION={}", version(&root));
     let mut rows = Vec::new();
-    for (folder, prefix) in [("ui/dist", "/ui"), ("assets", "/assets")] {
+    for (folder, prefix) in [("ui/dist", ""), ("assets", "/assets")] {
         let folder = root.join(folder);
         println!("cargo:rerun-if-changed={}", folder.display());
         for path in files(&folder) {

@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Serves an axum `Router` with optional bearer authentication and a body
+//! limit, after [`Config::validate`] refuses a plaintext non-loopback bind;
+//! plus static files and single-page apps ([`Mount`]).
 
 mod auth;
 mod config;

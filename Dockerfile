@@ -43,9 +43,8 @@ ENV HASHINBOX_DB=/data/hashinbox.db HASHINBOX_BIND=0.0.0.0:8080
 EXPOSE 8080
 # The server shuts down gracefully on Ctrl-C (SIGINT), not SIGTERM.
 STOPSIGNAL SIGINT
-# Liveness: `/health` is readiness (503 until a network indexes).
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
-    CMD wget -qO /dev/null http://127.0.0.1:8080/v1/version || exit 1
+    CMD wget -qO /dev/null http://127.0.0.1:8080/health || exit 1
 ENTRYPOINT ["/usr/local/bin/hashinbox"]
 # Plain HTTP on 0.0.0.0: a TLS-terminating proxy must sit in front.
 CMD ["serve", "--tls-terminated-upstream"]

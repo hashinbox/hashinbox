@@ -16,7 +16,7 @@ use crate::{
 const KEPT: usize = 1_024;
 
 /// Jobs kept in memory, gone with the process: every unfinished job, and
-/// the last [`KEPT`] finished ones. Clones share the jobs.
+/// the last `KEPT` (1 024) finished ones. Clones share the jobs.
 #[derive(Clone, Default)]
 pub struct MemoryStore(Arc<Mutex<Line>>);
 

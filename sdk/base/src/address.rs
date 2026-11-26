@@ -71,3 +71,18 @@ impl Address {
         &self.network == network
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{Address, Asset, Chain, Network};
+
+    #[test]
+    fn an_address_belongs_to_its_network_alone() {
+        const CHAIN: Chain = Chain::from_static("example");
+        let network = Network::new(CHAIN, "testnet");
+        let address = Address::new(network.clone(), "addr1");
+        assert!(address.belongs_to(&network));
+        assert!(!address.belongs_to(&Network::new(CHAIN, "mainnet")));
+        assert!(Asset::native(network).is_native());
+    }
+}

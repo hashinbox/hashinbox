@@ -1,4 +1,6 @@
-#![doc = include_str!("../README.md")]
+//! Solana for hashinbox: reads blocks as `base` blocks with every leg of SOL
+//! and the allowlisted SPL tokens, and builds, signs and broadcasts SOL and
+//! token transfers.
 
 mod address;
 mod builder;
