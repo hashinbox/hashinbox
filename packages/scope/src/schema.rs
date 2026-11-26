@@ -43,7 +43,7 @@ impl Schema {
         names
             .map(|name| Segment::Name {
                 name: (*name).to_owned(),
-                ids: None,
+                id: None,
             })
             .collect()
     }
@@ -86,7 +86,7 @@ fn without_ids(scope: &Scope) -> Scope {
     let path = scope.path().iter().map(|step| match step {
         Segment::Name { name, .. } => Segment::Name {
             name: name.clone(),
-            ids: None,
+            id: None,
         },
         Segment::Any => Segment::Any,
     });
@@ -101,10 +101,10 @@ fn with_ids(concrete: &Scope, scope: &Scope) -> Scope {
             .iter()
             .enumerate()
             .map(|(at, step)| match (step, scope.path().get(at)) {
-                (Segment::Name { name, .. }, Some(Segment::Name { ids: Some(ids), .. })) => {
+                (Segment::Name { name, .. }, Some(Segment::Name { id: Some(id), .. })) => {
                     Segment::Name {
                         name: name.clone(),
-                        ids: Some(ids.clone()),
+                        id: Some(id.clone()),
                     }
                 }
                 _ => step.clone(),

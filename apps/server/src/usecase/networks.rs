@@ -13,12 +13,13 @@ use tasks::Worker;
 use tokio::sync::mpsc;
 
 use super::{
-    Error, Served as _, Transport, now,
+    Served as _, Transport, now,
     tasks::Queue,
     workers::index::{Index, Target},
 };
 use crate::{
     db::{Db, Page},
+    error::Error,
     models::{
         Block, EndpointFailure, EndpointFailures, Endpoints, Network, Route, Routes, RpcEndpoints,
         block, endpoint, endpoint_failure, endpoint_route, network,
@@ -173,11 +174,11 @@ pub(crate) async fn add_endpoints(
 ) -> Result<Nodes, Error> {
     container.service(network)?;
     if added.is_empty() {
-        return Err(Error::invalid("add 1 to 16 nodes at once"));
+        return Err(Error::invalid_argument("add 1 to 16 nodes at once"));
     }
     let mut nodes = stored(db, network).await?.urls();
     nodes.extend(added.clone());
-    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid)?;
+    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid_argument)?;
     verify(container, network, &added).await?;
     store(db, network, nodes).await?;
     connected(container, db, queue, network).await
@@ -199,7 +200,7 @@ pub(crate) async fn replace_endpoints(
     nodes: Vec<rpc::Endpoint>,
 ) -> Result<Nodes, Error> {
     container.service(network)?;
-    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid)?;
+    let nodes = RpcEndpoints::new(nodes).map_err(Error::invalid_argument)?;
     verify(container, network, nodes.nodes()).await?;
     store(db, network, nodes).await?;
     connected(container, db, queue, network).await
@@ -231,7 +232,12 @@ pub(crate) async fn add_endpoints_each(
     }
     let lists = lists
         .into_iter()
-        .map(|(network, nodes)| Ok((network, RpcEndpoints::new(nodes).map_err(Error::invalid)?)))
+        .map(|(network, nodes)| {
+            Ok((
+                network,
+                RpcEndpoints::new(nodes).map_err(Error::invalid_argument)?,
+            ))
+        })
         .collect::<Result<Vec<_>, Error>>()?;
     for (network, endpoint) in &added {
         verify(container, network, std::slice::from_ref(endpoint)).await?;
@@ -257,7 +263,7 @@ pub(crate) async fn add_endpoints_each(
 ///
 /// # Errors
 ///
-/// Not found for an unconfigured network or no such node; invalid for the
+/// Not found for an unconfigured network or no such node; failed precondition for the
 /// network's last node; the store.
 pub(crate) async fn remove_endpoint(
     container: &Container<Transport>,
@@ -273,7 +279,7 @@ pub(crate) async fn remove_endpoint(
     }
     let kept = nodes.iter().filter(|node| node.id != id);
     let nodes = RpcEndpoints::new(kept.map(|node| node.url.clone()).collect())
-        .map_err(|_| Error::invalid("a network keeps at least one node"))?;
+        .map_err(|_| Error::failed_precondition("a network keeps at least one node"))?;
     store(db, network, nodes).await?;
     connected(container, db, queue, network).await
 }
@@ -350,7 +356,7 @@ async fn verify(
         transport
             .verify(endpoint)
             .await
-            .map_err(|error| Error::invalid(format!("node {index}: {error:#}")))?;
+            .map_err(|error| Error::invalid_argument(format!("node {index}: {error:#}")))?;
     }
     Ok(())
 }
@@ -414,7 +420,7 @@ pub(crate) async fn replace_routes(
 ) -> Result<Vec<Route>, Error> {
     container.service(network)?;
     let endpoints = stored(db, network).await?;
-    let routes = Routes::new(routes, &endpoints).map_err(Error::invalid)?;
+    let routes = Routes::new(routes, &endpoints).map_err(Error::invalid_argument)?;
     let ids = endpoints.ids();
     // Stored before connected: a restart never forgets a change in use.
     db.write(move |connection| endpoint_route::db::replace(connection, &ids, &routes))

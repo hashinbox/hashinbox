@@ -13,8 +13,11 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams};
+use crate::models::Caller;
+use crate::models::Session;
+
 use crate::{api::AppState, db::Paged as _, models::wallet::WalletId, usecase::wallets};
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -35,26 +38,28 @@ struct ListResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/wallets/tags",
     operation_id = "list_tags",
     summary = "List the tags in use",
     params(IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Tags in order", body = ListResponse),
-        (status = 400, description = "Malformed query or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.wallets.$read");
+    let Query(index) = index?;
     let page = index.page("tags", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
     let tags = wallets::tags_page(&state.db, page).await?;
@@ -74,55 +79,59 @@ struct TagPath {
     tag: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     put,
     path = "/v1/wallets/{id}/tags/{tag}",
     operation_id = "add_wallet_tag",
     summary = "Tag a wallet",
     description = "Tags the wallet, keyed or watch-only; tagging twice keeps one tag.",
     params(TagPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 204, description = "Tagged"),
-        (status = 400, description = "Malformed wallet ID or tag", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 400, description = "Malformed wallet ID or tag", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "Wallet is unknown, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn add(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
     let id = WalletId::parse(&path.id)?;
     wallets::set_tag(&state.container, &state.db, &id, path.tag, true).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     delete,
     path = "/v1/wallets/{id}/tags/{tag}",
     operation_id = "remove_wallet_tag",
     summary = "Untag a wallet",
     description = "Removes the tag from the wallet.",
     params(TagPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 204, description = "Untagged"),
-        (status = 400, description = "Malformed wallet ID or tag", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 400, description = "Malformed wallet ID or tag", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such wallet or tag, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn remove(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
     let id = WalletId::parse(&path.id)?;
     wallets::set_tag(&state.container, &state.db, &id, path.tag, false).await?;
     Ok(StatusCode::NO_CONTENT)

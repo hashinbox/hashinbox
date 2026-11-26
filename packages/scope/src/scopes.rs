@@ -54,7 +54,7 @@ impl Scopes {
 
     /// [`Self::compress`]ed, then grouped by their shared prefix, the
     /// shortest text for a JWT claim:
-    /// `{"com.hashinbox": ["markets.$read", "wallets[a,b].$read"]}`. A
+    /// `{"com.hashinbox": ["markets.$read", "wallets[a].$read"]}`. A
     /// prefix is the leading plain names (no ids, no `*`) every scope
     /// starting with the same step shares, each scope keeping one step at
     /// least. [`Self::unpack`] reverses it.
@@ -98,20 +98,10 @@ impl Scopes {
     }
 
     /// The fewest scopes allowing the same: one covered by another is
-    /// dropped, and scopes differing only in one step's ids are merged
-    /// (`wallets[a].$read wallets[b].$read` is `wallets[a,b].$read`);
-    /// sorted. What a JWT carries.
+    /// dropped; sorted. What a JWT carries.
     #[must_use]
     pub fn compress(&self) -> Self {
-        let mut scopes = self.0.clone();
-        loop {
-            let before = scopes.len();
-            scopes = without_covered(scopes);
-            scopes = merged(scopes);
-            if scopes.len() == before {
-                break;
-            }
-        }
+        let mut scopes = without_covered(self.0.clone());
         scopes.sort();
         Self(scopes)
     }
@@ -134,22 +124,6 @@ fn without_covered(scopes: Vec<Scope>) -> Vec<Scope> {
         .collect()
 }
 
-/// `scopes` with each pair differing only in one step's ids merged.
-fn merged(scopes: Vec<Scope>) -> Vec<Scope> {
-    let mut out: Vec<Scope> = Vec::with_capacity(scopes.len());
-    for scope in scopes {
-        match out.iter().position(|kept| kept.merged(&scope).is_some()) {
-            Some(at) => {
-                if let Some(merged) = out[at].merged(&scope) {
-                    out[at] = merged;
-                }
-            }
-            None => out.push(scope),
-        }
-    }
-    out
-}
-
 /// How many leading steps of `scopes` are the same plain name in each,
 /// each scope keeping one step at least.
 fn shared_prefix(scopes: &[&Scope]) -> usize {
@@ -158,7 +132,7 @@ fn shared_prefix(scopes: &[&Scope]) -> usize {
         .map(|scope| scope.path().len())
         .min()
         .unwrap_or(1);
-    let plain = |step: &Segment| matches!(step, Segment::Name { ids: None, .. });
+    let plain = |step: &Segment| matches!(step, Segment::Name { id: None, .. });
     let first = scopes[0].path();
     (0..shortest - 1)
         .take_while(|&at| {
@@ -238,14 +212,14 @@ mod tests {
     }
 
     #[test]
-    fn compress_drops_covered_and_merges_ids() {
+    fn compress_drops_covered() {
         let held = scopes(
             "a.wallets[x].$read a.wallets[y].$read a.wallets[x].$read \
              a.markets.$read a.markets[btc].$read a.wallets[z].$write",
         );
         assert_eq!(
             held.compress().to_string(),
-            "a.markets.$read a.wallets[x,y].$read a.wallets[z].$write"
+            "a.markets.$read a.wallets[x].$read a.wallets[y].$read a.wallets[z].$write"
         );
     }
 
@@ -263,7 +237,8 @@ mod tests {
         assert_eq!(
             json,
             [
-                "com.hashinbox: markets.$read wallets[x].legs.$read wallets[x,y].$read",
+                "com.hashinbox: markets.$read wallets[x].$read wallets[x].legs.$read \
+                 wallets[y].$read",
                 "other: thing.$write",
             ]
         );
@@ -282,7 +257,10 @@ mod tests {
     fn compress_keeps_what_is_allowed() {
         let held = scopes("a.wallets[x].$read a.wallets[y].$read a.*.$write a.wallets.$write");
         let compressed = held.compress();
-        assert_eq!(compressed.to_string(), "a.wallets[x,y].$read a.*.$write");
+        assert_eq!(
+            compressed.to_string(),
+            "a.wallets[x].$read a.wallets[y].$read a.*.$write"
+        );
         for scope in &held {
             assert!(compressed.covers(scope), "{scope}");
         }

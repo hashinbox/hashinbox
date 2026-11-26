@@ -1,10 +1,10 @@
--- The payment server's one SQLite file, created by `payment-server migrate`
--- on a new file (`Db::migrate`, embedded from here). No migrations: a schema
+-- The hashinbox server's one SQLite file, created by `hashinbox serve`
+-- on a new file (`Db::open_or_create`, embedded from here). No migrations: a schema
 -- change means a fresh file.
 
 -- The SDK schema: what `base`'s stores keep (BlockStore, TransactionStore,
 -- InputStore, WalletStore, WalletIndexStore), in the one SQLite file. Applied
--- once to a new file by the caller (`payment-server migrate`); no migrations.
+-- once to a new file by the caller (`hashinbox serve`); no migrations.
 -- Enable foreign_keys on every connection.
 --
 -- A network is (chain, network). Positions and heights are SQLite integers;
@@ -373,7 +373,7 @@ LEFT JOIN leg n ON n.id = (
 );
 
 
--- The payment server's own tables.
+-- The hashinbox server's own tables.
 --
 -- Wallets are the SDK's `wallet` rows, their tags included; the server keeps
 -- no wallet table of its own. It may read the SDK's tables; it writes only
@@ -792,3 +792,54 @@ SELECT
 FROM trigger_run run
 LEFT JOIN json_each(run.jobs) queued
 LEFT JOIN q job ON job.id = CAST(queued.value AS INTEGER);
+
+-- A person or team owner (design 096): the widest scopes anything they
+-- issue may have. Times are Unix ms; a session's `iat` is seconds, and one
+-- issued in the second of `invalidated_at` or before is refused.
+CREATE TABLE "user" (
+    id             TEXT    PRIMARY KEY,         -- uuid v7; its client id is `user/{id}`.
+    email          TEXT    NOT NULL UNIQUE,
+    name           TEXT    NOT NULL,
+    password_hash  TEXT,                        -- argon2id (PHC text); NULL: no dashboard login.
+    scopes         TEXT    NOT NULL CHECK (json_valid(scopes)), -- JSON, `Scopes::pack` form.
+    session_secret BLOB    NOT NULL,            -- 32 random bytes: signs the user's sessions (HS256).
+    created_at     INTEGER NOT NULL,
+    invalidated_at INTEGER,                     -- Every session issued at or before it: 401.
+    disabled_at    INTEGER                      -- Disabled: every key and session refused.
+);
+
+-- A key a user issued: its public client id, its secret (`his/…`, kept
+-- readable: it checks the HS256 sessions the key signs) and the secret's
+-- hash (bearer lookup).
+CREATE TABLE user_key (
+    id             TEXT    PRIMARY KEY,         -- `hip/…`: the key's public client id.
+    user_id        TEXT    NOT NULL REFERENCES "user" (id) ON DELETE CASCADE,
+    name           TEXT    NOT NULL,            -- "shop backend".
+    secret_hash    BLOB    NOT NULL UNIQUE,     -- SHA-256 of `his/…`: bearer lookup.
+    secret         TEXT    NOT NULL,            -- `his/…`: the HS256 key of the key's sessions.
+    scopes         TEXT    NOT NULL CHECK (json_valid(scopes)), -- JSON, packed; covered by the user's.
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER,
+    invalidated_at INTEGER,                     -- Every session it issued at or before it: 401.
+    revoked_at     INTEGER,                     -- The key itself refused, its sessions too.
+    last_used_at   INTEGER
+);
+CREATE INDEX user_key_user ON user_key (user_id);
+
+-- A user's TOTP (RFC 6238), on once confirmed.
+CREATE TABLE user_2fa (
+    user_id      TEXT    PRIMARY KEY REFERENCES "user" (id) ON DELETE CASCADE,
+    secret       BLOB    NOT NULL,              -- The TOTP secret, kept plain.
+    confirmed_at INTEGER,                       -- NULL until the first valid code.
+    last_step    INTEGER,                       -- Step of the last code used: no replay.
+    created_at   INTEGER NOT NULL
+);
+
+-- The instance's settings (`models/setting.rs` declares every key): one
+-- row per key written; a key with no row is its default.
+CREATE TABLE setting (
+    key        TEXT    PRIMARY KEY,
+    value      TEXT    NOT NULL,                -- JSON of the key's type.
+    public     INTEGER NOT NULL,                -- 1: may be sent in any response, to anyone.
+    updated_at INTEGER NOT NULL                 -- Unix ms.
+);

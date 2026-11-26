@@ -1,6 +1,6 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { call, client, type Schemas } from '@/api/client';
 import { Sparkline } from '@/_components/sparkline';
 import { Stat } from '@/_components/stat';
@@ -16,8 +16,8 @@ function hourOf(start: number): string {
   return new Date(start * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-/** What the store holds across every network, and its last day, in cards. */
-export function Dashboard({ shell }: { shell: Shell }) {
+/** What the store holds across every network, and its last day, in cards; `banner` above. */
+export function Dashboard({ shell, banner }: { shell: Shell; banner?: ReactNode }) {
   const [stats, setStats] = useState<Stats | null>(null);
 
   const refresh = useCallback(() => {
@@ -35,6 +35,7 @@ export function Dashboard({ shell }: { shell: Shell }) {
       <Typography variant="h2" component="h1" sx={{ mb: 2.5 }}>
         Dashboard
       </Typography>
+      {banner}
       {stats && <Cards stats={stats} />}
     </Box>
   );

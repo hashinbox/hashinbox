@@ -12,13 +12,16 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, networks::NetworkPath};
+use crate::models::Session;
+
+use super::networks::NetworkPath;
 use crate::{
     api::AppState,
     db::Paged as _,
     models::transaction::{self, Transaction},
     usecase::networks,
 };
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(list))
@@ -45,30 +48,32 @@ struct ListResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/transactions",
     operation_id = "list_network_transactions",
     summary = "List a network's transactions, or only its pending ones",
     params(NetworkPath, ListQuery, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The transactions", body = ListResponse),
-        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "The network is not configured", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query, cursor, or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "The network is not configured", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "networks"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
     query: Result<Query<ListQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.transactions.$read");
+    let Query(query) = query?;
+    let Query(index) = index?;
     let page = index.page("transactions", transaction::parse_key)?;
     let limit = page.limit;
     let (container, db, pending) = (&state.container, &state.db, query.pending == Some(true));

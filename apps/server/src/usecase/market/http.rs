@@ -18,7 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) fn client() -> reqwest::Result<reqwest::Client> {
     reqwest::Client::builder()
         .timeout(TIMEOUT)
-        .user_agent("payment-sdk-market")
+        .user_agent("hashinbox")
         .build()
 }
 

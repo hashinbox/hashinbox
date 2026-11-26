@@ -47,7 +47,9 @@ const MARKET: &[&str] = &["market", "status"];
 
 /// Each code, and the fields its event and its usual spans send.
 const FIELDS: &[(&str, &[&[&str]])] = &[
-    ("app.start", &[&["networks", "bind"]]),
+    ("app.bootstrap", &[&["email", "settings"]]),
+    ("app.db.created", &[&["path"]]),
+    ("app.start", &[&["version", "networks", "bind"]]),
     ("app.stop", &[]),
     (
         "send.queued",
@@ -122,6 +124,18 @@ const FIELDS: &[(&str, &[&[&str]])] = &[
     ("market.feed.failed", &[&["reason"], MARKET, JOB]),
     ("market.feed.recovered", &[MARKET, JOB]),
     ("market.feed.set", &[&["market", "feed"]]),
+    ("auth.login.ok", &[&["email", "user", "method"]]),
+    ("auth.login.failed", &[&["email", "method"]]),
+    ("auth.recovery.created", &[&["user"]]),
+    ("auth.recovery.replaced", &[&["user"]]),
+    ("auth.recovery.removed", &[&["user"]]),
+    ("auth.user.created", &[&["user", "email", "by"]]),
+    ("auth.key.created", &[&["key", "user"]]),
+    ("auth.key.revoked", &[&["key", "user"]]),
+    ("auth.2fa.on", &[&["user"]]),
+    ("auth.2fa.off", &[&["user"]]),
+    ("auth.denied", &[&["scope"]]),
+    ("setting.changed", &[&["key", "value"]]),
 ];
 
 /// Every code the `events` modules declare.

@@ -1,4 +1,4 @@
-# Payment-SDK policy for the Linter MCP server.
+# hashinbox policy for the Linter MCP server.
 # Derived from linter://configs/rust.toml; preserves the preset's semantic checks and limits.
 # Requirements and ownership: AGENTS.md and the owning README.
 # Findings are a review baseline; source is not grandfathered by its current shape.

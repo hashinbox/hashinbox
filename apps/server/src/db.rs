@@ -5,7 +5,8 @@
 //!
 //! Diesel is synchronous: every operation runs on Tokio's blocking pool with
 //! one pooled connection, inside one transaction (`BEGIN IMMEDIATE` for
-//! writes). There are no migrations: `migrate` executes the given schemas.
+//! writes). There are no migrations: a new file gets the schema once
+//! ([`Db::open_or_create`]).
 
 use std::{path::Path, time::Duration};
 
@@ -159,13 +160,40 @@ pub(crate) struct Db {
 }
 
 impl Db {
-    /// Opens or creates the SQLite file at `path` (absolute); applies no schema.
+    /// Opens the SQLite file at `path` (absolute). A new file (absent or
+    /// empty) is created first: its folder, then the schema and its starting
+    /// rows ([`Db::migrate`]), logged `app.db.created`. An existing file is
+    /// opened as it is.
     ///
     /// # Errors
     ///
-    /// When the path is relative or the pool does not open.
-    pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
+    /// When the path is relative, the file is not readable, its folder is
+    /// not created, the pool does not open or the schema does not apply.
+    pub(crate) async fn open_or_create(path: &Path) -> anyhow::Result<Self> {
         ensure!(path.is_absolute(), "sqlite path must be absolute");
+        let new = match std::fs::metadata(path) {
+            Ok(file) => file.len() == 0,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error).context("sqlite file is not readable"),
+        };
+        if !new {
+            return Self::open(path);
+        }
+        if let Some(folder) = path.parent() {
+            std::fs::create_dir_all(folder).context("sqlite folder was not created")?;
+        }
+        let db = Self::open(path)?;
+        db.migrate().await?;
+        tracing::info!(target: crate::events::APP_DB_CREATED, path = %path.display());
+        Ok(db)
+    }
+
+    /// Opens or creates the SQLite file at `path`; applies no schema.
+    ///
+    /// # Errors
+    ///
+    /// When the pool does not open.
+    fn open(path: &Path) -> anyhow::Result<Self> {
         let url = path.to_str().context("sqlite path is not UTF-8")?;
         let size = std::thread::available_parallelism().map_or(4, |n| n.get().clamp(2, 16));
         let pool = Pool::builder()
@@ -183,7 +211,7 @@ impl Db {
     /// # Errors
     ///
     /// When the schema or the rows do not apply.
-    pub(crate) async fn migrate(&self) -> anyhow::Result<()> {
+    async fn migrate(&self) -> anyhow::Result<()> {
         self.write(|connection| {
             connection.batch_execute(include_str!("../init.sql"))?;
             Ok(connection.batch_execute(include_str!("../seed.sql"))?)

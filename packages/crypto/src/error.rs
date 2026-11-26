@@ -1,6 +1,7 @@
 use std::{error, fmt};
 
-/// A key import or signing failure; the message never contains key material.
+/// A key import, signing, randomness or hashing failure; the message never
+/// contains key material, a password or a mnemonic.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     /// What went wrong, for callers to branch on.
@@ -18,6 +19,8 @@ pub enum ErrorKind {
     Signing,
     /// The operating-system random source is unavailable.
     Random,
+    /// The password hash (argon2) refused its input.
+    Hashing,
 }
 
 impl Error {

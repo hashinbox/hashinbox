@@ -22,6 +22,7 @@ use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
 use super::support::{
+    as_root,
     db::seeded,
     scripted::{Script, container, limited, network},
 };
@@ -112,6 +113,7 @@ async fn wallets_balance_legs_and_sends() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -119,7 +121,7 @@ async fn wallets_balance_legs_and_sends() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let create = |kind: Value| {
         let mut body = json!({ "chain": "bitcoin", "network": "regtest" });
         if let (Some(body), Value::Object(kind)) = (body.as_object_mut(), kind) {
@@ -395,6 +397,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -402,7 +405,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let ask = |method: &'static str| {
         let container = container.clone();
         async move {
@@ -522,6 +525,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -529,7 +533,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let (status, _) = call(
         &router,
         Method::POST,
@@ -632,6 +636,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -639,7 +644,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let create = |kind: Value| {
         let mut body = json!({ "chain": "bitcoin", "network": "regtest" });
         if let (Some(body), Value::Object(kind)) = (body.as_object_mut(), kind) {
@@ -788,7 +793,6 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
 #[tokio::test]
 async fn a_network_asset_icon_is_served_and_an_unknown_one_is_not() {
     let router = crate::ui::Settings::from_params(crate::ui::SettingsParams {
-        brand: None,
         api_base: String::new(),
     })
     .routes()
@@ -857,6 +861,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -864,7 +869,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let (status, health) = call(&router, Method::GET, "/health", None).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{health}");
     assert_eq!(health["ready"], json!(false));
@@ -911,6 +916,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -918,7 +924,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let (status, page) = call(&router, Method::GET, "/v1/triggers/t/runs", None).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let run = &page["runs"][0];
@@ -948,6 +954,7 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -955,7 +962,7 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     // A sweep of regtest's native indexes (8 decimals), gated by `check`.
     let create = |id: &str, check: Value| {
         json!({"triggers": [{
@@ -1042,6 +1049,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1049,7 +1057,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let alice = json!({ "chain": "bitcoin", "network": "regtest", "secret": "alice" });
     let (status, _) = call(&router, Method::POST, "/v1/wallets", Some(alice)).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -1166,6 +1174,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1173,7 +1182,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     super::storage::jumped(&crate::usecase::sdk::Stores::new(
         db.clone(),
         Default::default(),
@@ -1211,7 +1220,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
 }
 
 /// The routes over `container` and `db`, sends queued in `queue`.
-fn app(
+async fn app(
     container: &Arc<base::Container<crate::usecase::Transport>>,
     db: &crate::db::Db,
     queue: &crate::usecase::tasks::Queue,
@@ -1223,6 +1232,7 @@ fn app(
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -1230,7 +1240,7 @@ fn app(
         None,
         http_server::RequestLimits::default(),
     );
-    api::router(state, &config).expect("a router")
+    as_root(api::router(state, &config).expect("a router")).await
 }
 
 /// `worker`'s job of `input` enqueued, claimed, run once and settled: the
@@ -1281,7 +1291,7 @@ async fn a_node_is_disabled_and_enabled_and_a_network_with_none_idles() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let ask = |method: &'static str| {
         let container = container.clone();
         async move {
@@ -1408,7 +1418,7 @@ async fn a_401_disables_the_node_in_the_store_and_its_calls_move_on() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let refusing = replying(|_| (401, json!({"error": "unauthorized"}))).await;
     let ids = stored(&container, &db, vec![refusing, answering(7).await]).await;
     let transport = container.transport(&network()).unwrap();
@@ -1434,7 +1444,7 @@ async fn a_5xx_or_a_method_not_on_the_plan_disables_the_node_and_calls_move_on()
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let unavailable = replying(|_| (503, json!({}))).await;
     let unpaid = replying(|body| {
         let error = json!({
@@ -1478,7 +1488,7 @@ async fn a_node_of_another_chain_is_disabled_by_the_probe() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let ids = stored(&container, &db, vec![answering(1).await]).await;
     let networks = db.read(crate::models::network::db::find_all).await.unwrap();
     let stored = networks.iter().find(|n| n.key() == network()).unwrap();
@@ -1502,7 +1512,7 @@ async fn a_429_passes_through_and_is_no_record() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let limiting = replying(|body| {
         if body.is_array() {
             return (200, limited_batch(body));
@@ -1532,7 +1542,7 @@ async fn a_nodes_counter_writes_its_calls_and_the_view_shows_them() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let node = replying(|body| {
         if body["method"] == "busy" {
             return (429, json!({}));
@@ -1575,7 +1585,7 @@ async fn the_last_node_disabled_by_its_guard_idles_the_index_job() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let refusing = replying(|_| (403, json!({"error": "forbidden"}))).await;
     stored(&container, &db, vec![refusing]).await;
     let transport = container.transport(&network()).unwrap();
@@ -1645,7 +1655,7 @@ async fn rpc_http_carries_its_fields_and_the_network_and_node_spans() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let node = replying(|body| {
         if body.is_array() {
             return (200, limited_batch(body));
@@ -1728,7 +1738,7 @@ async fn a_range_beyond_the_head_is_debug_and_not_a_failure() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let node = replying(|body| {
         let message = "block range extends beyond current head block: requested 6, head 5";
         let error = json!({"code": -32602, "message": message});
@@ -1776,7 +1786,7 @@ async fn an_index_run_logs_one_step_in_its_job_and_network() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     stored(&container, &db, vec!["http://a.invalid/".to_owned()]).await;
     let target = Target {
         chain: "bitcoin".into(),
@@ -1822,7 +1832,7 @@ async fn kept_logs_go_to_the_table_list_newest_first_and_prune() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     stored(&container, &db, vec!["http://a.invalid/".to_owned()]).await;
     let dispatch = subscriber(&db, crate::usecase::logs::feed());
     async {
@@ -2002,7 +2012,7 @@ async fn a_trigger_round_logs_each_trigger_and_its_counts() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     // A keyed payer and a watched payee, both indexed through block 0, the
     // confirmed one.
     db.write(|connection| {
@@ -2121,7 +2131,7 @@ async fn a_broadcast_job_keeps_its_node_calls_and_steps_under_its_id() {
     super::storage::watch(&stores, sender.address(), 0).await;
     let container = container(&db, script);
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let node = replying(|body| {
         (
             200,
@@ -2214,6 +2224,7 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: feed.clone(),
         candles: Default::default(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2221,7 +2232,7 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let (status, _) = text(&router, "/v1/logs/stream?network=regtest").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 
@@ -2314,7 +2325,7 @@ async fn the_log_messages_are_the_catalog() {
     let (_, db, _directory) = seeded().await;
     let container = container(&db, Arc::new(Script::default()));
     let queue = crate::usecase::tasks::queue(db.clone());
-    let router = app(&container, &db, &queue);
+    let router = app(&container, &db, &queue).await;
     let (status, listed) = call(&router, Method::GET, "/v1/logs/messages", None).await;
     assert_eq!(status, StatusCode::OK);
     let catalog = serde_json::to_value(&*crate::events::MESSAGES).unwrap();
@@ -2348,6 +2359,7 @@ async fn markets_list_set_read_candles_and_log() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: feed.clone(),
         candles: candles.clone(),
+        root_exists: Default::default(),
     });
     let config = http_server::Config::new(
         "127.0.0.1:0".parse().expect("an address"),
@@ -2355,7 +2367,7 @@ async fn markets_list_set_read_candles_and_log() {
         None,
         http_server::RequestLimits::default(),
     );
-    let router = api::router(state, &config).expect("a router");
+    let router = as_root(api::router(state, &config).expect("a router")).await;
     let markets: Vec<Box<dyn crate::usecase::market::Market>> = vec![
         Box::new(Fixed::new("binance", Some("100"))),
         Box::new(Fixed::new("kraken", None)),

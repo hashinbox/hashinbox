@@ -1,14 +1,14 @@
 [package]
-name = "payment-server"
+name = "hashinbox"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "The payment server binary: the workspace's single composition root of chains, storage, and the HTTP API."
+description = "The hashinbox binary: the workspace's single composition root of chains, storage, and the HTTP API."
 readme = "README.md"
 autotests = false
 
 [[bin]]
-name = "payment-server"
+name = "hashinbox"
 path = "src/main.rs"
 
 [features]
@@ -16,10 +16,13 @@ solana-node = []
 
 [dependencies]
 anyhow.workspace = true
+# Session JWTs (`models::session`); passwords, TOTP and mnemonics are `crypto`'s.
+jsonwebtoken.workspace = true
+# The scopes a user, key or session holds, and each endpoint's check.
+scope = { path = "../../packages/scope" }
 clap = { workspace = true, features = ["env"] }
 axum = "0.8"
 base = { path = "../../sdk/base" }
-base64 = "=0.22.1"
 crypto = { path = "../../packages/crypto" }
 chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
@@ -35,6 +38,8 @@ http-server = { path = "../../packages/http-server" }
 rpc = { path = "../../packages/rpc" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
+# Names the field a `--config` preset fails at (`usecase::bootstrap`).
+serde_path_to_error = "=0.1.20"
 # The one SQLite file: every table's model (`src/models`) and the SDK storage
 # traits implemented on them (`src/usecase/sdk`).
 diesel.workspace = true
@@ -69,11 +74,12 @@ http-body-util = "=0.1.4"
 rpc = { path = "../../packages/rpc", features = ["testing"] }
 # The store contract the SQLite queue runs.
 tasks = { path = "../../packages/tasks", features = ["runner", "testing"] }
-sha2.workspace = true
 tempfile = "=3.27.0"
 # A fixed-price fee estimator for `send` over the SQLite store (`tests/pipe.rs`).
 trigger = { path = "../../sdk/trigger", features = ["openapi", "testing"] }
 tower = { version = "=0.5.2", features = ["util"] }
+# Hand-built JWTs the server must refuse (`alg: none`, `EdDSA`).
+base64 = "=0.22.1"
 
 [lints]
 workspace = true

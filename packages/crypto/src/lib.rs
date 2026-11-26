@@ -1,15 +1,23 @@
 #![doc = include_str!("../README.md")]
 
+pub mod base58;
 mod curve;
+mod digest;
 mod ed25519;
 mod error;
+pub mod mnemonic;
+pub mod password;
+mod random;
 mod secp256k1_ecdsa;
 mod secp256k1_schnorr;
 mod secret;
+pub mod totp;
 
 pub use curve::Curve;
+pub use digest::{crc32, sha256};
 pub use ed25519::Ed25519;
 pub use error::{Error, ErrorKind};
+pub use random::random;
 pub use secp256k1_ecdsa::Secp256k1Ecdsa;
 pub use secp256k1_schnorr::Secp256k1Schnorr;
 pub use secret::SecretBytes;
@@ -50,14 +58,7 @@ const KEY_LENGTH: usize = 32;
 /// 32 bytes from the operating-system random source, zeroized on drop.
 fn random_bytes() -> Result<zeroize::Zeroizing<[u8; KEY_LENGTH]>, Error> {
     let mut bytes = zeroize::Zeroizing::new([0_u8; KEY_LENGTH]);
-    rand_core::RngCore::try_fill_bytes(&mut rand_core::OsRng, bytes.as_mut_slice()).map_err(
-        |_| {
-            Error::new(
-                ErrorKind::Random,
-                "operating-system randomness is unavailable",
-            )
-        },
-    )?;
+    random::fill(bytes.as_mut_slice())?;
     Ok(bytes)
 }
 

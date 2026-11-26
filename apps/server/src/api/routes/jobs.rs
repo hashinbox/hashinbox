@@ -12,8 +12,10 @@ use serde_json::Value;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams};
+use crate::models::Session;
+
 use crate::{api::AppState, db::Paged as _, usecase::jobs};
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -44,7 +46,7 @@ impl ListQuery {
                 network.clone(),
             ))),
             (None, None) => Ok(None),
-            _ => Err(Error::invalid_request("chain and network go together")),
+            _ => Err(Error::invalid_argument("chain and network go together")),
         }
     }
 }
@@ -167,28 +169,30 @@ struct ListResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/jobs",
     operation_id = "list_jobs",
     summary = "List queued jobs",
     params(ListQuery, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The latest jobs", body = ListResponse),
-        (status = 400, description = "Malformed query, cursor, or limit, or a chain without its network", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The queue is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query, cursor, or limit, or a chain without its network", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The queue is unavailable", body = Error)
     ),
     tag = "jobs"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.jobs.$read");
+    let Query(query) = query?;
+    let Query(index) = index?;
     let page = index.page("jobs", |cursor| {
         let (updated_at, id) = cursor.split_once(':')?;
         Some((updated_at.parse().ok()?, id.parse().ok()?))
@@ -209,7 +213,7 @@ struct JobPath {
     id: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/jobs/{id}",
     operation_id = "read_job",
@@ -217,18 +221,20 @@ struct JobPath {
     description = "The job's outcome, what it was given and what its worker has done; for a \
         broadcast, the transaction it recorded and whether it was sent.",
     params(JobPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The job", body = Job),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Job is unknown", body = ErrorBody),
-        (status = 503, description = "The queue is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Job is unknown", body = Error),
+        (status = 503, description = "The queue is unavailable", body = Error)
     ),
     tag = "jobs"
 )]
 async fn read(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<JobPath>,
 ) -> Result<Json<Job>, Error> {
+    scope::require!(session, "com.hashinbox.jobs.$read");
     Ok(Json(jobs::read(&state.db, &path.id).await?.into()))
 }

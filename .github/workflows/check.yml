@@ -24,7 +24,7 @@ jobs:
         run: cargo fmt --all --check
       - name: Check (all targets, including example binaries)
         run: cargo check --locked --workspace --all-targets
-      # --all-features also lints payment-server's feature-gated real-validator
+      # --all-features also lints hashinbox's feature-gated real-validator
       # Solana test (`solana-node`).
       - name: Clippy
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -78,7 +78,7 @@ jobs:
       # binary enables no crate's `testing` feature.
       - name: No release build enables testing
         run: |
-          if cargo tree --locked -q -p payment-server -e normal --prefix none \
+          if cargo tree --locked -q -p hashinbox -e normal --prefix none \
                -f '{p} {f}' | grep -w testing; then
             exit 1
           fi
@@ -89,7 +89,7 @@ jobs:
       # otherwise report, and proves the flag works on a clean checkout.
       - name: OpenAPI document is current
         run: |
-          cargo run --locked -p payment-server -- --openapi > "$RUNNER_TEMP/openapi.json"
+          cargo run --locked -p hashinbox -- --openapi > "$RUNNER_TEMP/openapi.json"
           diff -u docs/openapi.json "$RUNNER_TEMP/openapi.json"
 
   structure:

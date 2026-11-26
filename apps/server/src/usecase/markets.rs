@@ -8,11 +8,12 @@ use base::Decimal;
 
 use crate::{
     db::Db,
+    error::Error,
     models::{
         market::{self, Market},
         market_candle_1h::{self, MarketCandles1h, MarketCandles1hExchangeAssetMapCached},
     },
-    usecase::{Error, now},
+    usecase::now,
 };
 
 /// How far back candles are read, Unix seconds.

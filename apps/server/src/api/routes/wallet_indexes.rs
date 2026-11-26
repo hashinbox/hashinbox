@@ -15,7 +15,9 @@ use serde::Deserialize;
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, create_status, wallets::WalletPath};
+use crate::models::Caller;
+
+use super::wallets::WalletPath;
 use crate::{
     api::AppState,
     models::{
@@ -24,6 +26,7 @@ use crate::{
     },
     usecase::wallets,
 };
+use crate::{api::create_status, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -48,7 +51,7 @@ struct CreateRequest {
     start: Option<u64>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/indexes",
     operation_id = "create_wallet_index",
@@ -64,26 +67,28 @@ struct CreateRequest {
         indexing begins.",
     params(WalletPath),
     request_body = CreateRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 201, description = "The index", body = WalletIndex),
         (status = 200, description = "The asset was already indexed: its index",
             body = WalletIndex),
         (status = 400, description = "Malformed body or wallet ID, or a start above the \
-            chain's tip or below it less the network's `max_depth`", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+            chain's tip or below it less the network's `max_depth`", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "Wallet is unknown, or the asset is not configured",
-            body = ErrorBody),
-        (status = 503, description = "The node or the store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The node or the store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn create(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    let Json(request) = request?;
     let id = WalletId::parse(&path.id)?;
     let (container, db) = (&state.container, &state.db);
     let index = wallets::create_index(container, db, &id, &request.asset, request.start);
@@ -125,12 +130,12 @@ impl UpdateRequest {
         match self.index_state {
             IndexState::Indexing => Ok(base::IndexState::Indexing),
             IndexState::Paused => Ok(base::IndexState::Paused),
-            IndexState::NoData => Err(Error::invalid_request("no_data is the indexer's")),
+            IndexState::NoData => Err(Error::invalid_argument("no_data is the indexer's")),
         }
     }
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     patch,
     path = "/v1/wallets/{id}/indexes/{asset}",
     operation_id = "update_wallet_index",
@@ -142,30 +147,32 @@ impl UpdateRequest {
         back: its balance is read there and one `adjustment` leg closes the gap.",
     params(IndexPath),
     request_body = UpdateRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The index", body = WalletIndex),
         (status = 400, description = "Malformed body or wallet ID, or `no_data` asked for",
-            body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such index", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such index", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn update(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
     request: Result<Json<UpdateRequest>, JsonRejection>,
 ) -> Result<Json<WalletIndex>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    let Json(request) = request?;
     let index_state = request.index_state()?;
     let id = path.wallet()?;
     let index = wallets::set_index_state(&state.container, &state.db, &id, path.asset, index_state);
     Ok(Json(index.await?))
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     delete,
     path = "/v1/wallets/{id}/indexes/{asset}",
     operation_id = "delete_wallet_index",
@@ -173,26 +180,28 @@ async fn update(
     description = "Forgets the index and its progress: its balance and history are no longer \
         read. Creating it again starts from its new start.",
     params(IndexPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 204, description = "Deleted"),
-        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such index", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed wallet ID", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such index", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn remove(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<StatusCode, Error> {
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
     let id = path.wallet()?;
     wallets::delete_index(&state.container, &state.db, &id, &path.asset).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/indexes/{asset}/reconcile",
     operation_id = "reconcile_wallet_index",
@@ -204,23 +213,25 @@ async fn remove(
         cannot see, such as ether a contract sent. Only on chains that read balances \
         (Solana, Ethereum).",
     params(IndexPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 202, description = "The index, its progress unset", body = WalletIndex),
-        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such index", body = ErrorBody),
+        (status = 400, description = "Malformed wallet ID", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such index", body = Error),
         (status = 422, description = "The chain reads no balance (Bitcoin), or the index is \
-            paused or `no_data`", body = ErrorBody),
+            paused or `no_data`", body = Error),
         (status = 503, description = "The indexer has not read the chain's final block \
-            yet, or the store is unavailable", body = ErrorBody)
+            yet, or the store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn reconcile(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
     let id = path.wallet()?;
     let index = wallets::reconcile(&state.container, &state.db, &id, &path.asset).await?;
     Ok((StatusCode::ACCEPTED, Json(index)))

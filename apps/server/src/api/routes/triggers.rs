@@ -16,9 +16,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
+use crate::models::Caller;
+use crate::models::Session;
+
 use ::trigger::{Stats, actions::Call, conditions::Logic, selection::Selector};
 
-use super::{Error, ErrorBody, IndexParams, jobs::JobState};
+use super::jobs::JobState;
 use crate::{
     api::AppState,
     db::Paged as _,
@@ -29,6 +32,7 @@ use crate::{
     },
     usecase::triggers,
 };
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -49,26 +53,28 @@ struct ListResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/triggers",
     operation_id = "list_triggers",
     summary = "List triggers",
     params(IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Triggers in id order", body = ListResponse),
-        (status = 400, description = "Malformed query or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.triggers.$read");
+    let Query(index) = index?;
     let page = index.page("triggers", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
     let triggers = triggers::list_page(&state.db, page).await?;
@@ -137,7 +143,7 @@ struct CreateResponse {
     triggers: Vec<Trigger>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/triggers",
     operation_id = "create_triggers",
@@ -146,24 +152,29 @@ struct CreateResponse {
         `id` chosen here that never changes: a template of several triggers (gas funding and \
         sweep) never lands half.",
     request_body = BatchRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 201, description = "Triggers created", body = CreateResponse),
-        (status = 400, description = "Malformed body or id, several networks, or a send from \
-            This to This", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 400, description = "Malformed body or id, a repeated id, several networks, \
+            or a send from This to This", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "Network or sent asset is not configured",
-            body = ErrorBody),
-        (status = 422, description = "An id is taken or repeated", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 409, description = "An id is taken", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn create(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     request: Result<Json<BatchRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateResponse>), Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.triggers.$write");
+    // Its `send` moves funds from whichever wallets its selector picks when
+    // it runs (by tag or asset), so it needs every wallet.
+    scope::require!(caller, "com.hashinbox.wallets.$write");
+    let Json(request) = request?;
     let definitions = request.triggers.into_iter().map(Into::into).collect();
     let (container, db, actions) = (&state.container, &state.db, &state.actions);
     let triggers = triggers::create(container, db, actions, definitions).await?;
@@ -178,29 +189,31 @@ struct TriggerPath {
     id: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/triggers/{id}",
     operation_id = "read_trigger",
     summary = "Read a trigger",
     params(TriggerPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The trigger", body = Trigger),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such trigger", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such trigger", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn read(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<Json<Trigger>, Error> {
+    scope::require!(session, "com.hashinbox.triggers.$read");
     Ok(Json(triggers::read(&state.db, path.id).await?))
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     put,
     path = "/v1/triggers/{id}",
     operation_id = "replace_trigger",
@@ -209,48 +222,55 @@ async fn read(
         Setting `enabled` to false pauses it.",
     params(TriggerPath),
     request_body = Definition,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Trigger replaced", body = Trigger),
         (status = 400, description = "Malformed body, or a send from This to This",
-            body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+            body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such trigger, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn replace(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
     request: Result<Json<Definition>, JsonRejection>,
 ) -> Result<Json<Trigger>, Error> {
-    let Json(definition) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.triggers.$write");
+    // Its `send` moves funds from whichever wallets its selector picks when
+    // it runs (by tag or asset), so it needs every wallet.
+    scope::require!(caller, "com.hashinbox.wallets.$write");
+    let Json(definition) = request?;
     let (container, db, actions) = (&state.container, &state.db, &state.actions);
     let trigger = triggers::replace(container, db, actions, path.id, definition.into());
     Ok(Json(trigger.await?))
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     delete,
     path = "/v1/triggers/{id}",
     operation_id = "delete_trigger",
     summary = "Delete a trigger and its runs",
     params(TriggerPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 204, description = "Trigger deleted"),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such trigger", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such trigger", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn delete(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<StatusCode, Error> {
+    scope::require!(caller, "com.hashinbox.triggers.$write");
     triggers::delete(&state.db, path.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -295,27 +315,29 @@ struct RunsResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/triggers/{id}/runs",
     operation_id = "list_trigger_runs",
     summary = "List a trigger's latest runs",
     params(TriggerPath, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Its runs, latest first", body = RunsResponse),
-        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query, cursor, or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "triggers"
 )]
 async fn runs(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<RunsResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.triggers.$read");
+    let Query(index) = index?;
     let page = index.page("runs", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
     let runs = triggers::runs_page(&state.db, path.id, page).await?;

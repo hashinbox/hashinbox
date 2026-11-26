@@ -3,7 +3,7 @@ name = "chain-ethereum"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Ethereum for the payment SDK: a block-by-block chain, ETH and ERC-20 wallets, and a broadcaster."
+description = "Ethereum for hashinbox: a block-by-block chain, ETH and ERC-20 wallets, and a broadcaster."
 readme = "README.md"
 
 [features]

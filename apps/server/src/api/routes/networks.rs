@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use crate::models::Session;
+
+use crate::error::Error;
 use crate::{api::AppState, models::Network, usecase::networks};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -52,7 +54,7 @@ struct ListResponse {
     networks: Vec<NetworkResponse>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks",
     operation_id = "list_networks",
@@ -62,15 +64,19 @@ struct ListResponse {
         and its `index` (its `network_index` row and why its index job last failed, \
         `job_reason`; null: neither). `tip.live` is the highest tip its nodes last told, \
         kept in memory: no node is asked.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Every network", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The networks could not be read", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The networks could not be read", body = Error)
     ),
     tag = "networks"
 )]
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
+async fn list(
+    session: Session,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ListResponse>, Error> {
+    scope::require!(session, "com.hashinbox.networks.$read");
     let networks = networks::overview(&state.container, &state.db).await?;
     let networks = networks.into_iter().map(Into::into).collect();
     Ok(Json(ListResponse { networks }))

@@ -1,0 +1,17 @@
+[package]
+name = "scope-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "`#[scope::utoipa]`: an endpoint's scope, written once, in its OpenAPI security and its runtime check."
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["full"] }
+
+[lints]
+workspace = true

@@ -8,12 +8,13 @@ use base::{Address, Birthday, Container, Decimal, IndexState, WalletIndexTarget}
 use tasks::Worker as _;
 
 use super::{
-    Error, Transport,
+    Transport,
     tasks::Queue,
     workers::broadcast::{Broadcast, SendIntent},
 };
 use crate::{
     db::{Db, Page},
+    error::Error,
     models::{
         Id, Wallet, int,
         leg::{self, Movement},
@@ -55,7 +56,7 @@ pub(crate) struct Transfer {
 /// # Errors
 ///
 /// Not found for an unconfigured network; invalid for a malformed address
-/// or key, or a key that derives another address; conflict for a kept
+/// or key, or a key that derives another address; already exists for a kept
 /// wallet with another external id (nothing written); unavailable when
 /// generation or the store is.
 pub(crate) async fn create(
@@ -71,7 +72,7 @@ pub(crate) async fn create(
     let mut row = if let Some(secret) = new.secret {
         let wallet = factory.from_pk_text(&secret).await?;
         if let Some(given) = given.filter(|given| given != wallet.address()) {
-            return Err(Error::invalid(format!(
+            return Err(Error::invalid_argument(format!(
                 "the key derives {}, not {}",
                 wallet.address().value,
                 given.value
@@ -84,7 +85,7 @@ pub(crate) async fn create(
         let wallet = factory.from_pk(factory.generate().await?).await?;
         Wallet::try_from(&*wallet)
     }
-    .map_err(|error| Error::invalid(format!("{error:#}")))?;
+    .map_err(|error| Error::invalid_argument(format!("{error:#}")))?;
     row.external_id = new.external_id;
     let written = db
         .write(move |connection| {
@@ -98,7 +99,7 @@ pub(crate) async fn create(
         })
         .await?;
     let Some((created, wallet)) = written else {
-        return Err(Error::conflict(
+        return Err(Error::already_exists(
             "the wallet is kept with another external_id",
         ));
     };
@@ -161,7 +162,7 @@ pub(crate) async fn set_tag(
 ) -> Result<(), Error> {
     let id = WalletId::of(&container.parse(id)?)?;
     if !wallet::is_tag(&tag) {
-        return Err(Error::invalid(format!(
+        return Err(Error::invalid_argument(format!(
             "a tag is 1 to 64 of [a-z0-9-]: {tag:?}"
         )));
     }
@@ -261,7 +262,7 @@ pub(crate) async fn set_index_state(
 /// # Errors
 ///
 /// Invalid for a malformed address or asset; not found for an unconfigured
-/// network or no such index; conflict on a chain that reads no balance, or
+/// network or no such index; failed precondition on a chain that reads no balance, or
 /// for a paused or `no_data` index; unavailable before the indexer read the
 /// final block, or when the store is.
 pub(crate) async fn reconcile(
@@ -273,7 +274,7 @@ pub(crate) async fn reconcile(
     let (address, index) = index_id(container, id, asset)?;
     let service = container.service(&address)?;
     if service.balances.is_none() {
-        return Err(Error::conflict(
+        return Err(Error::failed_precondition(
             "this chain reads no balance to reconcile with",
         ));
     }
@@ -295,7 +296,7 @@ pub(crate) async fn reconcile(
         .await?;
     let found = found.ok_or_else(|| Error::not_found("no such index"))?;
     if changed == 0 {
-        return Err(Error::conflict(
+        return Err(Error::failed_precondition(
             "a paused or no_data index is not reconciled",
         ));
     }
@@ -350,7 +351,7 @@ pub(crate) async fn legs_page(
 /// # Errors
 ///
 /// Invalid for a malformed address, amount or destination, or a send the
-/// queue refuses; not found for an unconfigured network or asset; conflict
+/// queue refuses; not found for an unconfigured network or asset; failed precondition
 /// for a wallet that holds no key, or whose index of the asset (and, for a
 /// token, of its native currency) is not kept; unavailable when the store
 /// or the queue is.
@@ -369,7 +370,7 @@ pub(crate) async fn send(
         .read(move |connection| Ok(wallet::db::is_keyed(connection, &id)?))
         .await?;
     if !keyed {
-        return Err(Error::conflict("the wallet holds no key here"));
+        return Err(Error::failed_precondition("the wallet holds no key here"));
     }
     // It takes from its asset's index and, for a token, the native one (the
     // fee): each must be kept, or there is no balance to check. Paused or
@@ -383,7 +384,7 @@ pub(crate) async fn send(
         .read(move |connection| Ok(wallet_index::db::find_missing(connection, &takes)?))
         .await?;
     if let Some(id) = missing {
-        return Err(Error::conflict(
+        return Err(Error::failed_precondition(
             transaction::Refused::NotIndexed(id).to_string(),
         ));
     }
@@ -394,7 +395,7 @@ pub(crate) async fn send(
         .and_then(|amount| info.atomic(&amount).ok())
         .filter(|units| within_range(&from.network.chain, units))
         .ok_or_else(|| {
-            Error::invalid(
+            Error::invalid_argument(
                 "amount must be a positive exact decimal, unsigned, within the asset's decimals \
                  and the chain's range",
             )
@@ -412,7 +413,7 @@ pub(crate) async fn send(
     let queued = Broadcast::enqueue(queue, &intent)
         .await
         .map_err(|error| match error {
-            tasks::StoreError::Invalid(reason) => Error::invalid(reason),
+            tasks::StoreError::Invalid(reason) => Error::invalid_argument(reason),
             error => Error::unavailable(error.to_string()),
         })?;
     // A send is not unique: it is always queued.

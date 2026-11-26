@@ -1,7 +1,8 @@
 //! The job queue as kept: every job, where it is, why it failed, what it was
 //! given and what its worker has done so far.
 
-use super::{Error, workers::broadcast};
+use super::workers::broadcast;
+use crate::error::Error;
 use crate::{
     db::{Db, Keyed, Page},
     models::task,

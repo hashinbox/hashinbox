@@ -3,7 +3,7 @@ name = "chain-bitcoin"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Bitcoin for the payment SDK: blocks as base legs, UTXO wallets, building, signing and broadcast."
+description = "Bitcoin for hashinbox: blocks as base legs, UTXO wallets, building, signing and broadcast."
 readme = "README.md"
 
 [features]

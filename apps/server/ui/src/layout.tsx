@@ -1,13 +1,15 @@
 import AppBar from '@mui/material/AppBar';
+import Avatar from '@mui/material/Avatar';
 import AccountBalanceWallet from '@mui/icons-material/AccountBalanceWallet';
 import Bolt from '@mui/icons-material/Bolt';
 import Close from '@mui/icons-material/Close';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import Hub from '@mui/icons-material/Hub';
-import LockIcon from '@mui/icons-material/Lock';
+import Logout from '@mui/icons-material/Logout';
 import MenuIcon from '@mui/icons-material/Menu';
 import MenuBook from '@mui/icons-material/MenuBook';
 import Notes from '@mui/icons-material/Notes';
+import People from '@mui/icons-material/People';
 import ShowChart from '@mui/icons-material/ShowChart';
 import WorkHistory from '@mui/icons-material/WorkHistory';
 import Box from '@mui/material/Box';
@@ -22,8 +24,8 @@ import ListItemText from '@mui/material/ListItemText';
 import Stack from '@mui/material/Stack';
 import Tab from '@mui/material/Tab';
 import Tabs from '@mui/material/Tabs';
-import TextField from '@mui/material/TextField';
 import Toolbar from '@mui/material/Toolbar';
+import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
@@ -35,6 +37,7 @@ import {
   setToken,
   whenUnauthorized,
   type Listing,
+  type UserRead,
   type Wallet,
 } from '@/api/client';
 import { Toast, type Message } from '@/_components/toast';
@@ -45,19 +48,36 @@ import { Docs } from '@/pages/docs/page';
 import { Explorers, type Explorer } from '@/_components/explorers';
 import { Dashboard } from '@/pages/dashboard/page';
 import { Jobs } from '@/pages/jobs/page';
+import { Login } from '@/pages/login/page';
 import { Logs } from '@/pages/logs/page';
 import { Markets } from '@/pages/markets/page';
 import { Networks as Configured } from '@/pages/networks/page';
+import { Setup } from '@/pages/setup/page';
 import { Triggers } from '@/pages/triggers/page';
+import { RecoveryBanner } from '@/pages/users/_components/recovery';
+import { ROOT, allows, unpack } from '@/pages/users/_components/scopes';
+import { Users } from '@/pages/users/page';
 import { Wallets } from '@/pages/wallets/page';
 import { go, segments } from '@/route';
-import { settings } from '@/settings';
 import { display } from '@/theme';
 
 type View =
-  'dashboard' | 'wallets' | 'triggers' | 'networks' | 'markets' | 'jobs' | 'logs' | 'docs';
-/** Whether the server wants a token: not asked yet, no, or yes. */
-type Door = 'unknown' | 'open' | 'locked';
+  | 'dashboard'
+  | 'wallets'
+  | 'triggers'
+  | 'networks'
+  | 'markets'
+  | 'jobs'
+  | 'logs'
+  | 'users'
+  | 'docs'
+  | 'login'
+  | 'setup';
+/**
+ * Where setup stands (`GET /v1/version`): not asked yet, no user (fresh
+ * install, until setup is done), or done.
+ */
+type Root = 'unknown' | 'missing' | 'present';
 const TOKEN_KEY = 'tally.token';
 const VIEWS: View[] = [
   'dashboard',
@@ -67,8 +87,24 @@ const VIEWS: View[] = [
   'markets',
   'jobs',
   'logs',
+  'users',
   'docs',
+  'login',
+  'setup',
 ];
+
+/** The name shown when the server's `instance` setting is unset. */
+const NAME = 'hashinbox';
+
+/**
+ * The view a state may show: setup on a fresh install, login without a
+ * session, never login or setup after.
+ */
+function allowed(view: View, root: Root, token: string | null): View {
+  if (root === 'missing') return 'setup';
+  if (token === null) return 'login';
+  return view === 'login' || view === 'setup' ? 'dashboard' : view;
+}
 
 /** The tab named in the address, so a reload or a shared link lands on it. */
 function linked(): View {
@@ -106,7 +142,10 @@ async function allWallets(): Promise<Wallet[]> {
 
 export function Layout() {
   const [token, setSession] = useState<string | null>(stored);
-  const [door, setDoor] = useState<Door>('unknown');
+  const [root, setRoot] = useState<Root>('unknown');
+  const [name, setName] = useState(NAME);
+  const [me, setMe] = useState<UserRead | null>(null);
+  const [meRead, setMeRead] = useState(0);
   const [view, setView] = useState<View>(linked);
   const [listings, setListings] = useState<Listing[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
@@ -127,10 +166,11 @@ export function Layout() {
     [notify],
   );
 
-  const lock = useCallback(() => {
+  /** Forgets this tab's session; the login page follows. */
+  const signOut = useCallback(() => {
     setToken(null);
     setSession(null);
-    setDoor('locked');
+    setMe(null);
     try {
       sessionStorage.removeItem(TOKEN_KEY);
     } catch {
@@ -138,35 +178,66 @@ export function Layout() {
     }
   }, []);
 
+  /** Logs out: this session, or (`everywhere`) every one the user issued. */
+  const logout = useCallback(
+    (everywhere: boolean) => {
+      const params = { query: { all: everywhere } };
+      call(client.DELETE('/v1/session', { params }))
+        .catch((error: unknown) => {
+          if (everywhere) fail(error);
+        })
+        .finally(signOut);
+    },
+    [fail, signOut],
+  );
+
   useEffect(() => {
     whenUnauthorized(() => {
-      lock();
-      notify('The token was refused.', true);
+      signOut();
+      notify('The session ended. Log in again.', true);
     });
-  }, [lock, notify]);
+  }, [signOut, notify]);
 
-  // Ask, with whatever token this tab holds, whether the door is open.
+  // The very first call: a fresh install shows the setup page instead.
   useEffect(() => {
-    setToken(token);
-    let live = true;
-    call(client.GET('/v1/assets'))
-      .then(() => {
-        if (!live) return;
-        setDoor('open');
+    call(client.GET('/v1/version'))
+      .then((version) => {
+        const instance = version.settings.instance;
+        if (typeof instance === 'string' && instance) setName(instance);
+        setRoot(version.missing_root ? 'missing' : 'present');
       })
       .catch((error: unknown) => {
-        if (!live) return;
-        if (error instanceof ApiError && error.status === 401) setDoor('locked');
-        else fail(error);
+        setRoot('present');
+        fail(error);
+      });
+  }, [fail]);
+
+  // The logged-in user, read with this tab's session.
+  useEffect(() => {
+    setToken(token);
+    if (token === null || root !== 'present') return;
+    let live = true;
+    call(client.GET('/v1/user'))
+      .then((read) => {
+        if (live) setMe(read);
+      })
+      .catch((error: unknown) => {
+        if (live) fail(error);
       });
     return () => {
       live = false;
     };
-  }, [token, fail]);
+  }, [token, root, meRead, fail]);
+
+  const open = root === 'present' && token !== null && me !== null;
+
+  useEffect(() => {
+    document.title = name;
+  }, [name]);
 
   // The wallets and the assets they can be made in.
   useEffect(() => {
-    if (door !== 'open') return;
+    if (!open) return;
     let live = true;
     Promise.all([call(client.GET('/v1/assets')), allWallets(), call(client.GET('/v1/networks'))])
       .then(([assets, list, configured]) => {
@@ -189,7 +260,7 @@ export function Layout() {
     return () => {
       live = false;
     };
-  }, [door, token, view, tagged, fail]);
+  }, [open, token, view, tagged, fail]);
 
   useEffect(() => {
     const navigate = () => setView(linked());
@@ -197,13 +268,28 @@ export function Layout() {
     return () => window.removeEventListener('popstate', navigate);
   }, []);
 
-  const unlock = (value: string) => {
+  // Each state shows only the views it may: setup, login, or the dashboard.
+  useEffect(() => {
+    if (root === 'unknown') return;
+    const want = allowed(view, root, token);
+    if (want !== view) go([want], true);
+  }, [root, token, view]);
+
+  /** A new session for this tab: kept, and used from the next call on. */
+  const keep = useCallback((value: string) => {
     try {
       sessionStorage.setItem(TOKEN_KEY, value);
     } catch {
       /* private window */
     }
+    setToken(value);
     setSession(value);
+  }, []);
+
+  /** A session from the login page: the dashboard opens. */
+  const signIn = (value: string) => {
+    keep(value);
+    go(['dashboard']);
   };
 
   // Added, or watched in more assets: replaces the listed one with the same id.
@@ -219,7 +305,6 @@ export function Layout() {
   }, [view]);
 
   const shell = useMemo<Shell>(() => ({ listings, notify, fail }), [listings, notify, fail]);
-  const open = door === 'open';
   const theme = useTheme();
   // Narrow screens fold the views into a menu that opens from the top.
   const wide = useMediaQuery(theme.breakpoints.up('md'));
@@ -242,127 +327,170 @@ export function Layout() {
           { view: 'markets' as const, label: 'Markets', icon: <ShowChart fontSize="small" /> },
           { view: 'jobs' as const, label: 'Jobs', icon: <WorkHistory fontSize="small" /> },
           { view: 'logs' as const, label: 'Logs', icon: <Notes fontSize="small" /> },
+          { view: 'users' as const, label: 'Users', icon: <People fontSize="small" /> },
+          { view: 'docs' as const, label: 'Docs', icon: <MenuBook fontSize="small" /> },
         ]
       : []),
-    { view: 'docs', label: 'Docs', icon: <MenuBook fontSize="small" /> },
   ];
+  const known = root !== 'unknown';
+  const shown = allowed(view, root, token);
+
+  // Logged out: no bar and no menu, only the login or setup page.
+  const chrome = root === 'present' && token !== null;
+
+  if (!known) return null;
 
   return (
     // The page is at least the screen's height; `main` fills what the bar leaves.
     <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100dvh' }}>
-      <AppBar>
-        <Toolbar sx={{ gap: wide ? 4 : 1, flexWrap: 'wrap', minHeight: 60 }}>
-          {door !== 'unknown' && !wide && (
-            <IconButton edge="start" aria-label="Menu" onClick={() => setMenu(true)}>
-              <MenuIcon />
-            </IconButton>
-          )}
-          <Link
-            href="/"
-            underline="none"
-            color="text.primary"
-            sx={{ fontFamily: display, fontWeight: 600, fontSize: 17, letterSpacing: '-.01em' }}
-          >
-            {settings.brand}
-          </Link>
-          {door !== 'unknown' && wide && (
-            <Tabs
-              value={open || view === 'docs' ? view : false}
-              onChange={(_, next: View) => go([next])}
-              aria-label="Views"
+      {chrome && (
+        <AppBar>
+          <Toolbar sx={{ gap: wide ? 4 : 1, flexWrap: 'wrap', minHeight: 60 }}>
+            {!wide && views.length > 0 && (
+              <IconButton edge="start" aria-label="Menu" onClick={() => setMenu(true)}>
+                <MenuIcon />
+              </IconButton>
+            )}
+            <Link
+              href="/"
+              underline="none"
+              color="text.primary"
+              sx={{ fontFamily: display, fontWeight: 600, fontSize: 17, letterSpacing: '-.01em' }}
             >
-              {views.map((v) => (
-                <Tab key={v.view} value={v.view} label={v.label} />
-              ))}
-            </Tabs>
-          )}
-          <Box sx={{ flexGrow: 1 }} />
-          {token && open && wide && (
-            <Button color="inherit" onClick={lock}>
-              Lock
-            </Button>
-          )}
-          <Box
-            sx={{ display: 'flex', flexShrink: 0, pointerEvents: 'none', color: 'text.primary' }}
-          >
-            <Box sx={{ display: { xs: 'none', md: 'flex' } }}>
-              <HashinboxLogo height={26} opacity={0.18} />
+              {name}
+            </Link>
+            {wide && views.length > 0 && (
+              <Tabs
+                value={views.some((v) => v.view === view) ? view : false}
+                onChange={(_, next: View) => go([next])}
+                aria-label="Views"
+              >
+                {views.map((v) => (
+                  <Tab key={v.view} value={v.view} label={v.label} />
+                ))}
+              </Tabs>
+            )}
+            <Box sx={{ flexGrow: 1 }} />
+            {open && (
+              <Stack direction="row" spacing={0.5} sx={{ alignItems: 'center' }}>
+                <Button
+                  color="inherit"
+                  href="/ui/users/me"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    go(['users', 'me']);
+                  }}
+                  startIcon={
+                    <Avatar sx={{ width: 24, height: 24, fontSize: 12 }}>
+                      {me.user.name.slice(0, 1).toUpperCase()}
+                    </Avatar>
+                  }
+                  sx={{ border: 0 }}
+                >
+                  <Box component="span" sx={{ display: { xs: 'none', sm: 'inline' } }}>
+                    {me.user.name}
+                  </Box>
+                </Button>
+                {wide && (
+                  <Tooltip title="Log out">
+                    <IconButton size="small" aria-label="Log out" onClick={() => logout(false)}>
+                      <Logout fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
+              </Stack>
+            )}
+            <Box
+              sx={{ display: 'flex', flexShrink: 0, pointerEvents: 'none', color: 'text.primary' }}
+            >
+              <Box sx={{ display: { xs: 'none', md: 'flex' } }}>
+                <HashinboxLogo height={26} opacity={0.18} />
+              </Box>
+              <Box sx={{ display: { xs: 'flex', md: 'none' } }}>
+                <HashinboxMark height={26} opacity={0.18} />
+              </Box>
             </Box>
-            <Box sx={{ display: { xs: 'flex', md: 'none' } }}>
-              <HashinboxMark height={26} opacity={0.18} />
-            </Box>
-          </Box>
-        </Toolbar>
-      </AppBar>
-      <Drawer
-        anchor="left"
-        open={menu && !wide}
-        onClose={() => setMenu(false)}
-        slotProps={{ paper: { sx: { width: 272, display: 'flex', flexDirection: 'column' } } }}
-      >
-        <Stack
-          direction="row"
-          sx={{
-            alignItems: 'center',
-            px: 2.5,
-            minHeight: 60,
-            borderBottom: 1,
-            borderColor: 'divider',
-          }}
+          </Toolbar>
+        </AppBar>
+      )}
+      {chrome && (
+        <Drawer
+          anchor="left"
+          open={menu && !wide}
+          onClose={() => setMenu(false)}
+          slotProps={{ paper: { sx: { width: 272, display: 'flex', flexDirection: 'column' } } }}
         >
-          <Typography
+          <Stack
+            direction="row"
             sx={{
-              flexGrow: 1,
-              fontFamily: display,
-              fontWeight: 600,
-              fontSize: 17,
-              letterSpacing: '-.01em',
+              alignItems: 'center',
+              px: 2.5,
+              minHeight: 60,
+              borderBottom: 1,
+              borderColor: 'divider',
             }}
           >
-            {settings.brand}
-          </Typography>
-          <IconButton size="small" aria-label="Close menu" onClick={() => setMenu(false)}>
-            <Close fontSize="small" />
-          </IconButton>
-        </Stack>
-        <List aria-label="Views" sx={{ px: 1.5, py: 1.5, flexGrow: 1 }}>
-          {views.map((v) => (
-            <ListItemButton
-              key={v.view}
-              selected={v.view === view}
-              onClick={() => {
-                setMenu(false);
-                go([v.view]);
+            <Typography
+              sx={{
+                flexGrow: 1,
+                fontFamily: display,
+                fontWeight: 600,
+                fontSize: 17,
+                letterSpacing: '-.01em',
               }}
-              sx={{ borderRadius: 2, mb: 0.5, py: 1.1 }}
             >
-              <ListItemIcon sx={{ minWidth: 38 }}>{v.icon}</ListItemIcon>
-              <ListItemText primary={v.label} />
-            </ListItemButton>
-          ))}
-        </List>
-        {token && open && (
-          <List sx={{ px: 1.5, py: 1.5, borderTop: 1, borderColor: 'divider' }}>
-            <ListItemButton
-              onClick={() => {
-                setMenu(false);
-                lock();
-              }}
-              sx={{ borderRadius: 2, py: 1.1 }}
-            >
-              <ListItemIcon sx={{ minWidth: 38 }}>
-                <LockIcon fontSize="small" />
-              </ListItemIcon>
-              <ListItemText primary="Lock" />
-            </ListItemButton>
+              {name}
+            </Typography>
+            <IconButton size="small" aria-label="Close menu" onClick={() => setMenu(false)}>
+              <Close fontSize="small" />
+            </IconButton>
+          </Stack>
+          <List aria-label="Views" sx={{ px: 1.5, py: 1.5, flexGrow: 1 }}>
+            {views.map((v) => (
+              <ListItemButton
+                key={v.view}
+                selected={v.view === view}
+                onClick={() => {
+                  setMenu(false);
+                  go([v.view]);
+                }}
+                sx={{ borderRadius: 2, mb: 0.5, py: 1.1 }}
+              >
+                <ListItemIcon sx={{ minWidth: 38 }}>{v.icon}</ListItemIcon>
+                <ListItemText primary={v.label} />
+              </ListItemButton>
+            ))}
           </List>
-        )}
-      </Drawer>
+          {open && (
+            <List sx={{ px: 1.5, py: 1.5, borderTop: 1, borderColor: 'divider' }}>
+              <ListItemButton
+                onClick={() => {
+                  setMenu(false);
+                  logout(false);
+                }}
+                sx={{ borderRadius: 2, py: 1.1 }}
+              >
+                <ListItemIcon sx={{ minWidth: 38 }}>
+                  <Logout fontSize="small" />
+                </ListItemIcon>
+                <ListItemText primary="Log out" />
+              </ListItemButton>
+            </List>
+          )}
+        </Drawer>
+      )}
 
       {open && (
         <Explorers.Provider value={explorers}>
           <Box component="main" sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
-            {view === 'dashboard' && <Dashboard shell={shell} />}
+            {view === 'dashboard' && (
+              <Dashboard
+                shell={shell}
+                banner={
+                  allows(unpack(me.user.scopes), `${ROOT}.recovery.$write`) && <RecoveryBanner />
+                }
+              />
+            )}
             {view === 'wallets' && (
               <Wallets
                 shell={shell}
@@ -380,65 +508,35 @@ export function Layout() {
             {view === 'markets' && <Markets shell={shell} />}
             {view === 'jobs' && <Jobs shell={shell} />}
             {view === 'logs' && <Logs shell={shell} />}
-            {view === 'docs' && <Docs shell={shell} secured={token !== null} />}
+            {view === 'users' && (
+              <Users
+                shell={shell}
+                me={me}
+                onMe={() => setMeRead((n) => n + 1)}
+                onLogout={logout}
+                onSignedOut={signOut}
+                onSession={keep}
+              />
+            )}
+            {view === 'docs' && <Docs shell={shell} secured />}
           </Box>
           <LogsDrawer shell={shell} source={logSource} />
         </Explorers.Provider>
       )}
-      {door === 'locked' && view === 'docs' && (
-        <Box component="main" sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
-          <Docs shell={shell} secured />
-        </Box>
+      {shown === 'setup' && (
+        <Setup
+          instance={name}
+          onSession={keep}
+          onInstance={setName}
+          onDone={() => {
+            setRoot('present');
+            go(['dashboard']);
+          }}
+        />
       )}
-      {door === 'locked' && view !== 'docs' && (
-        <Box component="main" sx={{ flexGrow: 1, px: 3, py: 10, maxWidth: 560, mx: 'auto' }}>
-          <Typography variant="overline" component="p">
-            Authorization required
-          </Typography>
-          <Typography variant="h2" component="h1" sx={{ mt: 1 }}>
-            This server asks for a token.
-          </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1.5 }}>
-            It stays in this tab only and is sent as the Authorization header.
-          </Typography>
-          <Box sx={{ mt: 4 }}>
-            <Session onUnlock={unlock} />
-          </Box>
-        </Box>
-      )}
+      {shown === 'login' && <Login instance={name} onSession={signIn} />}
 
       <Toast message={toast} onClose={() => setToast(null)} />
     </Box>
-  );
-}
-
-function Session({ onUnlock }: { onUnlock: (token: string) => void }) {
-  const [value, setValue] = useState('');
-  return (
-    <Stack
-      component="form"
-      direction="row"
-      spacing={1.5}
-      sx={{ alignItems: 'flex-end' }}
-      autoComplete="off"
-      onSubmit={(event) => {
-        event.preventDefault();
-        const token = value.trim();
-        if (token) onUnlock(token);
-      }}
-    >
-      <TextField
-        type="password"
-        placeholder="bearer token"
-        value={value}
-        onChange={(e) => setValue(e.target.value)}
-        slotProps={{ htmlInput: { 'aria-label': 'Bearer token' } }}
-        autoFocus
-        required
-      />
-      <Button type="submit" variant="contained">
-        Unlock
-      </Button>
-    </Stack>
   );
 }

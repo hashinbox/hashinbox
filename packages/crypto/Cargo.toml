@@ -3,11 +3,17 @@ name = "crypto"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Zeroized secp256k1 and Ed25519 keys with ECDSA, BIP-340 Schnorr and Ed25519 signing."
+description = "Zeroized secp256k1 and Ed25519 keys with ECDSA, BIP-340 Schnorr and Ed25519 signing; password hashes, TOTP, BIP39 mnemonics, base 58, SHA-256, CRC32 and OS randomness."
 readme = "README.md"
 
 [dependencies]
+# Password hashes (`password`): argon2id.
+argon2.workspace = true
+# TOTP's HMAC-SHA1 (`totp`).
+bitcoin_hashes.workspace = true
 bs58 = "=0.5.1"
+# A key secret's typo check (`crc32`).
+crc.workspace = true
 ed25519-dalek = { version = "=2.2.0", features = ["rand_core"] }
 hex.workspace = true
 k256.workspace = true

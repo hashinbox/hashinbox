@@ -1,5 +1,5 @@
 //! The command line: what the server needs before it can open the database
-//! (its file, its binding, its token and the page's brand), each flag with
+//! (its file and its binding), each flag with
 //! an environment fallback. Everything else is in the database.
 
 use std::{
@@ -12,7 +12,7 @@ use std::{
 use anyhow::{Context as _, ensure};
 use tracing::{Level, Metadata, Subscriber, level_filters::LevelFilter};
 use tracing_subscriber::{
-    EnvFilter, Layer as _,
+    EnvFilter, Layer,
     filter::{FilterExt as _, filter_fn},
     layer::SubscriberExt as _,
 };
@@ -22,11 +22,19 @@ use crate::{
     usecase::logs::{DbLayer, Feed, Line},
 };
 
+/// This build's version: `HASHINBOX_VERSION` at build time, else
+/// `git describe --tags --always --dirty`, else the crate version (`build.rs`).
+pub(crate) const VERSION: &str = env!("HASHINBOX_VERSION");
+
 pub(crate) type AnyError = Box<dyn Error + Send + Sync>;
 
 /// The command line.
 #[derive(clap::Parser)]
-#[command(name = "payment-server", args_conflicts_with_subcommands = true)]
+#[command(
+    name = "hashinbox",
+    version = VERSION,
+    args_conflicts_with_subcommands = true
+)]
 pub(crate) struct Cli {
     /// Print the OpenAPI document instead of serving, so a typed client can
     /// be generated without a node, a database, or a bound port.
@@ -38,10 +46,8 @@ pub(crate) struct Cli {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum Command {
-    /// Run the server.
+    /// Run the server; a new database file is created first.
     Serve(Serve),
-    /// Create the schema and its starting networks in a new database file.
-    Migrate(Storage),
 }
 
 /// The database file.
@@ -49,7 +55,7 @@ pub(crate) enum Command {
 pub(crate) struct Storage {
     /// The SQLite file; a relative path resolves against the working
     /// directory.
-    #[arg(long, env = "PAYMENT_DB", default_value = ".data/payment.db")]
+    #[arg(long, env = "HASHINBOX_DB", default_value = ".data/hashinbox.db")]
     db: PathBuf,
 }
 
@@ -59,22 +65,15 @@ pub(crate) struct Serve {
     #[command(flatten)]
     pub(crate) storage: Storage,
     /// The address the API listens on.
-    #[arg(long, env = "PAYMENT_BIND", default_value = "127.0.0.1:8080")]
+    #[arg(long, env = "HASHINBOX_BIND", default_value = "127.0.0.1:8080")]
     pub(crate) bind: SocketAddr,
-    /// The variable holding the API token; absent means no authorization,
-    /// which only a loopback `bind` accepts.
-    #[arg(long, env = "PAYMENT_BEARER_TOKEN_ENV")]
-    bearer_token_env: Option<String>,
     /// TLS is terminated by a proxy in front, so a non-loopback `bind` is
     /// accepted.
-    #[arg(long, env = "PAYMENT_TLS_TERMINATED_UPSTREAM")]
+    #[arg(long, env = "HASHINBOX_TLS_TERMINATED_UPSTREAM")]
     tls_terminated_upstream: bool,
-    /// The name in the page's top bar; the page has its own default.
-    #[arg(long, env = "PAYMENT_UI_BRAND")]
-    pub(crate) brand: Option<String>,
     /// The least severe event logged: off, error, warn, info, debug or
     /// trace.
-    #[arg(long, env = "PAYMENT_LOG_LEVEL", default_value = "info")]
+    #[arg(long, env = "HASHINBOX_LOG_LEVEL", default_value = "info")]
     log_level: LevelFilter,
     /// One event's own level, `TARGET=LEVEL` (`rpc.http=debug`); repeatable.
     #[arg(long = "log", value_parser = target_level)]
@@ -83,6 +82,11 @@ pub(crate) struct Serve {
     /// The rest are kept from `debug`; a failed or broken `rpc.http.*` always is.
     #[arg(long = "log-db", value_parser = target_level)]
     log_db: Vec<(String, LevelFilter)>,
+    /// A preset for an empty database: inline JSON (starting with `{`) or
+    /// a JSON file's path, `{"root": {email, name, password}, "settings":
+    /// {key: value}}`. Not read once a user exists.
+    #[arg(long = "config", env = "HASHINBOX_CONFIG", hide_env_values = true)]
+    pub(crate) bootstrap: Option<String>,
 }
 
 /// Parses `TARGET=LEVEL` the way `--log` and `--log-db` take it.
@@ -111,34 +115,33 @@ fn filter<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
 }
 
 impl Storage {
-    /// Opens the file as one pool; applies no schema.
+    /// The file's absolute path: `--db` against the working directory.
     ///
     /// # Errors
     ///
-    /// When the path does not resolve or the pool does not open.
-    pub(crate) fn open(&self) -> anyhow::Result<Db> {
+    /// When the path is empty or does not resolve.
+    pub(crate) fn path(&self) -> anyhow::Result<PathBuf> {
         ensure!(
             !self.db.as_os_str().is_empty(),
             "storage path must not be empty"
         );
-        let path = path::absolute(&self.db)
-            .context("storage path is not resolvable against the working directory")?;
-        Db::open(&path)
+        path::absolute(&self.db)
+            .context("storage path is not resolvable against the working directory")
     }
 }
 
 impl Serve {
-    /// Where the browser page sends its API calls, from `PAYMENT_UI_API_BASE`.
+    /// Where the browser page sends its API calls, from `HASHINBOX_UI_API_BASE`.
     /// Unset or empty means the page's own origin, which is right whenever
     /// this server serves the page; set it when a proxy or another origin
     /// fronts the API.
     pub(crate) fn api_base() -> Result<String, AnyError> {
-        let base = env::var("PAYMENT_UI_API_BASE").unwrap_or_default();
+        let base = env::var("HASHINBOX_UI_API_BASE").unwrap_or_default();
         let base = base.trim().trim_end_matches('/');
         let absolute = base.starts_with("https://") || base.starts_with("http://");
         if !(base.is_empty() || absolute || base.starts_with('/')) {
             return Err(
-                "PAYMENT_UI_API_BASE must be an http(s) URL or a path starting with /".into(),
+                "HASHINBOX_UI_API_BASE must be an http(s) URL or a path starting with /".into(),
             );
         }
         Ok(base.to_owned())
@@ -158,10 +161,7 @@ impl Serve {
         db: &Db,
         feed: Feed,
     ) -> Result<impl Subscriber + use<>, AnyError> {
-        let stdout = tracing_subscriber::fmt::layer()
-            .event_format(Line)
-            .with_writer(std::io::stdout)
-            .with_filter(filter(self.log_level, &self.log)?);
+        let stdout = self.stdout()?;
         let failed_http = filter_fn(|metadata| {
             [rpc::events::RPC_HTTP_FAILED, rpc::events::RPC_HTTP_BROKEN]
                 .contains(&metadata.target())
@@ -181,12 +181,28 @@ impl Serve {
         Ok(tracing_subscriber::registry().with(stdout).with(database))
     }
 
+    /// [`Serve::subscriber`]'s stdout layer alone: what logs before the
+    /// database, and its `log` table, are open.
+    ///
+    /// # Errors
+    ///
+    /// A level that does not parse.
+    pub(crate) fn stdout_subscriber(&self) -> Result<impl Subscriber + use<>, AnyError> {
+        Ok(tracing_subscriber::registry().with(self.stdout()?))
+    }
+
+    /// Every event at `--log-level` (or its `--log` level) as a line on
+    /// stdout ([`Line`]).
+    fn stdout<S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>>(
+        &self,
+    ) -> Result<impl Layer<S> + use<S>, AnyError> {
+        Ok(tracing_subscriber::fmt::layer()
+            .event_format(Line)
+            .with_writer(std::io::stdout)
+            .with_filter(filter(self.log_level, &self.log)?))
+    }
+
     pub(crate) fn server(&self) -> Result<http_server::Config, AnyError> {
-        let token = match self.bearer_token_env.as_deref().map(str::trim) {
-            Some("") => return Err("bearer-token environment name must not be empty".into()),
-            Some(name) => Some(http_server::BearerToken::new(env::var(name)?)?),
-            None => None,
-        };
         let security = if self.tls_terminated_upstream {
             http_server::TransportSecurity::TlsTerminatedUpstream
         } else {
@@ -195,7 +211,7 @@ impl Serve {
         let config = http_server::Config::new(
             self.bind,
             security,
-            token,
+            None,
             http_server::RequestLimits::default(),
         );
         config.validate()?;

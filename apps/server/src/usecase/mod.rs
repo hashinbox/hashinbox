@@ -13,25 +13,29 @@
 //! `workers` are the background jobs with their executor.
 
 pub(crate) mod blocks;
+pub(crate) mod bootstrap;
 mod decorators;
-mod error;
 pub(crate) mod indexes;
 pub(crate) mod jobs;
+pub(crate) mod keys;
 pub(crate) mod logs;
 pub(crate) mod market;
 pub(crate) mod markets;
 pub(crate) mod networks;
 mod nodes;
+pub(crate) mod recovery;
 pub(crate) mod sdk;
+pub(crate) mod sessions;
+pub(crate) mod settings;
 pub(crate) mod stats;
 pub(crate) mod tasks;
 mod transport;
 pub(crate) mod trigger;
 pub(crate) mod triggers;
+pub(crate) mod users;
 pub(crate) mod wallets;
 pub(crate) mod workers;
 
-pub(crate) use error::{Error, Kind};
 pub(crate) use networks::Networks;
 pub(crate) use transport::{NO_ENABLED_ENDPOINT, Served, Transport};
 

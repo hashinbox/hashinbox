@@ -1,8 +1,8 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "payment-api",
-    "description": "The payment HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions. An asset is its network's own asset id (`native`, or a token); no chain or asset is named in this contract.",
+    "title": "hashinbox-api",
+    "description": "The hashinbox HTTP routes and OpenAPI contract over the chain-neutral wallet and index abstractions. An asset is its network's own asset id (`native`, or a token); no chain or asset is named in this contract.",
     "license": {
       "name": ""
     },
@@ -11,7 +11,7 @@
   "servers": [
     {
       "url": "/",
-      "description": "The payment server's own origin"
+      "description": "The hashinbox server's own origin"
     }
   ],
   "paths": {
@@ -71,7 +71,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -103,7 +103,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -111,7 +121,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.assets.$read"
+            ]
           }
         ]
       }
@@ -199,7 +211,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -209,7 +221,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -219,7 +241,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -227,7 +249,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.jobs.$read"
+            ]
           }
         ]
       }
@@ -267,7 +291,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -277,7 +311,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -287,7 +321,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -295,7 +329,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.jobs.$read"
+            ]
           }
         ]
       }
@@ -450,7 +486,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -460,7 +496,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -470,7 +516,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -478,7 +524,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.logs.$read"
+            ]
           }
         ]
       }
@@ -507,7 +555,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -515,7 +573,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.logs.$read"
+            ]
           }
         ]
       }
@@ -648,7 +708,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -658,7 +718,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -666,7 +736,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.logs.$read"
+            ]
           }
         ]
       }
@@ -695,7 +767,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -705,7 +787,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -713,7 +795,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.logs.$read"
+            ]
           }
         ]
       }
@@ -742,7 +826,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -752,7 +846,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -760,7 +854,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.markets.$read"
+            ]
           }
         ]
       }
@@ -810,7 +906,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -820,7 +916,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -830,7 +936,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -840,7 +946,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -848,7 +954,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.markets.$write"
+            ]
           }
         ]
       }
@@ -907,7 +1015,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -917,7 +1025,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -927,7 +1045,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -937,7 +1055,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -945,7 +1063,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.markets.$read"
+            ]
           }
         ]
       }
@@ -974,7 +1094,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -984,7 +1114,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -992,7 +1122,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.networks.$read"
+            ]
           }
         ]
       }
@@ -1031,7 +1163,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1041,7 +1173,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1051,7 +1193,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1061,7 +1203,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1069,7 +1211,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       }
@@ -1140,7 +1284,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1150,7 +1294,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1160,7 +1314,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1170,7 +1324,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1178,7 +1332,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.networks.$read"
+            ]
           }
         ]
       }
@@ -1237,7 +1393,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1247,7 +1413,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1257,7 +1423,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1265,7 +1431,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.networks.$read"
+            ]
           }
         ]
       }
@@ -1346,7 +1514,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1356,7 +1524,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1366,7 +1544,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1376,7 +1554,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1384,7 +1562,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.transactions.$read"
+            ]
           }
         ]
       }
@@ -1433,7 +1613,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1443,7 +1633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1453,7 +1643,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1461,7 +1651,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$read"
+            ]
           }
         ]
       },
@@ -1518,7 +1710,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1528,7 +1720,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1538,7 +1740,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1548,7 +1750,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1556,7 +1758,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       },
@@ -1613,7 +1817,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1623,7 +1827,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1633,7 +1847,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1643,7 +1857,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1651,7 +1865,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       }
@@ -1703,22 +1919,22 @@
               }
             }
           },
-          "400": {
-            "description": "It is the network's last node",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
           "401": {
             "description": "Missing or invalid bearer token",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1728,7 +1944,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "It is the network's last node",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1738,7 +1964,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1746,7 +1972,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       }
@@ -1825,7 +2053,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1835,7 +2063,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1845,7 +2083,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1855,7 +2093,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1863,7 +2101,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$read"
+            ]
           }
         ]
       }
@@ -1930,7 +2170,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1940,7 +2180,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1950,7 +2200,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1960,7 +2210,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -1968,7 +2218,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       }
@@ -2017,7 +2269,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2027,7 +2289,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2037,7 +2299,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2045,7 +2307,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$read"
+            ]
           }
         ]
       },
@@ -2102,7 +2366,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2112,7 +2376,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2122,7 +2396,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2132,7 +2406,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2140,7 +2414,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
           }
         ]
       }
@@ -2198,7 +2474,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2208,7 +2484,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2218,7 +2504,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2226,7 +2512,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.networks.$read"
+            ]
           }
         ]
       }
@@ -2305,7 +2593,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2315,7 +2603,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2325,7 +2623,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2335,7 +2633,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2343,7 +2641,490 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.transactions.$read"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/recovery": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Read whether the recovery passphrase is set",
+        "description": "Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.",
+        "operationId": "read_recovery",
+        "responses": {
+          "200": {
+            "description": "Set or not",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Recovery"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.recovery.$write"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create or replace the recovery passphrase",
+        "description": "12 new BIP39 words, answered this once, in place of any passphrase set; only their argon2id hash is kept. Replacing ends every session the old words made (`session_expired`). They sign in as any user (`POST /v1/session` with `passphrase`), two-factor still asked: whoever holds them is every user without two-factor.",
+        "operationId": "create_recovery",
+        "responses": {
+          "201": {
+            "description": "Created: the words, shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecoveryCreated"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.recovery.$write"
+            ]
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Remove the recovery passphrase",
+        "description": "Passphrase logins are off (refused as wrong credentials) and every session the words made ends (`session_expired`). 204 when none is set too.",
+        "operationId": "remove_recovery",
+        "responses": {
+          "204": {
+            "description": "Removed"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.recovery.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/session": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Read the caller's session",
+        "description": "The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.",
+        "operationId": "read_session",
+        "responses": {
+          "200": {
+            "description": "The session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Log in, or sign a key's session",
+        "description": "With `email` and `password` or `passphrase` (the recovery passphrase, any user's email; and `totp` once two-factor is on) and no `Authorization`: a session of the user, its scopes or fewer, its `amr` `pwd` or `passphrase` (and `otp`). A wrong email, password, passphrase or code answers the same 401; the rest right without the code answers 401 `totp_required`. With `Authorization: Bearer his/…`: a session of the key, signed here, for a caller that cannot sign (`sub`, `scopes` covered by the key's).",
+        "operationId": "create_session",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSession"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Issued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, scopes or ttl; neither or both of password and passphrase",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong email, password, passphrase or code (`wrong_credentials`), or `totp_required`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Scopes wider than the issuer's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Log out",
+        "description": "Alone, nothing: the client forgets its token. With `all=true`, every session the caller's issuer (its user, or its key) issued until now answers 401, this one too.",
+        "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "all",
+            "in": "query",
+            "description": "Every session the issuer (the user, or the key) issued until now:\nrefused.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Logged out"
+          },
+          "400": {
+            "description": "Malformed query",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/settings": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "List the settings",
+        "description": "Every setting the server declares: its key, value (its default when never written), default, whether it is public, description and type. A secret setting (`recovery_passphrase`) shows only its key, whether it is set and its description.",
+        "operationId": "list_settings",
+        "responses": {
+          "200": {
+            "description": "Every setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.settings.$read"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/settings/{key}": {
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "summary": "Write a setting",
+        "description": "Stores the setting's value once it parses as the setting's type and passes its check. Whether it is public is the declaration's, never the request's. A secret setting is never written here: 403 `permission_denied`.",
+        "operationId": "write_setting",
+        "parameters": [
+          {
+            "name": "key",
+            "in": "path",
+            "description": "Its key, as `GET /v1/settings` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WriteSetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Setting"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, unknown key, wrong type or refused value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope, or a secret setting",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.settings.$write"
+            ]
           }
         ]
       }
@@ -2372,7 +3153,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2382,7 +3173,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2390,7 +3181,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.stats.$read"
+            ]
           }
         ]
       }
@@ -2442,7 +3235,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2452,7 +3245,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2462,7 +3265,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2470,7 +3273,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$read"
+            ]
           }
         ]
       },
@@ -2503,11 +3308,11 @@
             }
           },
           "400": {
-            "description": "Malformed body or id, several networks, or a send from This to This",
+            "description": "Malformed body or id, a repeated id, several networks, or a send from This to This",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2517,7 +3322,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2527,17 +3342,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
           },
-          "422": {
-            "description": "An id is taken or repeated",
+          "409": {
+            "description": "An id is taken",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2547,7 +3362,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2555,7 +3370,10 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$write",
+              "com.hashinbox.wallets.$write"
+            ]
           }
         ]
       }
@@ -2594,7 +3412,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2604,7 +3432,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2614,7 +3442,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2622,7 +3450,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$read"
+            ]
           }
         ]
       },
@@ -2670,7 +3500,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2680,7 +3510,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2690,7 +3530,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2700,7 +3540,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2708,7 +3548,10 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$write",
+              "com.hashinbox.wallets.$write"
+            ]
           }
         ]
       },
@@ -2738,7 +3581,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2748,7 +3601,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2758,7 +3611,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2766,7 +3619,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$write"
+            ]
           }
         ]
       }
@@ -2827,7 +3682,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2837,7 +3692,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2847,7 +3712,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2855,9 +3720,993 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.triggers.$read"
+            ]
           }
         ]
+      }
+    },
+    "/v1/user": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Read the logged-in user",
+        "description": "The caller's user, its scopes and its two-factor; the calling key too, when a key calls.",
+        "operationId": "read_user",
+        "responses": {
+          "200": {
+            "description": "The user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserRead"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the logged-in user's password",
+        "description": "Sets a new password, checked as at signup; the current one is not asked, so any session of the user (a passphrase login too) may. Every other session it and its keys issued ends (401); the answer is a fresh session, the caller's scopes and `amr`.",
+        "operationId": "update_own_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateOwnUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Changed: a fresh session",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedSession"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, or a password too short",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key calls",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/user/2fa": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Start two-factor",
+        "description": "A new TOTP secret, pending until its first code is confirmed (`POST /v1/user/2fa/confirm`); starting again replaces a pending one.",
+        "operationId": "start_two_factor",
+        "responses": {
+          "201": {
+            "description": "Started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TwoFactorStarted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key calls",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Two-factor is on already",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Turn two-factor off",
+        "description": "Needs a valid code; logs the user out everywhere.",
+        "operationId": "stop_two_factor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TwoFactorCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Off"
+          },
+          "400": {
+            "description": "Malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token, or a wrong code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key calls",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Two-factor was not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/user/2fa/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm two-factor",
+        "description": "Its first valid code turns two-factor on: a login needs a code from now.",
+        "operationId": "confirm_two_factor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TwoFactorCode"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "On"
+          },
+          "400": {
+            "description": "Malformed body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token, or a wrong code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "A key calls",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Two-factor was not started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
+    },
+    "/v1/user/keys": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "List the keys",
+        "description": "The caller's user's keys, revoked ones too, a page in id order; never a secret.",
+        "operationId": "list_keys",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Keys in id order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeyList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.keys.$read"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create a key",
+        "description": "A key of the caller's user, its scopes covered by the caller's. Its secret is in this answer only.",
+        "operationId": "create_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, name or scopes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope, or scopes wider than the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.keys.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/user/keys/{id}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Revoke a key",
+        "description": "The key (its secret) and every session it signed answer 401 for good. `id` is the key's id without `hip/`.",
+        "operationId": "revoke_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Its id without `hip/` (or `hip%2F…`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such key of the caller's user, or revoked already",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.keys.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/user/keys/{id}/rotate": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Rotate a key's sessions",
+        "description": "Every session the key signed until now answers 401; the key itself keeps working. `id` is the key's id without `hip/`.",
+        "operationId": "rotate_key",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Its id without `hip/` (or `hip%2F…`).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Rotated",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserKey"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such key of the caller's user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.keys.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/users": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "List the users",
+        "description": "Every user, a page in id order; never a password or a secret.",
+        "operationId": "list_users",
+        "parameters": [
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` of the previous page; absent for the first page.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, 1 to 500.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Users in id order",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed query or limit",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.users.$read"
+            ]
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Create a user, or the root user on a fresh install",
+        "description": "With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.",
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedUser"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, email, name, password or scopes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope, or scopes wider than the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The email is taken, or the root user exists",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.users.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/users/{id}": {
+      "patch": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change a user's scopes, or disable it",
+        "description": "Narrowing a user narrows its keys and sessions at once: one wider than its user answers 401 from the next request on.",
+        "operationId": "update_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Its id.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUser"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body or scopes",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope, or scopes wider than the caller's",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.users.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/version": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Read the server's version",
+        "description": "Public: the version this server was built as, `missing_root` while no user exists (`POST /v1/users` creates the root) and every public setting's value. A 200 means the server is up and serving.",
+        "operationId": "read_version",
+        "responses": {
+          "200": {
+            "description": "The version",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Version"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The store is unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/v1/wallets": {
@@ -2866,7 +4715,7 @@
           "wallets"
         ],
         "summary": "List the wallets",
-        "description": "Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs.",
+        "description": "Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs. A caller granted only some wallets reads each by its ID.",
         "operationId": "list_wallets",
         "parameters": [
           {
@@ -2908,7 +4757,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2918,7 +4767,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2928,7 +4787,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2936,7 +4795,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets.$read"
+            ]
           }
         ]
       },
@@ -2983,7 +4844,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -2993,7 +4854,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3003,7 +4874,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3013,7 +4884,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3023,7 +4894,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3031,7 +4902,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets.$write"
+            ]
           }
         ]
       }
@@ -3083,7 +4956,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3093,7 +4966,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3103,7 +4986,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3111,7 +4994,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets.$read"
+            ]
           }
         ]
       }
@@ -3151,7 +5036,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3161,7 +5046,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3171,7 +5066,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3181,7 +5076,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3189,7 +5084,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$read"
+            ]
           }
         ]
       }
@@ -3249,7 +5146,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3259,7 +5156,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3269,7 +5176,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3279,7 +5186,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3287,7 +5194,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       }
@@ -3329,7 +5238,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3339,7 +5248,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3349,7 +5268,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3359,7 +5278,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3367,7 +5286,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       },
@@ -3424,7 +5345,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3434,7 +5355,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3444,7 +5375,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3454,7 +5385,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3462,7 +5393,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       }
@@ -3533,7 +5466,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3543,7 +5476,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3553,7 +5496,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3561,7 +5504,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$read"
+            ]
           }
         ]
       }
@@ -3610,7 +5555,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3620,7 +5565,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3630,7 +5585,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3640,7 +5595,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3650,7 +5605,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3658,7 +5613,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       }
@@ -3700,7 +5657,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3710,7 +5667,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3720,7 +5687,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3730,7 +5697,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3738,7 +5705,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       },
@@ -3778,7 +5747,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3788,7 +5757,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3798,7 +5777,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3808,7 +5787,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3816,7 +5795,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       }
@@ -3866,7 +5847,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3876,7 +5857,17 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3886,7 +5877,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3896,7 +5887,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3906,7 +5897,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
+                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
@@ -3914,7 +5905,9 @@
         },
         "security": [
           {
-            "bearerAuth": []
+            "bearer": [
+              "com.hashinbox.wallets[{id}].$write"
+            ]
           }
         ]
       }
@@ -3922,6 +5915,15 @@
   },
   "components": {
     "schemas": {
+      "Amr": {
+        "type": "string",
+        "description": "How a user session's login proved who it is: the JWT's standard `amr`\nclaim (RFC 8176), each method once.",
+        "enum": [
+          "pwd",
+          "passphrase",
+          "otp"
+        ]
+      },
       "Asset": {
         "type": "object",
         "description": "Metadata of the asset an amount is denominated in.",
@@ -4145,6 +6147,122 @@
         ],
         "description": "One stored network, and its tip as its nodes last told it."
       },
+      "CreateKey": {
+        "type": "object",
+        "description": "`POST /v1/user/keys` body.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms it stops working; never when absent."
+          },
+          "name": {
+            "type": "string",
+            "description": "What it is for, 1 to 128 characters: `shop backend`."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "Its scopes, packed, covered by the caller's; the caller's when\nabsent.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateSession": {
+        "type": "object",
+        "description": "`POST /v1/session` body: `email` and `password` or `passphrase` (and\n`totp`) log in; with `Authorization: Bearer his/…`, the key's session,\nfor `sub`.",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "A login: the user's email."
+          },
+          "passphrase": {
+            "type": "string",
+            "description": "A login: the recovery passphrase (12 words, any spacing or case),\nfor any user; or `password`, not both."
+          },
+          "password": {
+            "type": "string",
+            "description": "A login: the user's password; or `passphrase`, not both."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "Fewer scopes than the issuer's, packed\n(`{\"com.hashinbox\": [\"wallets[x].$read\"]}`); the issuer's when\nabsent.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "sub": {
+            "type": "string",
+            "description": "A key's session: who it is for (a customer); logged, grants\nnothing."
+          },
+          "totp": {
+            "type": "string",
+            "description": "A login: the 6-digit two-factor code, when it is on."
+          },
+          "ttl": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Seconds it lasts, 1 to 86400; 43200 when absent.",
+            "maximum": 86400,
+            "minimum": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateUser": {
+        "type": "object",
+        "description": "`POST /v1/users` body.",
+        "required": [
+          "email",
+          "name"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "Its login, unique."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name, 1 to 128 characters."
+          },
+          "password": {
+            "type": "string",
+            "description": "Its password, 8 characters at least; absent: no dashboard login\n(the root user needs one).",
+            "minLength": 8
+          },
+          "scopes": {
+            "type": "object",
+            "description": "Its scopes, packed, covered by the creator's; none when absent.\nThe root user holds every scope.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateWallet": {
         "type": "object",
         "description": "`POST /v1/wallets` body: a wallet in one network, created without\nindexes. With `secret`, its key is imported and kept; else with\n`address`, the address is watched without a key; with neither, a new key\nis generated and kept.",
@@ -4198,16 +6316,75 @@
         },
         "additionalProperties": false
       },
-      "ErrorBody": {
+      "CreatedKey": {
         "type": "object",
-        "description": "The body of every error response.",
+        "description": "A key created, and its secret, shown this once.",
         "required": [
+          "key",
+          "secret"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/UserKey",
+            "description": "The key."
+          },
+          "secret": {
+            "type": "string",
+            "description": "`his/…`: its secret, never shown again. A bearer token as it is, and\nthe HS256 key, as it is, of the sessions the key signs (`kid` and\n`iss`: the key's id)."
+          }
+        }
+      },
+      "CreatedUser": {
+        "type": "object",
+        "description": "A user created; the root user logged in at once.",
+        "required": [
+          "user"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds that session expires."
+          },
+          "token": {
+            "type": "string",
+            "description": "The root user's session (a fresh install only): send it as\n`Authorization: Bearer …`."
+          },
+          "user": {
+            "$ref": "#/components/schemas/User",
+            "description": "The user."
+          }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "description": "A failure: its kind, its message, and what a client acts on. The body of\nevery error response.",
+        "required": [
+          "kind",
           "message"
         ],
         "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/Kind",
+            "description": "What kind of failure: the response's status follows from it."
+          },
           "message": {
             "type": "string",
-            "description": "What went wrong."
+            "description": "What went wrong, for people."
+          },
+          "metadata": {
+            "type": "object",
+            "description": "Details of the reason, as strings: `{\"scope\": \"…\"}`.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "description": "A fixed machine string a client acts on: `wrong_credentials`,\n`totp_required`, `session_expired`, `missing_scope`."
           }
         }
       },
@@ -4228,6 +6405,43 @@
           "paused",
           "no_data"
         ]
+      },
+      "IssuedSession": {
+        "type": "object",
+        "description": "A session issued.",
+        "required": [
+          "token",
+          "expires_at",
+          "scopes"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds it expires."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "What it may do, packed.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "token": {
+            "type": "string",
+            "description": "The JWT: send it as `Authorization: Bearer …`."
+          },
+          "user": {
+            "$ref": "#/components/schemas/User",
+            "description": "The logged-in user (a login only)."
+          }
+        }
       },
       "Job": {
         "type": "object",
@@ -4396,6 +6610,46 @@
           "failed",
           "skipped",
           "idle"
+        ]
+      },
+      "KeyList": {
+        "type": "object",
+        "description": "`GET /v1/user/keys`: a page of keys.",
+        "required": [
+          "keys",
+          "next_cursor"
+        ],
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UserKey"
+            },
+            "description": "The caller's user's keys, in id order."
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          }
+        }
+      },
+      "Kind": {
+        "type": "string",
+        "description": "What kind of failure an [`Error`] is: gRPC's status codes, each one\nHTTP status.",
+        "enum": [
+          "invalid_argument",
+          "failed_precondition",
+          "already_exists",
+          "not_found",
+          "unauthenticated",
+          "permission_denied",
+          "resource_exhausted",
+          "deadline_exceeded",
+          "unavailable",
+          "internal"
         ]
       },
       "LastRound": {
@@ -4596,6 +6850,19 @@
             "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
           }
         }
+      },
+      "Listed": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/Setting",
+            "description": "A public or private setting, its value shown."
+          },
+          {
+            "$ref": "#/components/schemas/SecretSetting",
+            "description": "A secret setting: never its value."
+          }
+        ],
+        "description": "A setting as listed: its value, or for a secret one only whether it is\nset."
       },
       "Listing": {
         "type": "object",
@@ -5277,6 +7544,40 @@
           }
         }
       },
+      "Recovery": {
+        "type": "object",
+        "description": "`GET /v1/recovery`: whether a passphrase is set, never its words.",
+        "required": [
+          "set"
+        ],
+        "properties": {
+          "created_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When it was created (Unix ms); absent when none is set."
+          },
+          "set": {
+            "type": "boolean",
+            "description": "Whether a passphrase is set."
+          }
+        }
+      },
+      "RecoveryCreated": {
+        "type": "object",
+        "description": "`POST /v1/recovery`: the words, shown this once.",
+        "required": [
+          "passphrase"
+        ],
+        "properties": {
+          "passphrase": {
+            "type": "string",
+            "description": "12 BIP39 English words, space-separated. Only their hash is kept:\nthey are never shown again."
+          }
+        }
+      },
       "Report": {
         "type": "object",
         "description": "The health of every indexed network.",
@@ -5553,6 +7854,29 @@
           "mixed"
         ]
       },
+      "SecretSetting": {
+        "type": "object",
+        "description": "A secret setting as listed: never its value or default.",
+        "required": [
+          "key",
+          "set",
+          "description"
+        ],
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "What it is for: its declaration's doc comment."
+          },
+          "key": {
+            "type": "string",
+            "description": "Its name: `recovery_passphrase`."
+          },
+          "set": {
+            "type": "boolean",
+            "description": "Whether it has been set."
+          }
+        }
+      },
       "Send": {
         "type": "object",
         "description": "`POST /v1/wallets/{id}/transactions` body: one payment from the path's\nwallet in one asset.",
@@ -5628,6 +7952,70 @@
           }
         }
       },
+      "SessionRead": {
+        "type": "object",
+        "description": "The caller's session, decoded and checked.",
+        "required": [
+          "kind",
+          "user",
+          "sub",
+          "scopes",
+          "issued_at",
+          "expires_at",
+          "amr"
+        ],
+        "properties": {
+          "amr": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Amr"
+            },
+            "description": "How its login proved who it is (`pwd` or `passphrase`, then `otp`);\nempty for a key's."
+          },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds; a key's bearer secret: now."
+          },
+          "issued_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds."
+          },
+          "key": {
+            "$ref": "#/components/schemas/UserKey",
+            "description": "Its key, when a key issued it."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/Kind",
+            "description": "Who issued it."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "What it may do, packed.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "sub": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who it is for; always present, null: not said."
+          },
+          "user": {
+            "$ref": "#/components/schemas/User",
+            "description": "Its user."
+          }
+        }
+      },
       "SetMarket": {
         "type": "object",
         "description": "`PATCH /v1/markets/{name}` body.",
@@ -5662,6 +8050,58 @@
           }
         },
         "additionalProperties": false
+      },
+      "Setting": {
+        "type": "object",
+        "description": "A setting as listed: its key, value, default and declaration.",
+        "required": [
+          "key",
+          "value",
+          "default",
+          "public",
+          "description",
+          "type"
+        ],
+        "properties": {
+          "default": {
+            "description": "Its default, JSON of its type."
+          },
+          "description": {
+            "type": "string",
+            "description": "What it is for: its declaration's doc comment."
+          },
+          "key": {
+            "type": "string",
+            "description": "Its name: `instance`."
+          },
+          "public": {
+            "type": "boolean",
+            "description": "Whether its value may be sent in any response, to anyone."
+          },
+          "type": {
+            "type": "string",
+            "description": "Its Rust type, as declared: `String`."
+          },
+          "value": {
+            "description": "Its value, JSON of its type; the default when never written."
+          }
+        }
+      },
+      "SettingList": {
+        "type": "object",
+        "description": "`GET /v1/settings`.",
+        "required": [
+          "settings"
+        ],
+        "properties": {
+          "settings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Listed"
+            },
+            "description": "Every setting, in declaration order: a secret one as `{key, set,\ndescription}` only."
+          }
+        }
       },
       "Stats": {
         "type": "object",
@@ -5878,6 +8318,9 @@
             "description": "Whether its coins are test coins."
           }
         }
+      },
+      "String": {
+        "type": "string"
       },
       "TagList": {
         "type": "object",
@@ -6256,6 +8699,95 @@
           }
         }
       },
+      "TwoFactor": {
+        "type": "object",
+        "description": "A user's two-factor.",
+        "required": [
+          "created_at",
+          "confirmed_at"
+        ],
+        "properties": {
+          "confirmed_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms its first code was entered; always present, null: pending,\nnot on yet."
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms it was started."
+          }
+        }
+      },
+      "TwoFactorCode": {
+        "type": "object",
+        "description": "A two-factor code.",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "The 6 digits the authenticator app shows."
+          }
+        },
+        "additionalProperties": false
+      },
+      "TwoFactorStarted": {
+        "type": "object",
+        "description": "`POST /v1/user/2fa`.",
+        "required": [
+          "uri"
+        ],
+        "properties": {
+          "uri": {
+            "type": "string",
+            "description": "The `otpauth://` URI for an authenticator app (its QR code)."
+          }
+        }
+      },
+      "UpdateOwnUser": {
+        "type": "object",
+        "description": "`PUT /v1/user` body: what changes.",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The new password, 8 characters at least; the current one is not\nasked.",
+            "minLength": 8
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateUser": {
+        "type": "object",
+        "description": "`PATCH /v1/users/{id}` body: what changes.",
+        "properties": {
+          "disabled": {
+            "type": "boolean",
+            "description": "Disabled (it, its keys and every session refused), or enabled again."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "Its new scopes, packed, covered by the caller's.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateWalletIndex": {
         "type": "object",
         "description": "`PATCH /v1/wallets/{id}/indexes/{asset}` body.",
@@ -6269,6 +8801,227 @@
           }
         },
         "additionalProperties": false
+      },
+      "User": {
+        "type": "object",
+        "description": "One `user` row. Its JSON shows neither the password hash (only whether\nit has one, `login`) nor the session secret.",
+        "required": [
+          "id",
+          "email",
+          "name",
+          "login",
+          "scopes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms."
+          },
+          "disabled_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it was disabled: it, its keys and every session refused."
+          },
+          "email": {
+            "type": "string",
+            "description": "Its login, unique."
+          },
+          "id": {
+            "$ref": "#/components/schemas/String",
+            "description": "A uuid v7."
+          },
+          "invalidated_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms; every session issued in its second or before is refused."
+          },
+          "login": {
+            "type": "boolean",
+            "description": "The argon2id hash of its password; `None`: no dashboard login. In\nJSON, `login`: whether it has one."
+          },
+          "name": {
+            "type": "string",
+            "description": "Its name, as shown."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "The widest scopes it may issue, packed in JSON\n(`{\"com.hashinbox\": [\"wallets.$read\"]}`).",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "UserKey": {
+        "type": "object",
+        "description": "One `user_key` row. Its JSON shows neither the secret nor its hash.",
+        "required": [
+          "id",
+          "user_id",
+          "name",
+          "scopes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix ms."
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it stops working; `None`: never."
+          },
+          "id": {
+            "$ref": "#/components/schemas/String",
+            "description": "`hip/…`: its public client id, a session's `kid` and `iss`."
+          },
+          "invalidated_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms; every session it issued in that second or before is\nrefused (rotated)."
+          },
+          "last_used_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it was last used; not kept yet."
+          },
+          "name": {
+            "type": "string",
+            "description": "What it is for: `shop backend`."
+          },
+          "revoked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Unix ms it was revoked: it and its sessions refused for good."
+          },
+          "scopes": {
+            "type": "object",
+            "description": "What it may do, covered by its user's; packed in JSON.",
+            "additionalProperties": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The user that issued it."
+          }
+        }
+      },
+      "UserList": {
+        "type": "object",
+        "description": "`GET /v1/users`: a page of users.",
+        "required": [
+          "users",
+          "next_cursor"
+        ],
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; null on the last page. Always\npresent."
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/User"
+            },
+            "description": "Users in id (creation) order."
+          }
+        }
+      },
+      "UserRead": {
+        "type": "object",
+        "description": "`GET /v1/user`.",
+        "required": [
+          "user",
+          "two_factor"
+        ],
+        "properties": {
+          "key": {
+            "$ref": "#/components/schemas/UserKey",
+            "description": "The calling key, when a key calls."
+          },
+          "two_factor": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TwoFactor",
+                "description": "Its two-factor; always present, null: off."
+              }
+            ]
+          },
+          "user": {
+            "$ref": "#/components/schemas/User",
+            "description": "The caller's user."
+          }
+        }
+      },
+      "Version": {
+        "type": "object",
+        "description": "The server's version, and its public settings.",
+        "required": [
+          "version",
+          "settings"
+        ],
+        "properties": {
+          "missing_root": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "True on a fresh install (no user yet); absent otherwise."
+          },
+          "settings": {
+            "type": "object",
+            "description": "Every public setting's value (its default when never written), by\nkey: `{\"instance\": \"hashinbox\"}`.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "version": {
+            "type": "string",
+            "description": "The build's version: its git tag description, or the crate version."
+          }
+        }
       },
       "Wallet": {
         "type": "object",
@@ -6470,6 +9223,27 @@
             "description": "Wallets in ID order."
           }
         }
+      },
+      "WriteSetting": {
+        "type": "object",
+        "description": "`PUT /v1/settings/{key}` body.",
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "description": "Its new value: JSON of the setting's type."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A session's JWT (`POST /v1/session`), or a key's secret `his/…`. A GET route also takes the JWT as `?token=`."
       }
     }
   },
@@ -6513,6 +9287,14 @@
     {
       "name": "health",
       "description": "Readiness and indexing state"
+    },
+    {
+      "name": "auth",
+      "description": "Sessions, the logged-in user, users and keys"
+    },
+    {
+      "name": "settings",
+      "description": "The instance's settings"
     },
     {
       "name": "openapi",

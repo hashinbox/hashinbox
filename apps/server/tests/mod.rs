@@ -4,8 +4,11 @@
 //! the send job's first run (`send`) and its checks (`check`) and the
 //! routes (`routes`) over one scripted network (`support::scripted`); the
 //! log message catalog against the event codes (`events`); the market job
-//! (`market`). Offline.
+//! (`market`); users, keys, sessions and every route's guard (`auth`).
+//! Offline.
 
+mod auth;
+mod bootstrap;
 mod cases;
 mod check;
 mod events;

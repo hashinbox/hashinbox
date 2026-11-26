@@ -1,14 +1,46 @@
-//! [`Api`]: the routes a case calls, through the router itself (no socket).
+//! [`Api`]: the routes a case calls, through the router itself (no socket),
+//! as the root user ([`as_root`]).
 
 use axum::{
     Router,
     body::Body,
-    http::{Method, Request, StatusCode},
+    extract::Request as AnyRequest,
+    http::{HeaderValue, Method, Request, StatusCode, header::AUTHORIZATION},
 };
 use base::NetworkConfig;
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
+
+/// The root user's email, as [`as_root`] creates it.
+pub(crate) const ROOT_EMAIL: &str = "root@example.com";
+/// The root user's password.
+pub(crate) const ROOT_PASSWORD: &str = "root password";
+
+/// `router` (on a fresh file) calling as the root user: created
+/// (`POST /v1/users`, which logs it in), its session sent with every
+/// request that sends no `Authorization`.
+///
+/// # Panics
+///
+/// When the root user is not created.
+pub(crate) async fn as_root(router: Router) -> Router {
+    let root = json!({"email": ROOT_EMAIL, "name": "root", "password": ROOT_PASSWORD});
+    let api = Api(router.clone());
+    let (status, created) = api.call(Method::POST, "/v1/users", Some(root)).await;
+    assert_eq!(status, StatusCode::CREATED, "the root user: {created}");
+    let token = created["token"].as_str().unwrap_or_default();
+    let bearer = HeaderValue::from_str(&format!("Bearer {token}")).expect("a header");
+    router.layer(axum::middleware::map_request(
+        move |mut request: AnyRequest| {
+            let bearer = bearer.clone();
+            async move {
+                request.headers_mut().entry(AUTHORIZATION).or_insert(bearer);
+                request
+            }
+        },
+    ))
+}
 
 /// A generated, keyed wallet: its id and address.
 pub(crate) struct Wallet {

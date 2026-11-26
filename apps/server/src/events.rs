@@ -8,6 +8,11 @@ use std::{
     sync::LazyLock,
 };
 
+/// A new database file created: its schema and starting rows applied.
+pub(crate) const APP_DB_CREATED: &str = "app.db.created";
+/// The root user and settings created from `--config` on an empty
+/// database.
+pub(crate) const APP_BOOTSTRAP: &str = "app.bootstrap";
 /// The server started.
 pub(crate) const APP_START: &str = "app.start";
 /// The server stopped.
@@ -85,6 +90,32 @@ pub(crate) const MARKET_FEED_SET: &str = "market.feed.set";
 pub(crate) const MARKET_FEED_FAILED: &str = "market.feed.failed";
 /// A price feed answered again after failing.
 pub(crate) const MARKET_FEED_RECOVERED: &str = "market.feed.recovered";
+
+/// A login answered with a session: its `method`, `pwd` or `passphrase`.
+pub(crate) const AUTH_LOGIN_OK: &str = "auth.login.ok";
+/// A login refused: a wrong email, password, passphrase or code (which,
+/// never said); its `method`.
+pub(crate) const AUTH_LOGIN_FAILED: &str = "auth.login.failed";
+/// A user created (the root one too).
+pub(crate) const AUTH_USER_CREATED: &str = "auth.user.created";
+/// A key created.
+pub(crate) const AUTH_KEY_CREATED: &str = "auth.key.created";
+/// A key revoked.
+pub(crate) const AUTH_KEY_REVOKED: &str = "auth.key.revoked";
+/// A user's two-factor turned on (its first code confirmed).
+pub(crate) const AUTH_2FA_ON: &str = "auth.2fa.on";
+/// A user's two-factor turned off.
+pub(crate) const AUTH_2FA_OFF: &str = "auth.2fa.off";
+/// The recovery passphrase created where none was set (never its words).
+pub(crate) const AUTH_RECOVERY_CREATED: &str = "auth.recovery.created";
+/// The recovery passphrase replaced by new words (never either).
+pub(crate) const AUTH_RECOVERY_REPLACED: &str = "auth.recovery.replaced";
+/// The recovery passphrase removed: passphrase logins are off.
+pub(crate) const AUTH_RECOVERY_REMOVED: &str = "auth.recovery.removed";
+/// A request refused for want of a scope.
+pub(crate) const AUTH_DENIED: &str = "auth.denied";
+/// A setting written: its key, and its value when public.
+pub(crate) const SETTING_CHANGED: &str = "setting.changed";
 
 /// The catalog, `{ code: template }`.
 pub(crate) static MESSAGES: LazyLock<BTreeMap<String, String>> = LazyLock::new(|| {

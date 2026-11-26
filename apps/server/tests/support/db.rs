@@ -11,8 +11,9 @@ pub(crate) const FILE: &str = "test.db";
 /// A new file with every schema applied, and the directory that holds it.
 pub(crate) async fn fresh() -> (Db, tempfile::TempDir) {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let db = Db::open(&directory.path().join(FILE)).expect("the file opens");
-    db.migrate().await.expect("the schema applies");
+    let db = Db::open_or_create(&directory.path().join(FILE))
+        .await
+        .expect("the file is created");
     (db, directory)
 }
 

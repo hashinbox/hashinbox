@@ -8,7 +8,9 @@ use axum::{Json, extract::State};
 use serde::Serialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use crate::models::Session;
+
+use crate::error::Error;
 use crate::{api::AppState, usecase::stats};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
@@ -81,7 +83,7 @@ struct StatsResponse {
     server: Vec<ServerHour>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/stats",
     operation_id = "read_stats",
@@ -89,15 +91,19 @@ struct StatsResponse {
     description = "Counts across every network, and per hour over the last day: blocks and \
         transactions by chain time (up to the newest kept block), jobs and trigger runs by \
         this server's time.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The stats", body = StatsResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "stats"
 )]
-async fn read(State(state): State<Arc<AppState>>) -> Result<Json<StatsResponse>, Error> {
+async fn read(
+    session: Session,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<StatsResponse>, Error> {
+    scope::require!(session, "com.hashinbox.stats.$read");
     Ok(Json(stats::read(&state.db).await?.into()))
 }
 

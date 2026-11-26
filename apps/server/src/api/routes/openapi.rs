@@ -4,8 +4,7 @@ use axum::{Extension, Json};
 use utoipa::openapi::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
-use crate::api::AppState;
+use crate::{api::AppState, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(read))
@@ -19,7 +18,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     description = "The contract every route is generated from; public, like the health routes.",
     responses(
         (status = 200, description = "OpenAPI 3 contract", body = Object),
-        (status = 500, description = "The contract could not be encoded", body = ErrorBody)
+        (status = 500, description = "The contract could not be encoded", body = Error)
     ),
     tag = "openapi"
 )]
@@ -28,5 +27,5 @@ async fn read(
 ) -> Result<Json<serde_json::Value>, Error> {
     serde_json::to_value(contract.as_ref())
         .map(Json)
-        .map_err(|_| Error::invalid_response("OpenAPI contract could not be encoded"))
+        .map_err(|_| Error::internal("OpenAPI contract could not be encoded"))
 }

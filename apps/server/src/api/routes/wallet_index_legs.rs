@@ -10,13 +10,16 @@ use axum::{
 use serde::Serialize;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, wallet_indexes::IndexPath};
+use crate::models::Session;
+
+use super::wallet_indexes::IndexPath;
 use crate::{
     api::AppState,
     db::Paged as _,
     models::leg::{self, Movement},
     usecase::wallets,
 };
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new().routes(routes!(legs))
@@ -35,7 +38,7 @@ struct LegsResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/wallets/{id}/indexes/{asset}/legs",
     operation_id = "list_wallet_index_legs",
@@ -43,22 +46,24 @@ struct LegsResponse {
     description = "The index's legs in live blocks, latest first, each with the balance right \
         after it. Its pending legs are on the index itself.",
     params(IndexPath, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "One page of legs", body = LegsResponse),
         (status = 400, description = "Malformed wallet ID, query, cursor, or limit",
-            body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn legs(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<LegsResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.wallets[{id}].$read", id = path.id);
+    let Query(index) = index?;
     let page = index.page("legs", leg::parse_key)?;
     let limit = page.limit;
     let id = path.wallet()?;

@@ -5,7 +5,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::Error;
+use crate::error::Error;
 use crate::{
     db::Db,
     models::{block, leg, task, transaction, trigger, trigger_run, wallet, wallet_index},

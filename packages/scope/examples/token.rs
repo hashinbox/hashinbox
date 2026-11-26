@@ -23,13 +23,13 @@ const ASKED: &str = "com.hashinbox.wallets[eth-1].$read com.hashinbox.wallets[et
 
 /// A route: one wallet's balance.
 fn balance(granted: &Scopes, wallet: &str) -> Result<String, Denied> {
-    require!(granted, com.hashinbox.wallets[wallet] => read);
+    require!(granted, "com.hashinbox.wallets[{wallet}].$read");
     Ok(format!("{wallet}: 1.5 ETH"))
 }
 
 /// A route: a send from one wallet.
 fn send(granted: &Scopes, wallet: &str) -> Result<String, Denied> {
-    require!(granted, com.hashinbox.wallets[wallet] => write);
+    require!(granted, "com.hashinbox.wallets[{wallet}].$write");
     Ok(format!("{wallet}: sent"))
 }
 

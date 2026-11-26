@@ -1,5 +1,5 @@
-//! Diesel's view of `init.sql`, written by hand to match it; the `migrate`
-//! command executes the SQL files, nothing here creates a table.
+//! Diesel's view of `init.sql`, written by hand to match it; `Db::open_or_create`
+//! executes the SQL files on a new file, nothing here creates a table.
 
 diesel::table! {
     block (id) {
@@ -326,6 +326,56 @@ diesel::table! {
         high -> Text,
         low -> Text,
         close -> Text,
+        updated_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    #[sql_name = "user"]
+    users (id) {
+        id -> Text,
+        email -> Text,
+        name -> Text,
+        password_hash -> Nullable<Text>,
+        scopes -> Text,
+        session_secret -> Binary,
+        created_at -> BigInt,
+        invalidated_at -> Nullable<BigInt>,
+        disabled_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    user_key (id) {
+        id -> Text,
+        user_id -> Text,
+        name -> Text,
+        secret_hash -> Binary,
+        secret -> Text,
+        scopes -> Text,
+        created_at -> BigInt,
+        expires_at -> Nullable<BigInt>,
+        invalidated_at -> Nullable<BigInt>,
+        revoked_at -> Nullable<BigInt>,
+        last_used_at -> Nullable<BigInt>,
+    }
+}
+
+diesel::table! {
+    user_2fa (user_id) {
+        user_id -> Text,
+        secret -> Binary,
+        confirmed_at -> Nullable<BigInt>,
+        last_step -> Nullable<BigInt>,
+        created_at -> BigInt,
+    }
+}
+
+diesel::table! {
+    setting (key) {
+        key -> Text,
+        value -> Text,
+        public -> Bool,
         updated_at -> BigInt,
     }
 }

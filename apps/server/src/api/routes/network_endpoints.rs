@@ -21,13 +21,17 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, networks::NetworkPath};
+use crate::models::Caller;
+use crate::models::Session;
+
+use super::networks::NetworkPath;
 use crate::{
     api::AppState,
     db::Paged as _,
     models::{Endpoint, EndpointFailure, EndpointFailures, Endpoints, NetworkName},
     usecase::networks::{self, Nodes},
 };
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -57,7 +61,7 @@ impl From<Nodes> for EndpointsResponse {
     }
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "list_network_endpoints",
@@ -66,19 +70,21 @@ impl From<Nodes> for EndpointsResponse {
         and position, its calls (`stats`, each written as it finishes) and, while disabled, \
         the record that disabled it (`disabled`: its kind and why; null: enabled).",
     params(NetworkPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The network's nodes", body = EndpointsResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The nodes could not be read", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
+        (status = 503, description = "The nodes could not be read", body = Error)
     ),
     tag = "networks"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
+    scope::require!(session, "com.hashinbox.endpoints.$read");
     let nodes = networks::endpoints(&state.container, &state.db, &path.network()).await?;
     Ok(Json(nodes.into()))
 }
@@ -104,7 +110,7 @@ impl NodesRequest {
     }
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "add_network_endpoints",
@@ -113,30 +119,32 @@ impl NodesRequest {
         sends every later call of the network to it.",
     params(NetworkPath),
     request_body = NodesRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = EndpointsResponse),
         (status = 400, description = "Malformed node, a list above 16 nodes, or a node that \
-            fails or serves another chain", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The nodes could not be stored", body = ErrorBody)
+            fails or serves another chain", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
+        (status = 503, description = "The nodes could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn add(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
     let (container, db, network) = (&state.container, &state.db, path.network());
     let nodes =
         networks::add_endpoints(container, db, &state.queue, &network, request.nodes()).await?;
     Ok(Json(nodes.into()))
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/endpoints",
     operation_id = "replace_network_endpoints",
@@ -148,23 +156,25 @@ async fn add(
         routes and state; one left out is removed with its routes.",
     params(NetworkPath),
     request_body = NodesRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = EndpointsResponse),
         (status = 400, description = "Malformed node list, or a node that fails or serves \
-            another chain", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The nodes could not be stored", body = ErrorBody)
+            another chain", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
+        (status = 503, description = "The nodes could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn replace(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
     let (container, db, network) = (&state.container, &state.db, path.network());
     let nodes =
         networks::replace_endpoints(container, db, &state.queue, &network, request.nodes()).await?;
@@ -195,7 +205,7 @@ impl AddManyRequest {
     /// The nodes, each with its network, in order: 1 to 64.
     fn nodes(self) -> Result<Vec<(base::Network, rpc::Endpoint)>, Error> {
         if self.nodes.is_empty() || self.nodes.len() > 64 {
-            return Err(Error::invalid_request("add 1 to 64 nodes at once"));
+            return Err(Error::invalid_argument("add 1 to 64 nodes at once"));
         }
         let nodes = self.nodes.into_iter().map(|node| {
             let network = base::Network::new(base::Chain::new(node.chain), node.network);
@@ -213,7 +223,7 @@ struct AddManyResponse {
     networks: Vec<EndpointsResponse>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/networks/endpoints",
     operation_id = "add_endpoints",
@@ -222,22 +232,24 @@ struct AddManyResponse {
         list in one write (all or none), then sends every later call of those networks to \
         their new lists. A provider's nodes for several networks are added at once this way.",
     request_body = AddManyRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Nodes stored and in use", body = AddManyResponse),
         (status = 400, description = "Malformed node, a list above 16 nodes, or a node that \
-            fails or serves another chain", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "A network is not configured", body = ErrorBody),
-        (status = 503, description = "The nodes could not be stored", body = ErrorBody)
+            fails or serves another chain", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "A network is not configured", body = Error),
+        (status = 503, description = "The nodes could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn add_many(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     request: Result<Json<AddManyRequest>, JsonRejection>,
 ) -> Result<Json<AddManyResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
     let changed =
         networks::add_endpoints_each(&state.container, &state.db, &state.queue, request.nodes()?);
     let networks = changed.await?.into_iter().map(Into::into).collect();
@@ -254,7 +266,7 @@ struct NodePath {
     id: i64,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     delete,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}",
     operation_id = "remove_network_endpoint",
@@ -262,21 +274,23 @@ struct NodePath {
     description = "Removes the node `id` and its routes, stores the rest and uses them from \
         now on. A network's last node cannot be removed.",
     params(NodePath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Node removed", body = EndpointsResponse),
-        (status = 400, description = "It is the network's last node", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such node, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The nodes could not be stored", body = ErrorBody)
+            body = Error),
+        (status = 422, description = "It is the network's last node", body = Error),
+        (status = 503, description = "The nodes could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn remove(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NodePath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     let nodes =
         networks::remove_endpoint(&state.container, &state.db, &state.queue, &network, path.id);
@@ -307,7 +321,7 @@ struct StateRequest {
     reason: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}/state",
     operation_id = "set_network_endpoint_state",
@@ -318,23 +332,25 @@ struct StateRequest {
         one is enabled again. Asks no node.",
     params(NodePath),
     request_body = StateRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Stored and in use", body = EndpointsResponse),
-        (status = 400, description = "Malformed body", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 400, description = "Malformed body", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such node, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The state could not be stored", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The state could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn set_state(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NodePath>,
     request: Result<Json<StateRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     let (container, db) = (&state.container, &state.db);
     let nodes = networks::set_endpoint_state(
@@ -363,7 +379,7 @@ struct FailuresResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
     operation_id = "list_network_endpoint_failures",
@@ -373,23 +389,25 @@ struct FailuresResponse {
         hand (`manual`, `enabled`), newest first, a page at a time: when, the kind and why. The newest is its state. A failure it \
         may recover from (a rate limit, a timeout) is in the logs (`rpc.http`).",
     params(NodePath, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The node's records", body = FailuresResponse),
-        (status = 400, description = "Malformed query, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
+        (status = 400, description = "Malformed query, cursor, or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such node, or network not configured",
-            body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+            body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "networks"
 )]
 async fn list_failures(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NodePath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<FailuresResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.endpoints.$read");
+    let Query(index) = index?;
     let page = index.page("failures", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
     let network = base::Network::new(base::Chain::new(path.chain), path.network);

@@ -12,7 +12,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, networks::NetworkPath};
+use crate::models::Caller;
+use crate::models::Session;
+
+use super::networks::NetworkPath;
+use crate::error::Error;
 use crate::{
     api::AppState,
     models::{NetworkName, Route},
@@ -32,7 +36,7 @@ struct RoutesResponse {
     routes: Vec<Route>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/routes",
     operation_id = "list_network_routes",
@@ -40,19 +44,21 @@ struct RoutesResponse {
     description = "Each routed method and the nodes taking turns serving it, round robin. \
         Every other method goes to the network's healthy node with the highest tip.",
     params(NetworkPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The network's routes", body = RoutesResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The routes could not be read", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
+        (status = 503, description = "The routes could not be read", body = Error)
     ),
     tag = "networks"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<RoutesResponse>, Error> {
+    scope::require!(session, "com.hashinbox.endpoints.$read");
     let network = path.network();
     let routes = networks::routes(&state.container, &state.db, &network).await?;
     Ok(Json(RoutesResponse {
@@ -71,7 +77,7 @@ struct RoutesRequest {
     routes: Vec<Route>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     put,
     path = "/v1/networks/{chain}/{network}/routes",
     operation_id = "replace_network_routes",
@@ -82,23 +88,25 @@ struct RoutesRequest {
         No node is asked.",
     params(NetworkPath),
     request_body = RoutesRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Routes stored and in use", body = RoutesResponse),
         (status = 400, description = "An empty method, a method routed twice, or a node that \
-            is missing, repeated or of another network", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
-        (status = 503, description = "The routes could not be stored", body = ErrorBody)
+            is missing, repeated or of another network", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
+        (status = 503, description = "The routes could not be stored", body = Error)
     ),
     tag = "networks"
 )]
 async fn replace(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
     request: Result<Json<RoutesRequest>, JsonRejection>,
 ) -> Result<Json<RoutesResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
     let network = path.network();
     let routes = networks::replace_routes(&state.container, &state.db, &network, request.routes);
     Ok(Json(RoutesResponse {

@@ -26,7 +26,7 @@ use tracing_subscriber::{
     registry::{LookupSpan, Scope},
 };
 
-use super::Error;
+use crate::error::Error;
 use crate::{
     db::{Db, Page},
     events,

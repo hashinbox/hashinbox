@@ -1,4 +1,4 @@
-# Payment SDK
+# hashinbox
 
 A Rust SDK and one server for wallets on Bitcoin, Ethereum and Solana: generate
 or import keys, watch addresses, read exact balances and history, and send
@@ -8,17 +8,46 @@ from restarts and reorgs.
 ## Run the server
 
 ```bash
-# Once: the database with the seeded test and main networks (apps/server/seed.sql).
-cargo run --locked -p payment-server -- migrate
+# The first start creates the database with the seeded test and main networks
+# (apps/server/seed.sql).
+cargo run --locked -p hashinbox -- serve --bind 127.0.0.1:3000
 
-export PAYMENT_API_TOKEN='replace-me'
-cargo run --locked -p payment-server -- serve --bind 127.0.0.1:3000 \
-  --bearer-token-env PAYMENT_API_TOKEN
-
-curl -H "Authorization: Bearer $PAYMENT_API_TOKEN" http://127.0.0.1:3000/v1/assets
+# Once: the root user (no user yet), answered with its session.
+curl -X POST http://127.0.0.1:3000/v1/users -H 'content-type: application/json' \
+  -d '{"email": "me@example.com", "name": "me", "password": "replace-me"}'
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:3000/v1/assets
 ```
 
 Flags and the network tables are in [apps/server](apps/server/README.md).
+
+## Deploy with a preset config
+
+`serve --config` (`HASHINBOX_CONFIG`) seeds an empty database: the root user
+and settings, in one write, checked as `POST /v1/users`, `PUT
+/v1/settings/{key}` and `POST /v1/recovery` check them. The value is inline
+JSON (it starts with `{`) or a JSON file's path:
+
+```json
+{
+  "root": { "email": "ops@shop.io", "name": "Ops", "password": "at least 8 chars" },
+  "settings": { "instance": "Shop", "recovery_passphrase": "twelve bip39 words …" }
+}
+```
+
+```bash
+docker run -e HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"…"}}' …
+# or a mounted file
+docker run -v ./bootstrap.json:/etc/hashinbox/bootstrap.json:ro \
+  -e HASHINBOX_CONFIG=/etc/hashinbox/bootstrap.json …
+```
+
+- No user yet: the root is created and the settings applied, or the server
+  does not start (a bad field, a short password, a bad mnemonic, a config
+  with no `root`), naming the field and writing nothing.
+- A user exists: the config is not read; users and settings are never
+  overwritten.
+- Keep the file at mode 0600, change the password after the first login; the
+  config only seeds an empty database. Its content is never logged.
 
 ## Folders
 

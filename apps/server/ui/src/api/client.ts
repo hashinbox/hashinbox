@@ -17,16 +17,35 @@ export type TriggerRun = Schemas['TriggerRun'];
 export type Job = Schemas['Job'];
 export type ChainBlock = Schemas['Block'];
 export type ChainTransaction = Schemas['Transaction'];
+export type User = Schemas['User'];
+export type UserKey = Schemas['UserKey'];
+export type UserRead = Schemas['UserRead'];
+/** Scopes as the server packs them: `{"com.hashinbox": ["wallets.$read"]}`. */
+export type Packed = Record<string, string[]>;
 
-/** Raised for any non-2xx answer; `message` is the server's own. */
+/** Raised for any non-2xx answer; `message` and `code` (its `reason`, or `code`) are the server's own. */
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: string,
   ) {
     super(message);
   }
 }
+
+/** A string field of an error body, read whatever its schema. */
+function field(body: unknown, name: string): string | undefined {
+  if (!body || typeof body !== 'object' || !(name in body)) return undefined;
+  const value: unknown = (body as Record<string, unknown>)[name];
+  return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * Routes that answer 401 for a wrong password or code, not a lost session:
+ * the form shows it, and the next other call finds out if the session is gone.
+ */
+const ASKS = ['/v1/user/2fa', '/v1/user/2fa/confirm'];
 
 let token: string | null = null;
 let onUnauthorized: (() => void) | null = null;
@@ -44,10 +63,12 @@ const auth: Middleware = {
     if (token) request.headers.set('Authorization', `Bearer ${token}`);
     return request;
   },
-  onResponse({ response }) {
+  onResponse({ request, response }) {
     // Only a refused token is news; a server that wants one when none was
     // sent is the ordinary locked state.
-    if (response.status === 401 && token) onUnauthorized?.();
+    const path = new URL(request.url).pathname;
+    const asks = ASKS.some((route) => path.endsWith(route));
+    if (response.status === 401 && token && !asks) onUnauthorized?.();
     return response;
   },
 };
@@ -67,11 +88,13 @@ export async function call<T>(
 ): Promise<T> {
   const { data, error, response } = await request;
   if (response.ok) return data as T;
-  const message =
-    error && typeof error === 'object' && 'message' in error && typeof error.message === 'string'
-      ? error.message
-      : `${response.status} ${response.statusText}`;
-  throw new ApiError(response.status, message);
+  const message = field(error, 'message') ?? `${response.status} ${response.statusText}`;
+  throw new ApiError(response.status, message, field(error, 'reason') ?? field(error, 'code'));
+}
+
+/** A key's id as its routes take it: without `hip/`. */
+export function keyPath(id: string): string {
+  return id.replace(/^hip\//, '');
 }
 
 /** One server-sent event: its name and its JSON data. */

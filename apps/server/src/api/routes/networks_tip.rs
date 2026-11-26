@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, networks::NetworkPath};
+use crate::models::Session;
+
+use super::networks::NetworkPath;
+use crate::error::Error;
 use crate::{
     api::AppState,
     usecase::networks::{self, Search},
@@ -35,7 +38,7 @@ fn seconds(at: &str) -> Result<u64, Error> {
                 .ok()
                 .and_then(|time| u64::try_from(time.as_second()).ok())
         })
-        .ok_or_else(|| Error::invalid_request("at must be an RFC 3339 time or Unix seconds"))
+        .ok_or_else(|| Error::invalid_argument("at must be an RFC 3339 time or Unix seconds"))
 }
 
 /// When, for the search.
@@ -79,7 +82,7 @@ struct Failed {
     message: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/networks/{chain}/{network}/tip/search",
     operation_id = "search_tip",
@@ -91,22 +94,24 @@ struct Failed {
         `{\"message\"}` (cannot find blocks by time, before the first block, the node \
         failed). The stream then ends.",
     params(NetworkPath, SearchQuery),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The search's events", content_type = "text/event-stream",
             body = String),
-        (status = 400, description = "Malformed `at`", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "The network is not configured", body = ErrorBody)
+        (status = 400, description = "Malformed `at`", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "The network is not configured", body = Error)
     ),
     tag = "networks"
 )]
 async fn search(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
     query: Result<Query<SearchQuery>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.networks.$read");
+    let Query(query) = query?;
     let time = seconds(&query.at)?;
     let steps = networks::search_tip(&state.container, &path.network(), time)?;
     Ok(Sse::new(futures_util::stream::unfold(

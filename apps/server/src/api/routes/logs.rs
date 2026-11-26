@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams};
+use crate::models::Session;
+
 use crate::{
     api::AppState,
     db::{Page, Paged as _},
@@ -27,6 +28,7 @@ use crate::{
     models::{Log, LogFilter},
     usecase::logs::{self, Heard},
 };
+use crate::{api::IndexParams, error::Error};
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
@@ -96,14 +98,14 @@ impl LogQuery {
             .map(|level| level.parse())
             .transpose()
             .map_err(|_| {
-                Error::invalid_request("log level is not error, warn, info, debug or trace")
+                Error::invalid_argument("log level is not error, warn, info, debug or trace")
             })?;
         let network = match self.network {
             None => None,
             Some(label) => {
                 let (chain, name) = label
                     .split_once('/')
-                    .ok_or_else(|| Error::invalid_request("network is not chain/name"))?;
+                    .ok_or_else(|| Error::invalid_argument("network is not chain/name"))?;
                 Some(base::Network::new(base::Chain::new(chain), name.to_owned()))
             }
         };
@@ -126,11 +128,11 @@ impl LogQuery {
 
 /// The page `index` asks for.
 fn page(index: Result<Query<IndexParams>, QueryRejection>) -> Result<Page<i64>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    let Query(index) = index?;
     index.page("logs", |cursor| cursor.parse().ok())
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/logs",
     operation_id = "list_logs",
@@ -143,21 +145,23 @@ fn page(index: Result<Query<IndexParams>, QueryRejection>) -> Result<Page<i64>, 
         24 hours, the rest 30 days; at most the newest 10 000 of a job, and of a network's \
         (or no network's) entries outside a job.",
     params(LogQuery, IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The entries", body = ListResponse),
-        (status = 400, description = "Malformed query, level, network, cursor, or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query, level, network, cursor, or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "logs"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     query: Result<Query<LogQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.logs.$read");
+    let Query(query) = query?;
     let (filter, page) = (query.filter()?, page(index)?);
     let limit = page.limit;
     let logs = logs::find_page(&state.db, filter, page).await?;
@@ -173,22 +177,26 @@ struct TargetsResponse {
     targets: Vec<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/logs/targets",
     operation_id = "list_log_targets",
     summary = "List the logged events",
     description = "Every event (`target`) a kept entry has, each once, in order: the values \
         the `target` filter of the log lists and the stream takes.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The events", body = TargetsResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "logs"
 )]
-async fn list_targets(State(state): State<Arc<AppState>>) -> Result<Json<TargetsResponse>, Error> {
+async fn list_targets(
+    session: Session,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<TargetsResponse>, Error> {
+    scope::require!(session, "com.hashinbox.logs.$read");
     let targets = logs::targets(&state.db).await?;
     Ok(Json(TargetsResponse { targets }))
 }
@@ -204,7 +212,7 @@ struct MessagesResponse {
     messages: BTreeMap<String, String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/logs/messages",
     operation_id = "list_log_messages",
@@ -213,21 +221,22 @@ struct MessagesResponse {
         `message` of its own reads: each `{key}` filled from its field `key`. An event \
         without a template reads as its code and its fields. They change only with the \
         server, so the answer may be cached.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The templates", body = MessagesResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error)
     ),
     tag = "logs"
 )]
-async fn list_messages() -> impl IntoResponse {
+async fn list_messages(session: Session) -> Result<impl IntoResponse, Error> {
+    scope::require!(session, "com.hashinbox.logs.$read");
     let messages = MessagesResponse {
         messages: events::MESSAGES.clone(),
     };
-    (
+    Ok((
         [(header::CACHE_CONTROL, "private, max-age=3600")],
         Json(messages),
-    )
+    ))
 }
 
 /// A `missed` event.
@@ -237,7 +246,7 @@ struct Missed {
     missed: u64,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/logs/stream",
     operation_id = "stream_logs",
@@ -248,20 +257,22 @@ struct Missed {
         `{\"missed\": n}`, then the entries after. Comments keep the connection alive; the \
         stream does not end.",
     params(LogQuery),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The entries, as they are kept",
             content_type = "text/event-stream", body = String),
-        (status = 400, description = "Malformed query, level, or network", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody)
+        (status = 400, description = "Malformed query, level, or network", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error)
     ),
     tag = "logs"
 )]
 async fn stream(
+    session: Session,
     State(state): State<Arc<AppState>>,
     query: Result<Query<LogQuery>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.logs.$read");
+    let Query(query) = query?;
     let filter = query.filter()?;
     let events = logs::listen(&state.logs, filter).map(|heard| Ok(event(&heard)));
     Ok(Sse::new(events).keep_alive(KeepAlive::default()))

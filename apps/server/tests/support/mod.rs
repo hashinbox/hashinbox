@@ -23,7 +23,7 @@ use diesel::{
 use crate::{api::AppState, usecase, usecase::workers};
 use tasks::Executor;
 
-pub(crate) use api::{Api, Wallet};
+pub(crate) use api::{Api, ROOT_EMAIL, ROOT_PASSWORD, Wallet, as_root};
 
 /// How often the job loop looks for due jobs.
 const TICK: Duration = Duration::from_millis(5);
@@ -89,6 +89,7 @@ impl App {
             logs: crate::usecase::logs::feed(),
             db: db.clone(),
             candles: Default::default(),
+            root_exists: Default::default(),
         });
         let (container, queue, actions) = (&state.container, &state.queue, &state.actions);
         let jobs = Executor::new(queue.clone(), TICK)
@@ -115,7 +116,7 @@ impl App {
             None,
             http_server::RequestLimits::default(),
         );
-        let router = crate::api::router(state, &config).expect("a router");
+        let router = as_root(crate::api::router(state, &config).expect("a router")).await;
         Self {
             api: Api::new(router),
             db,

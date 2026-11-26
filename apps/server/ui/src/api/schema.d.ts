@@ -484,6 +484,102 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read whether the recovery passphrase is set
+         * @description Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+         */
+        get: operations["read_recovery"];
+        put?: never;
+        /**
+         * Create or replace the recovery passphrase
+         * @description 12 new BIP39 words, answered this once, in place of any passphrase set; only their argon2id hash is kept. Replacing ends every session the old words made (`session_expired`). They sign in as any user (`POST /v1/session` with `passphrase`), two-factor still asked: whoever holds them is every user without two-factor.
+         */
+        post: operations["create_recovery"];
+        /**
+         * Remove the recovery passphrase
+         * @description Passphrase logins are off (refused as wrong credentials) and every session the words made ends (`session_expired`). 204 when none is set too.
+         */
+        delete: operations["remove_recovery"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/session": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the caller's session
+         * @description The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+         */
+        get: operations["read_session"];
+        put?: never;
+        /**
+         * Log in, or sign a key's session
+         * @description With `email` and `password` or `passphrase` (the recovery passphrase, any user's email; and `totp` once two-factor is on) and no `Authorization`: a session of the user, its scopes or fewer, its `amr` `pwd` or `passphrase` (and `otp`). A wrong email, password, passphrase or code answers the same 401; the rest right without the code answers 401 `totp_required`. With `Authorization: Bearer his/…`: a session of the key, signed here, for a caller that cannot sign (`sub`, `scopes` covered by the key's).
+         */
+        post: operations["create_session"];
+        /**
+         * Log out
+         * @description Alone, nothing: the client forgets its token. With `all=true`, every session the caller's issuer (its user, or its key) issued until now answers 401, this one too.
+         */
+        delete: operations["delete_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the settings
+         * @description Every setting the server declares: its key, value (its default when never written), default, whether it is public, description and type. A secret setting (`recovery_passphrase`) shows only its key, whether it is set and its description.
+         */
+        get: operations["list_settings"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Write a setting
+         * @description Stores the setting's value once it parses as the setting's type and passes its check. Whether it is public is the declaration's, never the request's. A secret setting is never written here: 403 `permission_denied`.
+         */
+        put: operations["write_setting"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/stats": {
         parameters: {
             query?: never;
@@ -564,6 +660,202 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/user": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the logged-in user
+         * @description The caller's user, its scopes and its two-factor; the calling key too, when a key calls.
+         */
+        get: operations["read_user"];
+        /**
+         * Change the logged-in user's password
+         * @description Sets a new password, checked as at signup; the current one is not asked, so any session of the user (a passphrase login too) may. Every other session it and its keys issued ends (401); the answer is a fresh session, the caller's scopes and `amr`.
+         */
+        put: operations["update_own_user"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/user/2fa": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start two-factor
+         * @description A new TOTP secret, pending until its first code is confirmed (`POST /v1/user/2fa/confirm`); starting again replaces a pending one.
+         */
+        post: operations["start_two_factor"];
+        /**
+         * Turn two-factor off
+         * @description Needs a valid code; logs the user out everywhere.
+         */
+        delete: operations["stop_two_factor"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/user/2fa/confirm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Confirm two-factor
+         * @description Its first valid code turns two-factor on: a login needs a code from now.
+         */
+        post: operations["confirm_two_factor"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/user/keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the keys
+         * @description The caller's user's keys, revoked ones too, a page in id order; never a secret.
+         */
+        get: operations["list_keys"];
+        put?: never;
+        /**
+         * Create a key
+         * @description A key of the caller's user, its scopes covered by the caller's. Its secret is in this answer only.
+         */
+        post: operations["create_key"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/user/keys/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Revoke a key
+         * @description The key (its secret) and every session it signed answer 401 for good. `id` is the key's id without `hip/`.
+         */
+        delete: operations["revoke_key"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/user/keys/{id}/rotate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Rotate a key's sessions
+         * @description Every session the key signed until now answers 401; the key itself keeps working. `id` is the key's id without `hip/`.
+         */
+        post: operations["rotate_key"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the users
+         * @description Every user, a page in id order; never a password or a secret.
+         */
+        get: operations["list_users"];
+        put?: never;
+        /**
+         * Create a user, or the root user on a fresh install
+         * @description With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+         */
+        post: operations["create_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change a user's scopes, or disable it
+         * @description Narrowing a user narrows its keys and sessions at once: one wider than its user answers 401 from the next request on.
+         */
+        patch: operations["update_user"];
+        trace?: never;
+    };
+    "/v1/version": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read the server's version
+         * @description Public: the version this server was built as, `missing_root` while no user exists (`POST /v1/users` creates the root) and every public setting's value. A 200 means the server is up and serving.
+         */
+        get: operations["read_version"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/wallets": {
         parameters: {
             query?: never;
@@ -573,7 +865,7 @@ export interface paths {
         };
         /**
          * List the wallets
-         * @description Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs.
+         * @description Keyed wallets and watched addresses, a page in wallet ID order, each with its tags and its indexes: their balances (exact atomic units), progress and legs. A caller granted only some wallets reads each by its ID.
          */
         get: operations["list_wallets"];
         put?: never;
@@ -757,6 +1049,12 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * @description How a user session's login proved who it is: the JWT's standard `amr`
+         *     claim (RFC 8176), each method once.
+         * @enum {string}
+         */
+        Amr: "pwd" | "passphrase" | "otp";
         /** @description Metadata of the asset an amount is denominated in. */
         Asset: {
             /** @description Chain name. */
@@ -863,6 +1161,78 @@ export interface components {
         ConfiguredNetwork: components["schemas"]["StoredNetwork"] & {
             tip: components["schemas"]["LiveTip"];
         };
+        /** @description `POST /v1/user/keys` body. */
+        CreateKey: {
+            /**
+             * Format: int64
+             * @description Unix ms it stops working; never when absent.
+             */
+            expires_at?: number;
+            /** @description What it is for, 1 to 128 characters: `shop backend`. */
+            name: string;
+            /**
+             * @description Its scopes, packed, covered by the caller's; the caller's when
+             *     absent.
+             */
+            scopes?: {
+                [key: string]: string[];
+            };
+        };
+        /**
+         * @description `POST /v1/session` body: `email` and `password` or `passphrase` (and
+         *     `totp`) log in; with `Authorization: Bearer his/…`, the key's session,
+         *     for `sub`.
+         */
+        CreateSession: {
+            /** @description A login: the user's email. */
+            email?: string;
+            /**
+             * @description A login: the recovery passphrase (12 words, any spacing or case),
+             *     for any user; or `password`, not both.
+             */
+            passphrase?: string;
+            /** @description A login: the user's password; or `passphrase`, not both. */
+            password?: string;
+            /**
+             * @description Fewer scopes than the issuer's, packed
+             *     (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+             *     absent.
+             */
+            scopes?: {
+                [key: string]: string[];
+            };
+            /**
+             * @description A key's session: who it is for (a customer); logged, grants
+             *     nothing.
+             */
+            sub?: string;
+            /** @description A login: the 6-digit two-factor code, when it is on. */
+            totp?: string;
+            /**
+             * Format: int64
+             * @description Seconds it lasts, 1 to 86400; 43200 when absent.
+             */
+            ttl?: number;
+        };
+        /** @description `POST /v1/users` body. */
+        CreateUser: {
+            /** @description Its login, unique. */
+            email: string;
+            /** @description Its name, 1 to 128 characters. */
+            name: string;
+            /**
+             * @description Its password, 8 characters at least; absent: no dashboard login
+             *     (the root user needs one).
+             */
+            password?: string;
+            /**
+             * @description Its scopes, packed, covered by the creator's; none when absent.
+             *     The root user holds every scope.
+             */
+            scopes?: {
+                [key: string]: string[];
+            };
+        };
         /**
          * @description `POST /v1/wallets` body: a wallet in one network, created without
          *     indexes. With `secret`, its key is imported and kept; else with
@@ -903,10 +1273,50 @@ export interface components {
              */
             start?: number;
         };
-        /** @description The body of every error response. */
-        ErrorBody: {
-            /** @description What went wrong. */
+        /** @description A key created, and its secret, shown this once. */
+        CreatedKey: {
+            /** @description The key. */
+            key: components["schemas"]["UserKey"];
+            /**
+             * @description `his/…`: its secret, never shown again. A bearer token as it is, and
+             *     the HS256 key, as it is, of the sessions the key signs (`kid` and
+             *     `iss`: the key's id).
+             */
+            secret: string;
+        };
+        /** @description A user created; the root user logged in at once. */
+        CreatedUser: {
+            /**
+             * Format: int64
+             * @description Unix seconds that session expires.
+             */
+            expires_at?: number;
+            /**
+             * @description The root user's session (a fresh install only): send it as
+             *     `Authorization: Bearer …`.
+             */
+            token?: string;
+            /** @description The user. */
+            user: components["schemas"]["User"];
+        };
+        /**
+         * @description A failure: its kind, its message, and what a client acts on. The body of
+         *     every error response.
+         */
+        Error: {
+            /** @description What kind of failure: the response's status follows from it. */
+            kind: components["schemas"]["Kind"];
+            /** @description What went wrong, for people. */
             message: string;
+            /** @description Details of the reason, as strings: `{"scope": "…"}`. */
+            metadata?: {
+                [key: string]: string;
+            };
+            /**
+             * @description A fixed machine string a client acts on: `wrong_credentials`,
+             *     `totp_required`, `session_expired`, `missing_scope`.
+             */
+            reason?: string;
         };
         /**
          * @description How fast a payment should land: `low`, `normal` and `high` pay the
@@ -922,6 +1332,22 @@ export interface components {
          * @enum {string}
          */
         IndexState: "indexing" | "paused" | "no_data";
+        /** @description A session issued. */
+        IssuedSession: {
+            /**
+             * Format: int64
+             * @description Unix seconds it expires.
+             */
+            expires_at: number;
+            /** @description What it may do, packed. */
+            scopes: {
+                [key: string]: string[];
+            };
+            /** @description The JWT: send it as `Authorization: Bearer …`. */
+            token: string;
+            /** @description The logged-in user (a login only). */
+            user?: components["schemas"]["User"];
+        };
         /** @description One job of the queue. */
         Job: {
             /** @description Whether it was sent: a node accepted it, or may hold it (false for other kinds). */
@@ -1000,6 +1426,22 @@ export interface components {
          * @enum {string}
          */
         JobState: "pending" | "running" | "succeeded" | "failed" | "skipped" | "idle";
+        /** @description `GET /v1/user/keys`: a page of keys. */
+        KeyList: {
+            /** @description The caller's user's keys, in id order. */
+            keys: components["schemas"]["UserKey"][];
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+        };
+        /**
+         * @description What kind of failure an [`Error`] is: gRPC's status codes, each one
+         *     HTTP status.
+         * @enum {string}
+         */
+        Kind: "invalid_argument" | "failed_precondition" | "already_exists" | "not_found" | "unauthenticated" | "permission_denied" | "resource_exhausted" | "deadline_exceeded" | "unavailable" | "internal";
         /** @description A trigger's last round, whether it acted or not. */
         LastRound: components["schemas"]["TriggerStats"] & {
             /**
@@ -1107,6 +1549,11 @@ export interface components {
              */
             next_cursor: string | null;
         };
+        /**
+         * @description A setting as listed: its value, or for a secret one only whether it is
+         *     set.
+         */
+        Listed: components["schemas"]["Setting"] | components["schemas"]["SecretSetting"];
         /** @description One configured asset: its id, where its wallets live, and what they hold. */
         Listing: {
             /**
@@ -1431,6 +1878,24 @@ export interface components {
             /** @description The transactions, with their legs. */
             transactions: components["schemas"]["Transaction"][];
         };
+        /** @description `GET /v1/recovery`: whether a passphrase is set, never its words. */
+        Recovery: {
+            /**
+             * Format: int64
+             * @description When it was created (Unix ms); absent when none is set.
+             */
+            created_at?: number | null;
+            /** @description Whether a passphrase is set. */
+            set: boolean;
+        };
+        /** @description `POST /v1/recovery`: the words, shown this once. */
+        RecoveryCreated: {
+            /**
+             * @description 12 BIP39 English words, space-separated. Only their hash is kept:
+             *     they are never shown again.
+             */
+            passphrase: string;
+        };
         /** @description The health of every indexed network. */
         Report: {
             /** @description Every indexed network. */
@@ -1571,6 +2036,15 @@ export interface components {
          * @enum {string}
          */
         RunOutcome: "pending" | "succeeded" | "failed" | "mixed";
+        /** @description A secret setting as listed: never its value or default. */
+        SecretSetting: {
+            /** @description What it is for: its declaration's doc comment. */
+            description: string;
+            /** @description Its name: `recovery_passphrase`. */
+            key: string;
+            /** @description Whether it has been set. */
+            set: boolean;
+        };
         /**
          * @description `POST /v1/wallets/{id}/transactions` body: one payment from the path's
          *     wallet in one asset.
@@ -1616,6 +2090,36 @@ export interface components {
              */
             succeeded: number;
         };
+        /** @description The caller's session, decoded and checked. */
+        SessionRead: {
+            /**
+             * @description How its login proved who it is (`pwd` or `passphrase`, then `otp`);
+             *     empty for a key's.
+             */
+            amr: components["schemas"]["Amr"][];
+            /**
+             * Format: int64
+             * @description Unix seconds; a key's bearer secret: now.
+             */
+            expires_at: number;
+            /**
+             * Format: int64
+             * @description Unix seconds.
+             */
+            issued_at: number;
+            /** @description Its key, when a key issued it. */
+            key?: components["schemas"]["UserKey"];
+            /** @description Who issued it. */
+            kind: components["schemas"]["Kind"];
+            /** @description What it may do, packed. */
+            scopes: {
+                [key: string]: string[];
+            };
+            /** @description Who it is for; always present, null: not said. */
+            sub: string | null;
+            /** @description Its user. */
+            user: components["schemas"]["User"];
+        };
         /** @description `PATCH /v1/markets/{name}` body. */
         SetMarket: {
             /** @description Whether it is asked for quotes. */
@@ -1631,6 +2135,29 @@ export interface components {
              *     record).
              */
             state: components["schemas"]["RpcNodeState"];
+        };
+        /** @description A setting as listed: its key, value, default and declaration. */
+        Setting: {
+            /** @description Its default, JSON of its type. */
+            default: unknown;
+            /** @description What it is for: its declaration's doc comment. */
+            description: string;
+            /** @description Its name: `instance`. */
+            key: string;
+            /** @description Whether its value may be sent in any response, to anyone. */
+            public: boolean;
+            /** @description Its Rust type, as declared: `String`. */
+            type: string;
+            /** @description Its value, JSON of its type; the default when never written. */
+            value: unknown;
+        };
+        /** @description `GET /v1/settings`. */
+        SettingList: {
+            /**
+             * @description Every setting, in declaration order: a secret one as `{key, set,
+             *     description}` only.
+             */
+            settings: components["schemas"]["Listed"][];
         };
         /** @description `GET /v1/stats`. */
         Stats: {
@@ -1756,6 +2283,7 @@ export interface components {
             /** @description Whether its coins are test coins. */
             testnet: boolean;
         };
+        String: string;
         /** @description `GET /v1/wallets/tags`: a page of tags. */
         TagList: {
             /**
@@ -1934,6 +2462,47 @@ export interface components {
             /** @description Wallet indexes its selector picked. */
             selected: number;
         };
+        /** @description A user's two-factor. */
+        TwoFactor: {
+            /**
+             * Format: int64
+             * @description Unix ms its first code was entered; always present, null: pending,
+             *     not on yet.
+             */
+            confirmed_at: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms it was started.
+             */
+            created_at: number;
+        };
+        /** @description A two-factor code. */
+        TwoFactorCode: {
+            /** @description The 6 digits the authenticator app shows. */
+            code: string;
+        };
+        /** @description `POST /v1/user/2fa`. */
+        TwoFactorStarted: {
+            /** @description The `otpauth://` URI for an authenticator app (its QR code). */
+            uri: string;
+        };
+        /** @description `PUT /v1/user` body: what changes. */
+        UpdateOwnUser: {
+            /**
+             * @description The new password, 8 characters at least; the current one is not
+             *     asked.
+             */
+            password: string;
+        };
+        /** @description `PATCH /v1/users/{id}` body: what changes. */
+        UpdateUser: {
+            /** @description Disabled (it, its keys and every session refused), or enabled again. */
+            disabled?: boolean;
+            /** @description Its new scopes, packed, covered by the caller's. */
+            scopes?: {
+                [key: string]: string[];
+            };
+        };
         /** @description `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
         UpdateWalletIndex: {
             /**
@@ -1942,6 +2511,116 @@ export interface components {
              *     what it missed. `no_data` is the indexer's to set.
              */
             index_state: components["schemas"]["IndexState"];
+        };
+        /**
+         * @description One `user` row. Its JSON shows neither the password hash (only whether
+         *     it has one, `login`) nor the session secret.
+         */
+        User: {
+            /**
+             * Format: int64
+             * @description Unix ms.
+             */
+            created_at: number;
+            /**
+             * Format: int64
+             * @description Unix ms it was disabled: it, its keys and every session refused.
+             */
+            disabled_at?: number | null;
+            /** @description Its login, unique. */
+            email: string;
+            /** @description A uuid v7. */
+            id: components["schemas"]["String"];
+            /**
+             * Format: int64
+             * @description Unix ms; every session issued in its second or before is refused.
+             */
+            invalidated_at?: number | null;
+            /**
+             * @description The argon2id hash of its password; `None`: no dashboard login. In
+             *     JSON, `login`: whether it has one.
+             */
+            login: boolean;
+            /** @description Its name, as shown. */
+            name: string;
+            /**
+             * @description The widest scopes it may issue, packed in JSON
+             *     (`{"com.hashinbox": ["wallets.$read"]}`).
+             */
+            scopes: {
+                [key: string]: string[];
+            };
+        };
+        /** @description One `user_key` row. Its JSON shows neither the secret nor its hash. */
+        UserKey: {
+            /**
+             * Format: int64
+             * @description Unix ms.
+             */
+            created_at: number;
+            /**
+             * Format: int64
+             * @description Unix ms it stops working; `None`: never.
+             */
+            expires_at?: number | null;
+            /** @description `hip/…`: its public client id, a session's `kid` and `iss`. */
+            id: components["schemas"]["String"];
+            /**
+             * Format: int64
+             * @description Unix ms; every session it issued in that second or before is
+             *     refused (rotated).
+             */
+            invalidated_at?: number | null;
+            /**
+             * Format: int64
+             * @description Unix ms it was last used; not kept yet.
+             */
+            last_used_at?: number | null;
+            /** @description What it is for: `shop backend`. */
+            name: string;
+            /**
+             * Format: int64
+             * @description Unix ms it was revoked: it and its sessions refused for good.
+             */
+            revoked_at?: number | null;
+            /** @description What it may do, covered by its user's; packed in JSON. */
+            scopes: {
+                [key: string]: string[];
+            };
+            /** @description The user that issued it. */
+            user_id: string;
+        };
+        /** @description `GET /v1/users`: a page of users. */
+        UserList: {
+            /**
+             * @description Pass as `cursor` for the next page; null on the last page. Always
+             *     present.
+             */
+            next_cursor: string | null;
+            /** @description Users in id (creation) order. */
+            users: components["schemas"]["User"][];
+        };
+        /** @description `GET /v1/user`. */
+        UserRead: {
+            /** @description The calling key, when a key calls. */
+            key?: components["schemas"]["UserKey"];
+            two_factor: null | components["schemas"]["TwoFactor"];
+            /** @description The caller's user. */
+            user: components["schemas"]["User"];
+        };
+        /** @description The server's version, and its public settings. */
+        Version: {
+            /** @description True on a fresh install (no user yet); absent otherwise. */
+            missing_root?: boolean | null;
+            /**
+             * @description Every public setting's value (its default when never written), by
+             *     key: `{"instance": "hashinbox"}`.
+             */
+            settings: {
+                [key: string]: unknown;
+            };
+            /** @description The build's version: its git tag description, or the crate version. */
+            version: string;
         };
         /**
          * @description One wallet, as the API shows it: an address, whether its key is kept,
@@ -2062,6 +2741,11 @@ export interface components {
             /** @description Wallets in ID order. */
             wallets: components["schemas"]["Wallet"][];
         };
+        /** @description `PUT /v1/settings/{key}` body. */
+        WriteSetting: {
+            /** @description Its new value: JSON of the setting's type. */
+            value: unknown;
+        };
     };
     responses: never;
     parameters: never;
@@ -2124,7 +2808,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2153,7 +2837,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2195,7 +2888,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2204,7 +2897,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The queue is unavailable */
@@ -2213,7 +2915,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2245,7 +2947,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Job is unknown */
@@ -2254,7 +2965,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The queue is unavailable */
@@ -2263,7 +2974,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2322,7 +3033,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2331,7 +3042,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2340,7 +3060,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2369,7 +3089,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2424,7 +3153,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2433,7 +3162,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2462,7 +3200,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2471,7 +3218,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2500,7 +3247,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2509,7 +3265,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2545,7 +3301,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2554,7 +3310,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such market */
@@ -2563,7 +3328,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2572,7 +3337,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2612,7 +3377,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2621,7 +3386,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such market */
@@ -2630,7 +3404,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2639,7 +3413,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2668,7 +3442,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The networks could not be read */
@@ -2677,7 +3460,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2710,7 +3493,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2719,7 +3502,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description A network is not configured */
@@ -2728,7 +3520,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The nodes could not be stored */
@@ -2737,7 +3529,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2776,7 +3568,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2785,7 +3577,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The network is not configured */
@@ -2794,7 +3595,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2803,7 +3604,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2839,7 +3640,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The network is not configured, or no live block is kept at this position */
@@ -2848,7 +3658,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2857,7 +3667,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2898,7 +3708,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -2907,7 +3717,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The network is not configured, or no live block is kept at this position */
@@ -2916,7 +3735,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -2925,7 +3744,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -2959,7 +3778,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -2968,7 +3796,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The nodes could not be read */
@@ -2977,7 +3805,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3015,7 +3843,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3024,7 +3852,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -3033,7 +3870,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The nodes could not be stored */
@@ -3042,7 +3879,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3080,7 +3917,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3089,7 +3926,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -3098,7 +3944,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The nodes could not be stored */
@@ -3107,7 +3953,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3135,22 +3981,22 @@ export interface operations {
                     "application/json": components["schemas"]["NetworkEndpoints"];
                 };
             };
-            /** @description It is the network's last node */
-            400: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorBody"];
-                };
-            };
             /** @description Missing or invalid bearer token */
             401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such node, or network not configured */
@@ -3159,7 +4005,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description It is the network's last node */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The nodes could not be stored */
@@ -3168,7 +4023,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3207,7 +4062,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3216,7 +4071,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such node, or network not configured */
@@ -3225,7 +4089,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3234,7 +4098,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3272,7 +4136,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3281,7 +4145,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such node, or network not configured */
@@ -3290,7 +4163,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The state could not be stored */
@@ -3299,7 +4172,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3333,7 +4206,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -3342,7 +4224,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The routes could not be read */
@@ -3351,7 +4233,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3389,7 +4271,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3398,7 +4280,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -3407,7 +4298,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The routes could not be stored */
@@ -3416,7 +4307,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3456,7 +4347,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3465,7 +4356,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The network is not configured */
@@ -3474,7 +4374,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3518,7 +4418,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3527,7 +4427,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The network is not configured */
@@ -3536,7 +4445,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3545,7 +4454,396 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    read_recovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Set or not */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Recovery"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    create_recovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Created: the words, shown once */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RecoveryCreated"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    remove_recovery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Removed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    read_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionRead"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    create_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSession"];
+            };
+        };
+        responses: {
+            /** @description Issued */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedSession"];
+                };
+            };
+            /** @description Malformed body, scopes or ttl; neither or both of password and passphrase */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Wrong email, password, passphrase or code (`wrong_credentials`), or `totp_required` */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Scopes wider than the issuer's */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    delete_session: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Every session the issuer (the user, or the key) issued until now:
+                 *     refused.
+                 */
+                all?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Logged out */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed query */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    list_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Every setting */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SettingList"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    write_setting: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Its key, as `GET /v1/settings` lists it. */
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WriteSetting"];
+            };
+        };
+        responses: {
+            /** @description Stored */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Setting"];
+                };
+            };
+            /** @description Malformed body, unknown key, wrong type or refused value */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope, or a secret setting */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3574,7 +4872,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3583,7 +4890,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3617,7 +4924,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3626,7 +4933,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3635,7 +4951,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3662,13 +4978,13 @@ export interface operations {
                     "application/json": components["schemas"]["TriggerBatchCreated"];
                 };
             };
-            /** @description Malformed body or id, several networks, or a send from This to This */
+            /** @description Malformed body or id, a repeated id, several networks, or a send from This to This */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3677,7 +4993,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network or sent asset is not configured */
@@ -3686,16 +5011,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
-            /** @description An id is taken or repeated */
-            422: {
+            /** @description An id is taken */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3704,7 +5029,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3736,7 +5061,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such trigger */
@@ -3745,7 +5079,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3754,7 +5088,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3790,7 +5124,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3799,7 +5133,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such trigger, or network not configured */
@@ -3808,7 +5151,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3817,7 +5160,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3847,7 +5190,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such trigger */
@@ -3856,7 +5208,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3865,7 +5217,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3902,7 +5254,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3911,7 +5263,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -3920,7 +5281,763 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    read_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserRead"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    update_own_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateOwnUser"];
+            };
+        };
+        responses: {
+            /** @description Changed: a fresh session */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IssuedSession"];
+                };
+            };
+            /** @description Malformed body, or a password too short */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description A key calls */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    start_two_factor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Started */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TwoFactorStarted"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description A key calls */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Two-factor is on already */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    stop_two_factor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TwoFactorCode"];
+            };
+        };
+        responses: {
+            /** @description Off */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token, or a wrong code */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description A key calls */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Two-factor was not started */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    confirm_two_factor: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["TwoFactorCode"];
+            };
+        };
+        responses: {
+            /** @description On */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Malformed body */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token, or a wrong code */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description A key calls */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Two-factor was not started */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    list_keys: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Keys in id order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["KeyList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    create_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateKey"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedKey"];
+                };
+            };
+            /** @description Malformed body, name or scopes */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope, or scopes wider than the caller's */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    revoke_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Its id without `hip/` (or `hip%2F…`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No such key of the caller's user, or revoked already */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    rotate_key: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Its id without `hip/` (or `hip%2F…`). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Rotated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserKey"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No such key of the caller's user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    list_users: {
+        parameters: {
+            query?: {
+                /** @description `next_cursor` of the previous page; absent for the first page. */
+                cursor?: string;
+                /** @description Page size, 1 to 500. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Users in id order */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserList"];
+                };
+            };
+            /** @description Malformed query or limit */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    create_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUser"];
+            };
+        };
+        responses: {
+            /** @description Created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedUser"];
+                };
+            };
+            /** @description Malformed body, email, name, password or scopes */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope, or scopes wider than the caller's */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The email is taken, or the root user exists */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    update_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Its id. */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateUser"];
+            };
+        };
+        responses: {
+            /** @description Changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["User"];
+                };
+            };
+            /** @description Malformed body or scopes */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope, or scopes wider than the caller's */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description No such user */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    read_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The version */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Version"];
+                };
+            };
+            /** @description The store is unavailable */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -3954,7 +6071,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -3963,7 +6080,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The wallet store is unavailable */
@@ -3972,7 +6098,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4014,7 +6140,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4023,7 +6149,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network is not configured */
@@ -4032,7 +6167,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The address is kept with another external ID */
@@ -4041,7 +6176,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Generation or the store is unavailable */
@@ -4050,7 +6185,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4084,7 +6219,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4093,7 +6228,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4102,7 +6246,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4134,7 +6278,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4143,7 +6287,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Wallet is unknown */
@@ -4152,7 +6305,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The wallet store is unavailable */
@@ -4161,7 +6314,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4206,7 +6359,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4215,7 +6368,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Wallet is unknown, or the asset is not configured */
@@ -4224,7 +6386,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The node or the store is unavailable */
@@ -4233,7 +6395,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4265,7 +6427,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4274,7 +6436,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such index */
@@ -4283,7 +6454,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4292,7 +6463,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4330,7 +6501,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4339,7 +6510,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such index */
@@ -4348,7 +6528,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4357,7 +6537,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4396,7 +6576,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4405,7 +6585,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4414,7 +6603,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4448,7 +6637,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4457,7 +6646,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such index */
@@ -4466,7 +6664,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The chain reads no balance (Bitcoin), or the index is paused or `no_data` */
@@ -4475,7 +6673,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The indexer has not read the chain's final block yet, or the store is unavailable */
@@ -4484,7 +6682,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4516,7 +6714,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4525,7 +6723,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Wallet is unknown, or network not configured */
@@ -4534,7 +6741,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4543,7 +6750,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4575,7 +6782,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4584,7 +6791,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description No such wallet or tag, or network not configured */
@@ -4593,7 +6809,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The store is unavailable */
@@ -4602,7 +6818,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };
@@ -4638,7 +6854,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Missing or invalid bearer token */
@@ -4647,7 +6863,16 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description Network or asset is not configured */
@@ -4656,7 +6881,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description A watch-only or unknown wallet, or a sender index missing */
@@ -4665,7 +6890,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             /** @description The queue or store is unavailable */
@@ -4674,7 +6899,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ErrorBody"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
         };

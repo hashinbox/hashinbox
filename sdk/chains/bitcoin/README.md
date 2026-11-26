@@ -1,6 +1,6 @@
 # chain-bitcoin
 
-Bitcoin for the payment SDK: reads blocks as `base` blocks with every leg,
+Bitcoin for hashinbox: reads blocks as `base` blocks with every leg,
 and builds, signs and broadcasts BTC transfers from P2WPKH and P2TR wallets.
 The `native` module is the protocol code alone and can be used without the
 rest of the SDK.

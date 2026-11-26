@@ -1,4 +1,4 @@
-# payment-server
+# hashinbox
 
 The one executable of the workspace: it opens one SQLite file, builds the
 container (`base::Container`) of its network tables with the Bitcoin,
@@ -9,19 +9,17 @@ queue, and serves the wallet HTTP API. It is a binary with no library.
 ## Usage
 
 ```bash
-cargo run --locked -p payment-server -- migrate   # once: create the database
-export PAYMENT_API_TOKEN='replace-me'
-cargo run --locked -p payment-server -- serve --bearer-token-env PAYMENT_API_TOKEN
+cargo run --locked -p hashinbox -- serve   # the first start creates the database
+# Once: POST /v1/users creates the root user (design 096).
 ```
 
-Flags, each with an environment fallback: `--db` (`PAYMENT_DB`, default
-`.data/payment.db`), `--bind` (`PAYMENT_BIND`, default `127.0.0.1:8080`),
-`--bearer-token-env` (`PAYMENT_BEARER_TOKEN_ENV`: the variable holding the API
-token; optional only for a loopback bind), `--tls-terminated-upstream`
-(`PAYMENT_TLS_TERMINATED_UPSTREAM`), `--brand` (`PAYMENT_UI_BRAND`).
+Flags, each with an environment fallback: `--db` (`HASHINBOX_DB`, default
+`.data/hashinbox.db`), `--bind` (`HASHINBOX_BIND`, default `127.0.0.1:8080`),
+`--tls-terminated-upstream`
+(`HASHINBOX_TLS_TERMINATED_UPSTREAM`), `--config` (`HASHINBOX_CONFIG`, below).
 
-`migrate` executes `init.sql` then `seed.sql` on the (new) file; there are no
-migrations. `serve` only opens it. Networks are rows: `network` (facts and
+`serve` creates a new file (absent or empty) with `init.sql` then `seed.sql`,
+and opens an existing one as it is; there are no migrations. Networks are rows: `network` (facts and
 `settings`, the chain's own knobs as JSON), `network_asset`, `network_endpoint`
 (one row per node, see `seed.sql`) and `network_endpoint_route` (methods sent
 round robin over some of a network's nodes). The server indexes exactly the
@@ -45,14 +43,44 @@ a node whose URL stays keeps its tip, failures and call counts. `GET
 sends a batch as requests of 4 calls, paced to 3.5 calls a second; a
 request waits for its turn rather than fail.
 
-The server also serves a browser page at `/` (`--brand`, `PAYMENT_UI_API_BASE`).
+### Deploy with a preset config
+
+`serve --config` (`HASHINBOX_CONFIG`) seeds an empty database: the root user
+and settings, in one write, checked as `POST /v1/users`, `PUT
+/v1/settings/{key}` and `POST /v1/recovery` check them. The value is inline
+JSON (it starts with `{`) or a JSON file's path:
+
+```json
+{
+  "root": { "email": "ops@shop.io", "name": "Ops", "password": "at least 8 chars" },
+  "settings": { "instance": "Shop", "recovery_passphrase": "twelve bip39 words …" }
+}
+```
+
+```bash
+docker run -e HASHINBOX_CONFIG='{"root":{"email":"ops@shop.io","name":"Ops","password":"…"}}' …
+# or a mounted file
+docker run -v ./bootstrap.json:/etc/hashinbox/bootstrap.json:ro \
+  -e HASHINBOX_CONFIG=/etc/hashinbox/bootstrap.json …
+```
+
+- No user yet: the root is created and the settings applied, or the server
+  does not start (a bad field, a short password, a bad mnemonic, a config
+  with no `root`), naming the field and writing nothing.
+- A user exists: the config is not read; users and settings are never
+  overwritten.
+- Keep the file at mode 0600, change the password after the first login; the
+  config only seeds an empty database. Its content is never logged.
+
+The server also serves a browser page at `/` (`HASHINBOX_UI_API_BASE`).
 The committed page (`ui/dist`) was built against the previous API and needs a
 rebuild for the routes below.
 
 ## API
 
-`payment-server --openapi` prints the OpenAPI document; `docs/openapi.json` is the
-committed copy. `GET /health` and `GET /openapi.json` need no token.
+`hashinbox --openapi` prints the OpenAPI document; `docs/openapi.json` is the
+committed copy. `GET /health`, `GET /v1/version` and `GET /openapi.json` need no
+token; every other route takes a session JWT or a key's secret (design 096).
 
 - `GET /v1/assets`: every configured asset (`container.assets()`): its network, its
   id (`native` or a token's) and metadata.
@@ -109,9 +137,9 @@ them. Nothing imports upward (docs/design/069-server-layers.md;
   `src/main.rs` is the only file that names a chain crate; `src/config.rs` is
   the command line; `src/ui.rs` serves the page.
 - `src/db.rs`: the SQLite pool, its pragmas, read and write transactions, and
-  `migrate`, which runs the embedded `init.sql` and `seed.sql`.
+  `open_or_create`, which runs the embedded `init.sql` and `seed.sql` on a new file.
 - `src/api/`: one file per resource; `mod.rs` assembles the router and OpenAPI root
-  and holds the shared `Error`; `state.rs` is the handler state.
+  and `src/error.rs` holds the shared `Error`; `state.rs` is the handler state.
 - `src/models/`: one file per table (diesel row and its SQL) and the shared wire
   shapes (`asset`, `network`).
 - `src/usecase/`: `sdk/` (every `base` store on the models), `transport.rs`

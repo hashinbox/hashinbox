@@ -19,4 +19,7 @@ pub(crate) struct AppState {
     pub(crate) logs: crate::usecase::logs::Feed,
     /// The markets' newest candles, in memory (the market job's).
     pub(crate) candles: crate::models::market_candle_1h::MarketCandles1hExchangeAssetMapCached,
+    /// Whether a user exists: false until the root is created (then
+    /// `/v1/version` drops `missing_root`); once true, never read again.
+    pub(crate) root_exists: std::sync::atomic::AtomicBool,
 }

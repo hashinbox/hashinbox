@@ -14,7 +14,8 @@ use ::trigger::{
 use base::Container;
 use diesel::OptionalExtension as _;
 
-use super::{Error, Transport};
+use super::Transport;
+use crate::error::Error;
 use crate::{
     db::{Db, Page},
     models::{
@@ -76,8 +77,8 @@ pub(crate) async fn list_page(db: &Db, page: Page<String>) -> Result<Vec<Trigger
 /// # Errors
 ///
 /// Invalid for a batch out of size, a trigger without an id, several
-/// networks, or a broken rule; not found for an unconfigured network or what
-/// an action's input names; conflict for an id taken or repeated; the store.
+/// networks, a repeated id, or a broken rule; not found for an unconfigured network or what
+/// an action's input names; already exists for an id taken; the store.
 pub(crate) async fn create(
     container: &Container<Transport>,
     db: &Db,
@@ -86,23 +87,27 @@ pub(crate) async fn create(
 ) -> Result<Vec<Trigger>, Error> {
     let now = now()?;
     if definitions.is_empty() || definitions.len() > 16 {
-        return Err(Error::invalid("a batch holds 1 to 16 triggers"));
+        return Err(Error::invalid_argument("a batch holds 1 to 16 triggers"));
     }
     // One group for the whole batch, so it can be found (and removed) together.
     let group = uuid::Uuid::now_v7().to_string();
     let mut rows: Vec<Trigger> = Vec::with_capacity(definitions.len());
     for definition in definitions {
         let Some(id) = definition.id.clone() else {
-            return Err(Error::invalid("every trigger of a batch needs an id"));
+            return Err(Error::invalid_argument(
+                "every trigger of a batch needs an id",
+            ));
         };
         if rows.iter().any(|row| row.id == id) {
-            return Err(Error::conflict("a batch repeats a trigger id"));
+            return Err(Error::invalid_argument("a batch repeats a trigger id"));
         }
         if rows.first().is_some_and(|first| {
             (first.chain.as_str(), first.network.as_str())
                 != (definition.chain.as_str(), definition.network.as_str())
         }) {
-            return Err(Error::invalid("every trigger of a batch is on one network"));
+            return Err(Error::invalid_argument(
+                "every trigger of a batch is on one network",
+            ));
         }
         let row = definition.trigger(id, group.clone(), now, now);
         check(container, actions, &row)?;
@@ -127,7 +132,9 @@ pub(crate) async fn create(
         })
         .await?;
     if let Some(taken) = taken {
-        return Err(Error::conflict(format!("a trigger with id {taken} exists")));
+        return Err(Error::already_exists(format!(
+            "a trigger with id {taken} exists"
+        )));
     }
     Ok(rows)
 }
@@ -159,7 +166,7 @@ pub(crate) async fn replace(
     definition: Definition,
 ) -> Result<Trigger, Error> {
     if definition.id.is_some() {
-        return Err(Error::invalid("a trigger's id never changes"));
+        return Err(Error::invalid_argument("a trigger's id never changes"));
     }
     let kept = read(db, id.clone()).await?;
     let definition = Definition {
@@ -223,7 +230,7 @@ fn check(
 fn refused(error: ::trigger::Error) -> Error {
     match error.class {
         Class::NotConfigured => Error::not_found(error.message()),
-        _ => Error::invalid(error.message()),
+        _ => Error::invalid_argument(error.message()),
     }
 }
 

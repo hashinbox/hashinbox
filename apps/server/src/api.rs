@@ -1,49 +1,25 @@
 //! The HTTP transport: one module per resource, assembled into the router and
-//! the OpenAPI document, and the error every endpoint answers with. A handler
-//! reads and checks its request, calls one usecase (`crate::usecase`, where
-//! the logic is) and answers its result with a status. A shape several
+//! the OpenAPI document. A handler reads and checks its request, calls one
+//! usecase (`crate::usecase`, where the logic is) and answers its result with
+//! a status, or its [`crate::error::Error`]. A shape several
 //! endpoints share is a model (`crate::models`); each endpoint's own request
 //! and response bodies live in its resource file.
 
-mod assets;
-mod health;
-mod jobs;
-mod logs;
-mod markets;
-mod network_block_transactions;
-mod network_blocks;
-mod network_endpoint_routes;
-mod network_endpoints;
-mod network_transactions;
-mod networks;
-mod networks_tip;
-mod openapi;
+pub(crate) mod middleware;
+mod routes;
 mod state;
-mod stats;
-mod triggers;
-mod wallet_index_legs;
-mod wallet_indexes;
-mod wallet_tags;
-mod wallet_transactions;
-mod wallets;
 
 use std::sync::Arc;
 
-use axum::{Extension, Router};
+use axum::{Extension, Router, middleware::from_fn_with_state};
 
 use utoipa::OpenApi;
-use utoipa_axum::router::OpenApiRouter;
 
-use axum::{
-    Json,
-    extract::rejection::{JsonRejection, QueryRejection},
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
-use serde::{Deserialize, Serialize};
-use utoipa::{IntoParams, ToSchema};
+use axum::http::StatusCode;
+use serde::Deserialize;
+use utoipa::IntoParams;
 
-use crate::{db::Page, usecase};
+use crate::{db::Page, error::Error};
 pub(crate) use state::AppState;
 
 /// The document root: title, version, description and servers. Title and
@@ -54,12 +30,12 @@ pub(crate) use state::AppState;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "payment-api",
-        description = "The payment HTTP routes and OpenAPI contract over the chain-neutral \
+        title = "hashinbox-api",
+        description = "The hashinbox HTTP routes and OpenAPI contract over the chain-neutral \
             wallet and index abstractions. An asset is its network's own asset id \
             (`native`, or a token); no chain or asset is named in this contract."
     ),
-    servers((url = "/", description = "The payment server's own origin")),
+    servers((url = "/", description = "The hashinbox server's own origin")),
     tags(
         (name = "assets", description = "Configured assets"),
         (name = "wallets", description = "Wallets and balances"),
@@ -71,28 +47,48 @@ pub(crate) use state::AppState;
         (name = "markets", description = "Market data sources, their price feeds and hourly candles"),
         (name = "stats", description = "What the store holds and its last day"),
         (name = "health", description = "Readiness and indexing state"),
+        (name = "auth", description = "Sessions, the logged-in user, users and keys"),
+        (name = "settings", description = "The instance's settings"),
         (name = "openapi", description = "This document")
-    )
+    ),
+    modifiers(&Bearer)
 )]
 struct Contract;
 
+/// The `bearer` security scheme every protected route names: a session
+/// JWT, or a key's secret (`his/…`).
+// linter:disable rust/empty-struct -- Utoipa's modifiers are types, not values.
+struct Bearer;
+
+impl utoipa::Modify for Bearer {
+    fn modify(&self, document: &mut utoipa::openapi::OpenApi) {
+        use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+        let scheme = HttpBuilder::new()
+            .scheme(HttpAuthScheme::Bearer)
+            .bearer_format("JWT")
+            .description(Some(
+                "A session's JWT (`POST /v1/session`), or a key's secret `his/…`. A GET \
+                 route also takes the JWT as `?token=`.",
+            ))
+            .build();
+        let components = document.components.get_or_insert_with(Default::default);
+        components.add_security_scheme("bearer", SecurityScheme::Http(scheme));
+    }
+}
+
 /// The complete OpenAPI 3 document, without binding a listener.
 ///
-/// `payment-server --openapi` prints exactly this, and `docs/openapi.json`
+/// `hashinbox --openapi` prints exactly this, and `docs/openapi.json`
 /// holds the committed copy typed clients are generated from.
 #[must_use]
 pub(crate) fn openapi() -> utoipa::openapi::OpenApi {
-    let (_, mut document) = protected_routes().split_for_parts();
-    let (_, public) = public_routes().split_for_parts();
-    document.merge(public);
-    document
+    routes::all().split_for_parts().1
 }
 
-/// The complete API router.
-///
-/// Wallet, transaction and network routes are protected by `config`'s bearer
-/// authentication and body limit ([`http_server::protected_router`]); health
-/// routes and `GET /openapi.json` are public. The OpenAPI contract is built
+/// The complete API router: every route under `config`'s body limit
+/// ([`http_server::protected_router`], given no token), and every route
+/// behind one middleware (`middleware::authenticate`) checking the bearer
+/// token against `state`'s users and keys. The OpenAPI contract is built
 /// from the same handlers.
 ///
 /// # Errors
@@ -103,111 +99,11 @@ pub(crate) fn router(
     state: Arc<AppState>,
     config: &http_server::Config,
 ) -> Result<Router, http_server::ConfigError> {
-    let (protected, mut contract) = protected_routes().split_for_parts();
-    let (public, public_contract) = public_routes().split_for_parts();
-    contract.merge(public_contract);
-    let contract = Arc::new(contract);
-
-    let protected = http_server::protected_router(protected.with_state(state.clone()), config)?;
-    Ok(protected
-        .merge(public.with_state(state))
-        .layer(Extension(contract)))
-}
-
-fn protected_routes() -> OpenApiRouter<Arc<AppState>> {
-    OpenApiRouter::with_openapi(Contract::openapi())
-        .merge(assets::routes())
-        .merge(wallets::routes())
-        .merge(wallet_indexes::routes())
-        .merge(wallet_index_legs::routes())
-        .merge(wallet_transactions::routes())
-        .merge(jobs::routes())
-        .merge(logs::routes())
-        .merge(markets::routes())
-        .merge(networks::routes())
-        .merge(network_blocks::routes())
-        .merge(network_endpoints::routes())
-        .merge(network_endpoint_routes::routes())
-        .merge(network_block_transactions::routes())
-        .merge(network_transactions::routes())
-        .merge(networks_tip::routes())
-        .merge(stats::routes())
-        .merge(triggers::routes())
-        .merge(wallet_tags::routes())
-}
-
-fn public_routes() -> OpenApiRouter<Arc<AppState>> {
-    OpenApiRouter::new()
-        .merge(health::routes())
-        .merge(openapi::routes())
-}
-
-/// The body of every error response.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, ToSchema)]
-pub(crate) struct ErrorBody {
-    /// What went wrong.
-    pub(crate) message: String,
-}
-
-/// An endpoint's failure: its status and body.
-#[derive(Debug)]
-pub(crate) struct Error {
-    status: StatusCode,
-    body: ErrorBody,
-}
-
-impl Error {
-    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, message)
-    }
-
-    pub(crate) fn invalid_json(_error: JsonRejection) -> Self {
-        Self::invalid_request("request body must match the documented JSON schema")
-    }
-
-    /// An unparsable query string: the contract answers JSON, never Axum's
-    /// plain-text rejection.
-    pub(crate) fn invalid_query(_error: QueryRejection) -> Self {
-        Self::invalid_request("query parameters must match the documented schema")
-    }
-
-    pub(crate) fn invalid_response(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            body: ErrorBody {
-                message: message.into(),
-            },
-        }
-    }
-}
-
-/// A malformed id: always a 400.
-impl From<crate::models::IdError> for Error {
-    fn from(error: crate::models::IdError) -> Self {
-        Self::invalid_request(error.to_string())
-    }
-}
-
-/// A usecase failure by its kind: invalid 400, not found 404, conflict 422,
-/// unavailable 503, internal 500.
-impl From<usecase::Error> for Error {
-    fn from(error: usecase::Error) -> Self {
-        let status = match error.kind {
-            usecase::Kind::Invalid => StatusCode::BAD_REQUEST,
-            usecase::Kind::NotFound => StatusCode::NOT_FOUND,
-            usecase::Kind::Conflict => StatusCode::UNPROCESSABLE_ENTITY,
-            usecase::Kind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
-            usecase::Kind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        };
-        let body = ErrorBody {
-            message: error.message,
-        };
-        Self { status, body }
-    }
+    let (routes, contract) = routes::all().split_for_parts();
+    let authenticate = from_fn_with_state(state.clone(), middleware::authenticate);
+    let routes = routes.layer(authenticate).with_state(state);
+    let routes = http_server::protected_router(routes, config)?;
+    Ok(routes.layer(Extension(Arc::new(contract))))
 }
 
 /// 201 for what a create made, 200 for what it found already kept.
@@ -241,7 +137,7 @@ impl IndexParams {
     ) -> Result<Page<K>, Error> {
         let limit = self.limit.unwrap_or(100);
         if !(1..=500).contains(&limit) {
-            return Err(Error::invalid_request(format!(
+            return Err(Error::invalid_argument(format!(
                 "{name} limit must be between 1 and 500"
             )));
         }
@@ -250,15 +146,9 @@ impl IndexParams {
             .as_deref()
             .map(|cursor| {
                 parse(cursor)
-                    .ok_or_else(|| Error::invalid_request(format!("{name} cursor is invalid")))
+                    .ok_or_else(|| Error::invalid_argument(format!("{name} cursor is invalid")))
             })
             .transpose()?;
         Ok(Page { after, limit })
-    }
-}
-
-impl IntoResponse for Error {
-    fn into_response(self) -> Response {
-        (self.status, Json(self.body)).into_response()
     }
 }

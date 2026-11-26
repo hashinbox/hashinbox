@@ -25,15 +25,11 @@ const OPEN: &str = r#"<script id="settings" type="application/json">"#;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Settings {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    brand: Option<String>,
     api_base: String,
 }
 
 /// The values a [`Settings`] is built from.
 pub(crate) struct SettingsParams {
-    /// The name in the top bar (`--brand`).
-    pub(crate) brand: Option<String>,
     /// Where the page sends its API calls; empty means its own origin.
     pub(crate) api_base: String,
 }
@@ -41,7 +37,6 @@ pub(crate) struct SettingsParams {
 impl Settings {
     pub(crate) fn from_params(params: SettingsParams) -> Self {
         Self {
-            brand: params.brand,
             api_base: params.api_base,
         }
     }

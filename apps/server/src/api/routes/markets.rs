@@ -15,7 +15,10 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use crate::models::Caller;
+use crate::models::Session;
+
+use crate::error::Error;
 use crate::{
     api::AppState,
     models::{market::Market, market_candle_1h::MarketCandle1h},
@@ -62,7 +65,7 @@ struct ListResponse {
     prices: BTreeMap<String, String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/markets",
     operation_id = "list_markets",
@@ -71,15 +74,19 @@ struct ListResponse {
         (`feed`), when it was last changed and when its last quote answered (`last_at`); \
         and, by ticker, each asset's latest USD price: the median close of the current \
         hour's candles.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The markets", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "markets"
 )]
-async fn list(State(state): State<Arc<AppState>>) -> Result<Json<ListResponse>, Error> {
+async fn list(
+    session: Session,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ListResponse>, Error> {
+    scope::require!(session, "com.hashinbox.markets.$read");
     let markets = markets::list(&state.db).await?.into_iter();
     let prices = markets::prices(&state.candles).into_iter();
     Ok(Json(ListResponse {
@@ -107,7 +114,7 @@ struct SetRequest {
     feed: bool,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     patch,
     path = "/v1/markets/{name}",
     operation_id = "set_market",
@@ -116,22 +123,24 @@ struct SetRequest {
         on its next tick (within 10 s).",
     params(MarketPath),
     request_body = SetRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Stored", body = MarketResponse),
-        (status = 400, description = "Malformed body", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such market", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed body", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such market", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "markets"
 )]
 async fn set_feed(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<MarketPath>,
     request: Result<Json<SetRequest>, JsonRejection>,
 ) -> Result<Json<MarketResponse>, Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.markets.$write");
+    let Json(request) = request?;
     let quoted = markets::set_feed(&state.db, &path.name, request.feed).await?;
     Ok(Json(quoted.into()))
 }
@@ -155,7 +164,7 @@ struct CandlesResponse {
     candles: Vec<MarketCandle1h>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/markets/{name}/candles",
     operation_id = "list_market_candles",
@@ -164,22 +173,24 @@ struct CandlesResponse {
         close of its quotes) from `after` on, at most the last 7 days, oldest first; the \
         current hour's moves until the hour ends.",
     params(MarketPath, CandlesQuery),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The candles", body = CandlesResponse),
-        (status = 400, description = "Malformed query", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "No such market", body = ErrorBody),
-        (status = 503, description = "The store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "No such market", body = Error),
+        (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "markets"
 )]
 async fn list_candles(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<MarketPath>,
     query: Result<Query<CandlesQuery>, QueryRejection>,
 ) -> Result<Json<CandlesResponse>, Error> {
-    let Query(query) = query.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.markets.$read");
+    let Query(query) = query?;
     let candles = markets::candles(&state.db, &path.name, &query.asset, query.after).await?;
     Ok(Json(CandlesResponse {
         candles: candles.into_iter().collect(),

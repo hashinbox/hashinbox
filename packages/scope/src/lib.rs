@@ -9,7 +9,26 @@ use std::fmt;
 
 pub use schema::{Resource, Schema};
 pub use scope::{Action, Scope, Segment};
+pub use scope_macros::{require, utoipa};
 pub use scopes::Scopes;
+
+/// What a caller was granted: the scopes [`require!`] checks against. A session, a key or plain [`Scopes`].
+pub trait Granted {
+    /// The scopes it holds.
+    fn scopes(&self) -> &Scopes;
+}
+
+impl Granted for Scopes {
+    fn scopes(&self) -> &Scopes {
+        self
+    }
+}
+
+impl<T: Granted + ?Sized> Granted for &T {
+    fn scopes(&self) -> &Scopes {
+        (**self).scopes()
+    }
+}
 
 /// Why a scope's text does not parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,8 +38,8 @@ pub enum ParseError {
     /// A resource or action name that is not ASCII letters, digits, `_`
     /// or `-`.
     Name(String),
-    /// Ids not closed by `]`, empty, or one of them empty.
-    Ids(String),
+    /// An id not closed by `]`, or empty.
+    Id(String),
     /// No `$action` at the end.
     Action(String),
     /// A `%` not followed by two hex digits, or an id not UTF-8.
@@ -32,7 +51,7 @@ impl fmt::Display for ParseError {
         match self {
             Self::Empty => out.write_str("a scope needs a resource"),
             Self::Name(name) => write!(out, "`{name}` is not a name"),
-            Self::Ids(text) => write!(out, "bad ids in `{text}`"),
+            Self::Id(text) => write!(out, "bad id in `{text}`"),
             Self::Action(text) => write!(out, "`{text}` does not end with `$action`"),
             Self::Escape(text) => write!(out, "bad escape in `{text}`"),
         }
@@ -45,19 +64,22 @@ impl std::error::Error for ParseError {}
 /// ([`require!`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Denied {
-    needed: Scope,
+    needed: String,
 }
 
 impl Denied {
     /// Refused for want of `needed`.
     #[must_use]
-    pub const fn new(needed: Scope) -> Self {
-        Self { needed }
+    pub fn new(needed: Scope) -> Self {
+        Self {
+            needed: needed.to_string(),
+        }
     }
 
-    /// The scope it needed.
+    /// The text of the scope it needed: a scope's, or a `require!`
+    /// template's filled text that does not parse.
     #[must_use]
-    pub const fn needed(&self) -> &Scope {
+    pub fn needed(&self) -> &str {
         &self.needed
     }
 }
@@ -69,3 +91,28 @@ impl fmt::Display for Denied {
 }
 
 impl std::error::Error for Denied {}
+
+/// `id` escaped as a scope writes it between `[` and `]`: what
+/// [`require!`] puts in a template's `{name}`.
+#[doc(hidden)]
+#[must_use]
+pub fn __escape_id(id: &str) -> String {
+    scope::escape(id)
+}
+
+/// [`require!`]'s check: `text` parsed, then covered by `granted`. Text
+/// that does not parse is denied.
+///
+/// # Errors
+///
+/// [`Denied`] when the check fails.
+#[doc(hidden)]
+pub fn __require(granted: &Scopes, text: String) -> Result<(), Denied> {
+    let Ok(needed) = text.parse::<Scope>() else {
+        return Err(Denied { needed: text });
+    };
+    if granted.covers(&needed) {
+        return Ok(());
+    }
+    Err(Denied::new(needed))
+}

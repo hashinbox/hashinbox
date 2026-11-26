@@ -7,6 +7,17 @@ Serde; `Debug` is redacted. `PrivateKey` is what all share: `generate`,
 `from_bytes` (exactly 32 bytes), `to_bytes` into `SecretBytes`, and `sign`
 returning the scheme's wire signature.
 
+Beside the keys, the pieces a server's logins need, each a public module or
+function:
+
+| Item | What |
+|---|---|
+| `password::{hash, verify, DECOY}` | argon2id PHC hashes; `DECOY` is checked when no account matches, so a wrong name costs a password check's time |
+| `totp::{code, verify, uri, STEP}` | RFC 6238 codes (HMAC-SHA1, 30 s, 6 digits); `verify` accepts ±1 step after `last_step` only; `uri` is the `otpauth://` QR text |
+| `mnemonic::Mnemonic` | BIP39, 12 English words: `generate`, `from_entropy`, `parse` (any whitespace or case; known words, valid checksum), `Display` the normal form |
+| `base58::{encode, decode}` | Bitcoin's alphabet, no check bytes |
+| `random::<N>()`, `sha256`, `crc32` | OS randomness, SHA-256, CRC32 (ISO-HDLC) |
+
 ## Usage
 
 ```rust

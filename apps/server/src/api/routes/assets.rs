@@ -6,7 +6,9 @@ use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::ErrorBody;
+use crate::models::Session;
+
+use crate::error::Error;
 use crate::{
     api::AppState,
     models::{Asset, NetworkName},
@@ -36,25 +38,29 @@ struct ListResponse {
     assets: Vec<Listing>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/assets",
     operation_id = "list_assets",
     summary = "List every configured asset",
     description = "Every asset of every configured network, with its metadata. This is the \
         only list of assets the wallet routes accept.",
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Configured assets", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody)
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error)
     ),
     tag = "assets"
 )]
-async fn list(State(state): State<Arc<AppState>>) -> Json<ListResponse> {
+async fn list(
+    session: Session,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ListResponse>, Error> {
+    scope::require!(session, "com.hashinbox.assets.$read");
     let assets = state.container.assets().into_iter();
-    Json(ListResponse {
+    Ok(Json(ListResponse {
         assets: assets.map(Listing::from).collect(),
-    })
+    }))
 }
 
 impl From<base::AssetInfo> for Listing {

@@ -1,12 +1,12 @@
 # Opt-in Ethereum reorg validation against a real fork
 
-This scenario validates `payment-server`'s Ethereum indexing against a real
+This scenario validates `hashinbox`'s Ethereum indexing against a real
 pre-finality Ethereum fork. It is manual and opt-in: nothing here runs under
 `cargo test`, and this directory holds only the pinned network definition
 ([`network_params.yaml`](./network_params.yaml)) plus this runbook.
 
 The network isolates participant 1 from participants 2–4 at both the execution
-and the consensus P2P layer. Point one `payment-server` at participant 1, wait
+and the consensus P2P layer. Point one `hashinbox` at participant 1, wait
 for a watched address's transaction to be included on that minority branch,
 then heal the partition. The majority branch wins, and the server must discard
 the orphaned inclusion, replay the replacement branch, and converge — over plain
@@ -44,7 +44,7 @@ Review and deliberately update all pins together. Do not replace them with
 - a current Kurtosis CLI and engine supporting `--privileged`;
 - permission to mount the Docker socket and use the host PID namespace;
 - enough local CPU, memory, and disk for four Geth/Lighthouse pairs; and
-- a built `payment-server` plus a fresh, disposable index path. Never point
+- a built `hashinbox` plus a fresh, disposable index path. Never point
   this at an index file that holds anything else.
 
 Disruptoor needs privileged containers, `/var/run/docker.sock`, and host PID
@@ -62,7 +62,7 @@ Then run the pinned package from the repository root:
 
 ```bash
 kurtosis run \
-  --enclave payment-sdk-ethereum-reorg \
+  --enclave hashinbox-ethereum-reorg \
   github.com/ethpandaops/ethereum-package@8e81c5709deffad01d0bd1770d259c224f1ed349 \
   --args-file tests/kurtosis/ethereum-indexer-reorg/network_params.yaml \
   --image-download always \
@@ -74,7 +74,7 @@ Inspect the enclave and record participant 1's published Geth HTTP endpoint,
 the majority participant endpoints, Dora, and Disruptoor:
 
 ```bash
-kurtosis enclave inspect payment-sdk-ethereum-reorg
+kurtosis enclave inspect hashinbox-ethereum-reorg
 ```
 
 Do not put RPC credentials, bearer tokens, or private keys in this directory or
@@ -131,7 +131,7 @@ Keep the enclave on failure so logs and OTel data stay inspectable. Remove it
 explicitly after collecting evidence:
 
 ```bash
-kurtosis enclave rm -f payment-sdk-ethereum-reorg
+kurtosis enclave rm -f hashinbox-ethereum-reorg
 ```
 
 The host-level OTel stack is shared with other enclaves; stop it only when no

@@ -52,6 +52,7 @@ macro_rules! collection {
 
 mod asset;
 pub(crate) mod block;
+pub(crate) mod caller;
 pub(crate) mod endpoint;
 pub(crate) mod endpoint_failure;
 pub(crate) mod endpoint_route;
@@ -66,16 +67,22 @@ pub(crate) mod network;
 pub(crate) mod network_asset;
 pub(crate) mod network_index;
 pub(crate) mod schema;
+pub(crate) mod session;
+pub(crate) mod setting;
 pub(crate) mod task;
 pub(crate) mod transaction;
 pub(crate) mod transaction_index;
 pub(crate) mod trigger;
 pub(crate) mod trigger_run;
+pub(crate) mod user;
+pub(crate) mod user_2fa;
+pub(crate) mod user_key;
 pub(crate) mod wallet;
 pub(crate) mod wallet_index;
 
 pub(crate) use asset::Asset;
 pub(crate) use block::Block;
+pub(crate) use caller::Caller;
 pub(crate) use endpoint::{Endpoint, Endpoints, RpcEndpoints};
 pub(crate) use endpoint_failure::{EndpointFailure, EndpointFailures};
 pub(crate) use endpoint_route::{Route, Routes};
@@ -89,8 +96,12 @@ pub(crate) use network_asset::NetworkAsset;
 pub(crate) use network_index::NetworkIndex;
 pub(crate) use task::Task;
 
+pub(crate) use session::{Client, Session};
 pub(crate) use trigger::Trigger;
 pub(crate) use trigger_run::TriggerRun;
+pub(crate) use user::User;
+pub(crate) use user_2fa::User2fa;
+pub(crate) use user_key::UserKey;
 pub(crate) use wallet::Wallet;
 
 use anyhow::Context as _;

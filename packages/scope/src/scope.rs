@@ -1,20 +1,20 @@
 //! One scope: a path of resources and an action, as text
 //! `com.hashinbox.wallets[id].$read`.
 
-use std::{collections::BTreeSet, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use crate::ParseError;
 
 /// One step of a scope's path.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Segment {
-    /// A resource: all of it (`wallets`), or only the ones named
-    /// (`wallets[a,b]`).
+    /// A resource: all of it (`wallets`), or only the one named
+    /// (`wallets[a]`).
     Name {
         /// The resource's name: ASCII letters, digits, `_` and `-`.
         name: String,
-        /// The ids it is narrowed to; `None`: every one.
-        ids: Option<BTreeSet<String>>,
+        /// The id it is narrowed to; `None`: every one.
+        id: Option<String>,
     },
     /// `*`: any one resource in the middle of a path; at its end, the
     /// resource before it and anything below.
@@ -34,7 +34,7 @@ pub enum Action {
 ///
 /// It covers another ([`Scope::covers`]) when its path matches the other's
 /// and its action is the same or `$*`. Its text round-trips through
-/// [`str::parse`]: ids are escaped (`%`, `[`, `]`, `,` and whitespace as
+/// [`str::parse`]: ids are escaped (`%`, `[`, `]` and whitespace as
 /// `%XX`), so any id is safe in it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Scope {
@@ -62,43 +62,39 @@ impl Segment {
         }
         Ok(Self::Name {
             name: name.to_owned(),
-            ids: None,
+            id: None,
         })
     }
 
-    /// Resource `name`, only `ids`.
+    /// Resource `name`, only `id`.
     ///
     /// # Errors
     ///
-    /// When `name` is not a name or `ids` is empty.
-    pub fn ids<I, T>(name: &str, ids: I) -> Result<Self, ParseError>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<String>,
-    {
-        let ids: BTreeSet<String> = ids.into_iter().map(Into::into).collect();
-        if ids.is_empty() || ids.contains("") {
-            return Err(ParseError::Ids(name.to_owned()));
+    /// When `name` is not a name or `id` is empty.
+    pub fn id(name: &str, id: impl Into<String>) -> Result<Self, ParseError> {
+        let id = id.into();
+        if id.is_empty() {
+            return Err(ParseError::Id(name.to_owned()));
         }
         if !is_name(name) {
             return Err(ParseError::Name(name.to_owned()));
         }
         Ok(Self::Name {
             name: name.to_owned(),
-            ids: Some(ids),
+            id: Some(id),
         })
     }
 
     /// The segment `token` is (`scope!`'s): `*`, or a name narrowed to
-    /// `ids`.
+    /// `id`.
     #[doc(hidden)]
     #[must_use]
-    pub fn __from_token(token: &str, ids: Option<BTreeSet<String>>) -> Self {
+    pub fn __from_token(token: &str, id: Option<String>) -> Self {
         match token {
             "*" => Self::Any,
             name => Self::Name {
                 name: name.to_owned(),
-                ids,
+                id,
             },
         }
     }
@@ -109,19 +105,12 @@ impl Segment {
             (Self::Any, _) => true,
             (Self::Name { .. }, Self::Any) => false,
             (
-                Self::Name { name, ids },
+                Self::Name { name, id },
                 Self::Name {
                     name: theirs,
-                    ids: their_ids,
+                    id: their_id,
                 },
-            ) => {
-                name == theirs
-                    && match (ids, their_ids) {
-                        (None, _) => true,
-                        (Some(_), None) => false,
-                        (Some(ids), Some(their_ids)) => their_ids.is_subset(ids),
-                    }
-            }
+            ) => name == theirs && (id.is_none() || id == their_id),
         }
     }
 }
@@ -201,7 +190,7 @@ impl Scope {
     /// or `$*`, and its path matches step by step, where
     ///
     /// - a name covers the same name; `wallets` covers `wallets[a]`, and
-    ///   `wallets[a,b]` covers `wallets[a]`, not `wallets`;
+    ///   `wallets[a]` covers only `wallets[a]`;
     /// - `*` in the middle covers any one step;
     /// - `*` at the end covers anything below (`wallets.*` covers
     ///   `wallets`, `wallets[a]` and `wallets[a].legs`).
@@ -211,43 +200,6 @@ impl Scope {
     #[must_use]
     pub fn covers(&self, other: &Self) -> bool {
         self.action.covers(&other.action) && path_covers(&self.path, &other.path)
-    }
-
-    /// It and `other` as one scope, when they differ only in one step's
-    /// ids: `wallets[a].$read` and `wallets[b].$read` are
-    /// `wallets[a,b].$read`.
-    pub(crate) fn merged(&self, other: &Self) -> Option<Self> {
-        if self.action != other.action || self.path.len() != other.path.len() {
-            return None;
-        }
-        let differ: Vec<usize> = (0..self.path.len())
-            .filter(|&at| self.path[at] != other.path[at])
-            .collect();
-        let [at] = differ[..] else {
-            return None;
-        };
-        let (
-            Segment::Name {
-                name,
-                ids: Some(ids),
-            },
-            Segment::Name {
-                name: theirs,
-                ids: Some(their_ids),
-            },
-        ) = (&self.path[at], &other.path[at])
-        else {
-            return None;
-        };
-        if name != theirs {
-            return None;
-        }
-        let mut merged = self.clone();
-        merged.path[at] = Segment::Name {
-            name: name.clone(),
-            ids: Some(ids.union(their_ids).cloned().collect()),
-        };
-        Some(merged)
     }
 
     /// It with its action `action`.
@@ -260,20 +212,21 @@ impl Scope {
 }
 
 /// Bytes an id escapes in its text.
-const ESCAPED: &[u8] = b"%[],";
+const ESCAPED: &[u8] = b"%[]";
 
 /// `id` as written between `[` and `]`.
-fn escape(id: &str, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+pub(crate) fn escape(id: &str) -> String {
+    let mut text = String::with_capacity(id.len());
     for char in id.chars() {
         let escaped = u8::try_from(char).ok().filter(|byte| {
             ESCAPED.contains(byte) || byte.is_ascii_whitespace() || byte.is_ascii_control()
         });
         match escaped {
-            Some(byte) => write!(out, "%{byte:02X}")?,
-            None => write!(out, "{char}")?,
+            Some(byte) => text.push_str(&format!("%{byte:02X}")),
+            None => text.push(char),
         }
     }
-    Ok(())
+    text
 }
 
 /// The id `text` (as written between `[` and `]`) is.
@@ -302,20 +255,8 @@ impl fmt::Display for Segment {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Any => out.write_str("*"),
-            Self::Name { name, ids: None } => out.write_str(name),
-            Self::Name {
-                name,
-                ids: Some(ids),
-            } => {
-                write!(out, "{name}[")?;
-                for (at, id) in ids.iter().enumerate() {
-                    if at > 0 {
-                        out.write_str(",")?;
-                    }
-                    escape(id, out)?;
-                }
-                out.write_str("]")
-            }
+            Self::Name { name, id: None } => out.write_str(name),
+            Self::Name { name, id: Some(id) } => write!(out, "{name}[{}]", escape(id)),
         }
     }
 }
@@ -348,11 +289,10 @@ impl FromStr for Segment {
         let Some((name, rest)) = text.split_once('[') else {
             return Self::name(text);
         };
-        let ids = rest
+        let id = rest
             .strip_suffix(']')
-            .ok_or_else(|| ParseError::Ids(name.to_owned()))?;
-        let ids: Vec<String> = ids.split(',').map(unescape).collect::<Result<_, _>>()?;
-        Self::ids(name, ids)
+            .ok_or_else(|| ParseError::Id(name.to_owned()))?;
+        Self::id(name, unescape(id)?)
     }
 }
 
@@ -376,7 +316,7 @@ impl FromStr for Scope {
             }
         }
         if inside {
-            return Err(ParseError::Ids(text.to_owned()));
+            return Err(ParseError::Id(text.to_owned()));
         }
         let action = text[start..]
             .strip_prefix('$')
@@ -406,7 +346,7 @@ mod tests {
         for text in [
             "com.hashinbox.wallets.$read",
             "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read",
-            "com.hashinbox.wallets[a,b].legs.$read",
+            "com.hashinbox.wallets[a].legs[b].legs.$read",
             "com.hashinbox.*.$read",
             "com.hashinbox.wallets.*.$*",
         ] {
@@ -416,10 +356,10 @@ mod tests {
 
     #[test]
     fn ids_are_escaped() {
-        let odd = super::Segment::ids("wallets", ["a,b]", "c%d"]).unwrap();
+        let odd = super::Segment::id("wallets", "a,b] c%d").unwrap();
         let odd = Scope::new(vec![odd], super::Action::Any).unwrap();
         let text = odd.to_string();
-        assert_eq!(text, "wallets[a%2Cb%5D,c%25d].$*");
+        assert_eq!(text, "wallets[a,b%5D%20c%25d].$*");
         assert_eq!(scope(&text), odd);
     }
 
@@ -447,7 +387,7 @@ mod tests {
             covers("a.wallets.$read", "a.wallets[x].$read"),
             "all covers one"
         );
-        assert!(covers("a.wallets[x,y].$read", "a.wallets[x].$read"));
+        assert!(covers("a.wallets[x].$read", "a.wallets[x].$read"));
         assert!(
             !covers("a.wallets[x].$read", "a.wallets.$read"),
             "one, not all"

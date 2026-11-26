@@ -1,5 +1,5 @@
-//! Payment server process: reads its command line (`config`), opens the
-//! one SQLite file, builds the container (`base::Container`) of every
+//! The hashinbox process: reads its command line (`config`), opens the
+//! one SQLite file (created when new), builds the container (`base::Container`) of every
 //! `enabled` `network` row, each network over its stored nodes (`usecase::Transport`)
 //! and built by its chain, registered here (the only module that names a
 //! chain crate); runs the workers (each network's indexer, the send queue)
@@ -10,8 +10,10 @@
 //! `workers`.
 
 mod api;
+mod auth;
 mod config;
 mod db;
+mod error;
 mod events;
 mod models;
 mod ui;
@@ -27,6 +29,7 @@ use api::AppState;
 use base::Container;
 use config::{AnyError, Cli, Command};
 use tasks::Executor;
+use tracing::instrument::WithSubscriber as _;
 use usecase::{market, workers};
 
 /// How often due jobs are looked for without a write.
@@ -41,22 +44,21 @@ async fn main() -> Result<(), AnyError> {
             return Ok(());
         }
         None => {
-            return Err("usage: payment-server serve | migrate | --openapi (see --help)".into());
-        }
-        Some(Command::Migrate(storage)) => {
-            storage.open()?.migrate().await?;
-            return Ok(());
+            return Err("usage: hashinbox serve | --openapi (see --help)".into());
         }
         Some(Command::Serve(serve)) => serve,
     };
     let server = config.server()?;
     let face = ui::Settings::from_params(ui::SettingsParams {
-        brand: config.brand.clone(),
         api_base: config::Serve::api_base()?,
     });
 
     // The one subscriber: stdout, and the `log` table and its live feed.
-    let db = config.storage.open()?;
+    // The file, created when new; logged on stdout alone, as its `log`
+    // table may not exist yet.
+    let db = db::Db::open_or_create(&config.storage.path()?)
+        .with_subscriber(config.stdout_subscriber()?)
+        .await?;
     let logs = usecase::logs::feed();
     tracing::subscriber::set_global_default(config.subscriber(&db, logs.clone())?)?;
 
@@ -75,6 +77,9 @@ async fn main() -> Result<(), AnyError> {
         .register::<chain_bitcoin::Info, chain_bitcoin::Factory>(&container)
         .register::<chain_ethereum::Info, chain_ethereum::Factory>(&container)
         .register::<chain_solana::Info, chain_solana::Factory>(&container);
+    // Whether a user exists, once `--config` has seeded an empty file:
+    // `/v1/version` says `missing_root` until one does.
+    let root_exists = usecase::bootstrap::bootstrap(&db, config.bootstrap.as_deref()).await?;
     let state = Arc::new(AppState {
         container,
         queue: usecase::tasks::queue(db.clone()),
@@ -82,6 +87,7 @@ async fn main() -> Result<(), AnyError> {
         db,
         logs,
         candles: candles.clone(),
+        root_exists: root_exists.into(),
     });
 
     let (container, db, queue, actions) =
@@ -126,7 +132,7 @@ async fn main() -> Result<(), AnyError> {
     let router = api::router(state, &server)?.merge(face.routes()?);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let bind = config.bind.to_string();
-    tracing::info!(target: events::APP_START, networks, bind);
+    tracing::info!(target: events::APP_START, version = config::VERSION, networks, bind);
     // Handlers in flight drain before `serve` returns; jobs left running
     // resume on the next start.
     let served = axum::serve(listener, router)

@@ -18,17 +18,20 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody, IndexParams, create_status};
+use crate::models::Caller;
+use crate::models::Session;
+
 use crate::{
-    api::AppState,
+    api::{AppState, IndexParams, create_status},
     db::Paged as _,
+    error::Error,
     models::{Wallet, wallet::WalletId},
     usecase::wallets::{self, NewWallet},
 };
 
 pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
-        .routes(routes!(create, list))
+        .routes(routes!(list, create))
         .routes(routes!(read))
 }
 
@@ -71,7 +74,7 @@ impl CreateRequest {
     fn wallet(self) -> Result<NewWallet, Error> {
         let external_id = self.external_id.as_deref().map(str::trim);
         if external_id.is_some_and(|text| !(1..=128).contains(&text.chars().count())) {
-            return Err(Error::invalid_request(
+            return Err(Error::invalid_argument(
                 "external_id must be 1 to 128 characters once trimmed",
             ));
         }
@@ -84,7 +87,7 @@ impl CreateRequest {
     }
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/wallets",
     operation_id = "create_wallet",
@@ -97,38 +100,30 @@ impl CreateRequest {
         keeps the key, and an `external_id` is kept on a wallet that has none; another \
         `external_id` than the kept one is refused (409); its tags and indexes stay.",
     request_body = CreateRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 201, description = "Wallet created", body = Wallet),
         (status = 200, description = "The address was already kept: its wallet", body = Wallet),
         (status = 400, description = "Malformed body, address, key or external ID, or a key \
-            that derives another address", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network is not configured", body = ErrorBody),
+            that derives another address", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error),
         (status = 409, description = "The address is kept with another external ID",
-            body = ErrorBody),
+            body = Error),
         (status = 503, description = "Generation or the store is unavailable",
-            body = ErrorBody)
+            body = Error)
     ),
     tag = "wallets"
 )]
 async fn create(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.wallets.$write");
+    let Json(request) = request?;
     let new = request.wallet()?;
-    let (created, wallet) = wallets::create(&state.container, &state.db, new)
-        .await
-        .map_err(|error| {
-            // Its only conflict, another external id: 409, not the usual 422.
-            let other = error.kind == crate::usecase::Kind::Conflict;
-            let mut error = Error::from(error);
-            if other {
-                error.status = StatusCode::CONFLICT;
-            }
-            error
-        })?;
+    let (created, wallet) = wallets::create(&state.container, &state.db, new).await?;
     Ok((create_status(created), Json(wallet)))
 }
 
@@ -144,28 +139,31 @@ struct ListResponse {
     next_cursor: Option<String>,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/wallets",
     operation_id = "list_wallets",
     summary = "List the wallets",
     description = "Keyed wallets and watched addresses, a page in wallet ID order, each with \
-        its tags and its indexes: their balances (exact atomic units), progress and legs.",
+        its tags and its indexes: their balances (exact atomic units), progress and legs. A \
+        caller granted only some wallets reads each by its ID.",
     params(IndexParams),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "Wallets in ID order", body = ListResponse),
-        (status = 400, description = "Malformed query or limit", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 503, description = "The wallet store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed query or limit", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 503, description = "The wallet store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn list(
+    session: Session,
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    let Query(index) = index.map_err(Error::invalid_query)?;
+    scope::require!(session, "com.hashinbox.wallets.$read");
+    let Query(index) = index?;
     let page = index.page("wallet list", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
     let wallets = wallets::list_page(&state.db, page).await?;
@@ -183,7 +181,7 @@ pub(super) struct WalletPath {
     pub(super) id: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     get,
     path = "/v1/wallets/{id}",
     operation_id = "read_wallet",
@@ -191,20 +189,22 @@ pub(super) struct WalletPath {
     description = "The wallet's network, canonical address, whether it is keyed, the assets \
         it is indexed in and how far each is; never its key.",
     params(WalletPath),
-    security(("bearerAuth" = [])),
     responses(
         (status = 200, description = "The wallet's public metadata", body = Wallet),
-        (status = 400, description = "Malformed wallet ID", body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Wallet is unknown", body = ErrorBody),
-        (status = 503, description = "The wallet store is unavailable", body = ErrorBody)
+        (status = 400, description = "Malformed wallet ID", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Wallet is unknown", body = Error),
+        (status = 503, description = "The wallet store is unavailable", body = Error)
     ),
     tag = "wallets"
 )]
 async fn read(
+    session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
+    scope::require!(session, "com.hashinbox.wallets[{id}].$read", id = path.id);
     let id = WalletId::parse(&path.id)?;
     Ok(Json(wallets::read(&state.container, &state.db, &id).await?))
 }

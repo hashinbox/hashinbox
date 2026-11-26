@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use utoipa::IntoParams;
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{Error, ErrorBody};
+use crate::models::Caller;
+
+use crate::error::Error;
 use crate::{
     api::AppState,
     models::wallet::WalletId,
@@ -88,7 +90,7 @@ struct SendResponse {
     job: String,
 }
 
-#[utoipa::path(
+#[scope::utoipa(
     post,
     path = "/v1/wallets/{id}/transactions",
     operation_id = "send_payment",
@@ -103,25 +105,27 @@ struct SendResponse {
         index still sends, and its transaction is recorded once mined.",
     params(WalletPath),
     request_body = SendRequest,
-    security(("bearerAuth" = [])),
     responses(
         (status = 202, description = "Send queued", body = SendResponse),
         (status = 400, description = "Malformed body, wallet ID, amount, or destination",
-            body = ErrorBody),
-        (status = 401, description = "Missing or invalid bearer token", body = ErrorBody),
-        (status = 404, description = "Network or asset is not configured", body = ErrorBody),
+            body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network or asset is not configured", body = Error),
         (status = 422, description = "A watch-only or unknown wallet, or a sender index \
-            missing", body = ErrorBody),
-        (status = 503, description = "The queue or store is unavailable", body = ErrorBody)
+            missing", body = Error),
+        (status = 503, description = "The queue or store is unavailable", body = Error)
     ),
     tag = "transactions"
 )]
 async fn send(
+    caller: Caller,
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
     request: Result<Json<SendRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SendResponse>), Error> {
-    let Json(request) = request.map_err(Error::invalid_json)?;
+    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    let Json(request) = request?;
     let id = WalletId::parse(&path.id)?;
     let transfer = Transfer {
         destination: request.destination,

@@ -1,6 +1,6 @@
 # chain-solana
 
-Solana for the payment SDK: reads blocks as `base` blocks with every leg of
+Solana for hashinbox: reads blocks as `base` blocks with every leg of
 SOL and the allowlisted SPL tokens, and builds, signs and broadcasts SOL and
 token transfers.
 
