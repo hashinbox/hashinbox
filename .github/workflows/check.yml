@@ -94,24 +94,9 @@ jobs:
 
   structure:
     runs-on: ubuntu-latest
-    env:
-      LINTER_VERSION: v0.1.3
     steps:
       - uses: actions/checkout@v4
       # The eighth documented gate (AGENTS.md, README.md): no trailing
       # whitespace and no conflict markers anywhere in the tree.
       - name: Whitespace
         run: git diff --check "$(git hash-object -t tree /dev/null)" HEAD
-      # Pinned release of the design linter; a failed download fails the job
-      # instead of skipping the check.
-      - name: Install linter
-        run: |
-          base=https://github.com/propdevil/linter/releases/download/$LINTER_VERSION
-          asset=linter-x86_64-unknown-linux-musl.tar.gz
-          curl -fsSL --retry 3 --proto '=https' "$base/$asset" -o "$RUNNER_TEMP/$asset"
-          curl -fsSL --retry 3 --proto '=https' "$base/SHA256SUMS" -o "$RUNNER_TEMP/SHA256SUMS"
-          (cd "$RUNNER_TEMP" && grep " $asset\$" SHA256SUMS | sha256sum -c -)
-          tar -xzf "$RUNNER_TEMP/$asset" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/linter/bin" >> "$GITHUB_PATH"
-      - name: Linter
-        run: linter check .

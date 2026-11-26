@@ -34,8 +34,6 @@ pub trait Source: Send + Sync + 'static {
 
 /// Files compiled into the binary: `(url path, bytes)` rows, e.g. written by a
 /// build script with `include_bytes!`.
-// linter:disable rust/struct-noun-naming -- `Embedded` pairs with `Disk` as
-// the name of where files live; the requested public name of this source.
 #[derive(Clone, Copy)]
 pub struct Embedded(pub &'static [(&'static str, &'static [u8])]);
 

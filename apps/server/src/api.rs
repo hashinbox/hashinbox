@@ -26,7 +26,6 @@ pub(crate) use state::AppState;
 /// description are stated here and the version is this crate's own, so a
 /// published contract never carries a dependency's metadata. The title is the
 /// contract's published name, not the name of the crate that serves it.
-// linter:disable rust/empty-struct -- Utoipa attaches the document root to a type, not a value.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -57,7 +56,6 @@ struct Contract;
 
 /// The `bearer` security scheme every protected route names: a session
 /// JWT, or a key's secret (`his/…`).
-// linter:disable rust/empty-struct -- Utoipa's modifiers are types, not values.
 struct Bearer;
 
 impl utoipa::Modify for Bearer {

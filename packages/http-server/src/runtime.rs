@@ -26,8 +26,6 @@ pub const READINESS_PATH: &str = "/health/ready";
 /// It cannot be inlined into its one caller because `middleware::from_fn_with_
 /// state` takes a function of exactly this shape and installs it per request,
 /// while `protected_router` runs once at startup.
-// linter:disable rust/single-use-free-function -- axum's middleware seam: a
-// per-request handler installed by the one call that builds the router.
 async fn require_bearer(
     State(token): State<BearerToken>,
     request: Request,
