@@ -14,7 +14,7 @@ scope::schema! {
     pub(crate) static HASHINBOX = com.hashinbox {
         wallets => [read, write],
         transactions => [read],
-        networks => [read],
+        networks => [read, write],
         endpoints => [read, write],
         triggers => [read, write],
         jobs => [read],

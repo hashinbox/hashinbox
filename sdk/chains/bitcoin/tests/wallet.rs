@@ -64,6 +64,14 @@ fn spends(sources: &[(base::Address, Asset)]) -> base::Spends {
     sources.iter().cloned().collect()
 }
 
+#[test]
+fn a_payment_carries_up_to_all_bitcoin() {
+    let factory = factory(&Script::default(), AddressType::Taproot, Vec::new());
+    let btc = Asset::native(network());
+    assert!(factory.carries(&btc, &2_100_000_000_000_000_u64.into()));
+    assert!(!factory.carries(&btc, &2_100_000_000_000_001_u64.into()));
+}
+
 #[tokio::test]
 async fn keys_and_addresses_round_trip() {
     let factory = factory(&Script::default(), AddressType::Taproot, Vec::new());

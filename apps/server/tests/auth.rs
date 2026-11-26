@@ -46,6 +46,7 @@ async fn app() -> (Router, crate::db::Db, tempfile::TempDir) {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -894,4 +895,31 @@ async fn a_setting_round_trips_is_checked_and_shows_in_the_version() {
         json!("acme"),
         "kept after refusals"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_network_is_created_with_the_networks_write_scope_only() {
+    let (router, _db, _directory) = app().await;
+    root(&router).await;
+    let scoped = |scopes: &str| login(json!({ "scopes": packed(scopes) }));
+    let body = scoped("com.hashinbox.networks.$read com.hashinbox.endpoints.$write");
+    let (status, read) = call(&router, Method::POST, "/v1/session", None, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{read}");
+    let read = read["token"].as_str().expect("a token").to_owned();
+    let new = json!({
+        "chain": "bitcoin", "network": "regtest", "chain_id": null, "testnet": true,
+        "block_time_ms": 600_000, "confirmations": 1,
+        "native": {"ticker": "BTC", "decimals": 8},
+    });
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        "/v1/networks",
+        Some(&read),
+        Some(new),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["reason"], "missing_scope", "{body}");
+    assert_eq!(body["metadata"]["scope"], "com.hashinbox.networks.$write");
 }

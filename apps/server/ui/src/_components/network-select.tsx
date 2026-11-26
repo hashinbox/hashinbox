@@ -29,13 +29,17 @@ function Name({ choice }: { choice: NetworkChoice }) {
   );
 }
 
-/** A network picker: each network with its currency's symbol. */
+/**
+ * A network picker: each network with its currency's symbol, then `extra`
+ * (a choice that is not a network, such as "New network…") when given.
+ */
 export function NetworkSelect({
   value,
   networks,
   onChange,
   label = 'Network',
   required = false,
+  extra,
   sx,
 }: {
   value: string;
@@ -43,6 +47,7 @@ export function NetworkSelect({
   onChange: (value: string) => void;
   label?: string;
   required?: boolean;
+  extra?: { value: string; label: string };
   sx?: SxProps<Theme>;
 }) {
   return (
@@ -58,7 +63,8 @@ export function NetworkSelect({
           SelectDisplayProps: { style: { display: 'flex', alignItems: 'center' } },
           renderValue: (selected) => {
             const choice = networks.find((n) => n.value === selected);
-            return choice ? <Name choice={choice} /> : String(selected);
+            if (choice) return <Name choice={choice} />;
+            return extra && extra.value === selected ? extra.label : String(selected);
           },
         },
       }}
@@ -69,6 +75,11 @@ export function NetworkSelect({
           <Name choice={n} />
         </MenuItem>
       ))}
+      {extra && (
+        <MenuItem value={extra.value} sx={{ fontStyle: 'italic' }}>
+          {extra.label}
+        </MenuItem>
+      )}
     </TextField>
   );
 }

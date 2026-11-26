@@ -8,8 +8,8 @@ use anyhow::Result;
 use crypto::{Curve, SecretBytes};
 
 use crate::{
-    Address, Addressed, Asset, Broadcaster, Builder, FeeEstimator, Future, Network, Networked,
-    TransactionError,
+    Address, Addressed, Asset, Broadcaster, Builder, Decimal, FeeEstimator, Future, Network,
+    Networked, TransactionError,
 };
 
 /// One address with its key, its chain's builders and its broadcaster, all
@@ -87,6 +87,12 @@ pub trait Factory: Send + Sync {
     /// `Unsupported` for an asset this network's wallets do not send.
     fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError>;
 
+    /// Whether one payment of `asset` may carry `units`, a whole number of
+    /// its atomic units: the chain's own bound (an amount field's width, a
+    /// supply cap), past which its builder or its nodes refuse the payment.
+    /// A caller refuses a larger amount before queueing a send.
+    fn carries(&self, asset: &Asset, units: &Decimal) -> bool;
+
     /// The network's fee estimator: the one instance every builder this
     /// factory (and its wallets) makes prices its transactions with.
     fn fees(&self) -> Arc<dyn FeeEstimator>;
@@ -113,6 +119,10 @@ impl<F: Factory + ?Sized> Factory for Box<F> {
 
     fn transaction(&self, asset: &Asset) -> Result<Box<dyn Builder>, TransactionError> {
         (**self).transaction(asset)
+    }
+
+    fn carries(&self, asset: &Asset, units: &Decimal) -> bool {
+        (**self).carries(asset, units)
     }
 
     fn fees(&self) -> Arc<dyn FeeEstimator> {

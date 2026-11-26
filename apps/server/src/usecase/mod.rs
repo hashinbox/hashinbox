@@ -36,7 +36,10 @@ pub(crate) mod users;
 pub(crate) mod wallets;
 pub(crate) mod workers;
 
-pub(crate) use networks::Networks;
+pub(crate) use networks::{Chains, Networks};
+pub(crate) use nodes::Open;
+#[cfg(test)]
+pub(crate) use nodes::http;
 pub(crate) use transport::{NO_ENABLED_ENDPOINT, Served, Transport};
 
 /// `network` as events name it: `chain/name`.

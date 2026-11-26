@@ -89,6 +89,7 @@ impl App {
             logs: crate::usecase::logs::feed(),
             db: db.clone(),
             candles: Default::default(),
+            chains: Default::default(),
             root_exists: Default::default(),
         });
         let (container, queue, actions) = (&state.container, &state.queue, &state.actions);

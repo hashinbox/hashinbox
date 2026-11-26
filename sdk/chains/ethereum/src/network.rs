@@ -13,6 +13,25 @@ pub const ETH_DECIMALS: u32 = 18;
 /// The chain family name.
 pub const CHAIN_NAME: Chain = Chain::from_static("ethereum");
 
+/// An EVM chain family: the name its networks are stored under, and its
+/// native currency. Another EVM chain reuses this crate with its own.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Family {
+    /// The chain family name, such as `ethereum`.
+    pub chain: Chain,
+    /// The native currency's name.
+    pub name: &'static str,
+    /// The native currency's ticker.
+    pub ticker: &'static str,
+}
+
+/// Ethereum: `ethereum`, ether.
+pub const ETHEREUM: Family = Family {
+    chain: CHAIN_NAME,
+    name: ETH_NAME,
+    ticker: ETH_TICKER,
+};
+
 /// An EVM chain's numeric identity and stable application network name.
 ///
 /// The chain ID is checked against the node by
@@ -25,15 +44,24 @@ pub struct Network {
     pub chain_id: u64,
     /// Stable application name of the network, such as `mainnet` or `anvil`.
     pub slug: String,
+    /// The chain family it belongs to.
+    pub family: Family,
 }
 
 impl Network {
-    /// A network with `chain_id` named `slug`.
+    /// An Ethereum network with `chain_id` named `slug`.
     #[must_use]
     pub fn new(chain_id: u64, slug: impl Into<String>) -> Self {
+        Self::of(ETHEREUM, chain_id, slug)
+    }
+
+    /// A network of `family` with `chain_id` named `slug`.
+    #[must_use]
+    pub fn of(family: Family, chain_id: u64, slug: impl Into<String>) -> Self {
         Self {
             chain_id,
             slug: slug.into(),
+            family,
         }
     }
 
@@ -51,9 +79,9 @@ impl Network {
     }
 }
 
-/// The chain-neutral identity of this network: `(ethereum, slug)`.
+/// The chain-neutral identity of this network: `(family, slug)`.
 impl From<&Network> for base::Network {
     fn from(network: &Network) -> Self {
-        Self::new(CHAIN_NAME, network.slug.clone())
+        Self::new(network.family.chain.clone(), network.slug.clone())
     }
 }

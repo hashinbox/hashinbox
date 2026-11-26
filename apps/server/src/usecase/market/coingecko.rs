@@ -40,6 +40,8 @@ fn id(ticker: &str) -> Option<&'static str> {
         "BTC" => "bitcoin",
         "ETH" => "ethereum",
         "SOL" => "solana",
+        "BNB" => "binancecoin",
+        "TRX" => "tron",
         "USDT" => "tether",
         "USDC" => "usd-coin",
         "DAI" => "dai",

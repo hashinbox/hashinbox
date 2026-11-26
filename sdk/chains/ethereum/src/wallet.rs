@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError, WalletError,
-    WalletErrorKind,
+    Address, Addressed, Asset, Decimal, Future, Network, Networked, Signer, TransactionError,
+    WalletError, WalletErrorKind,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -85,6 +85,11 @@ impl base::WalletFactory for WalletFactory {
             })
         };
         Ok(builder(self.tokens.contract(asset)?))
+    }
+
+    /// Up to 2^256 − 1, ether and tokens alike: a `uint256`.
+    fn carries(&self, _asset: &Asset, units: &Decimal) -> bool {
+        units.to_atomic_be_bytes::<32>(0).is_ok()
     }
 
     fn fees(&self) -> Arc<dyn base::FeeEstimator> {

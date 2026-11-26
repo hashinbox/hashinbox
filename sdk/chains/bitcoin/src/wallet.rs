@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, InputStore, Network, Networked, Signer, TransactionError,
-    TransactionErrorKind, WalletError, WalletErrorKind,
+    Address, Addressed, Asset, Decimal, Future, InputStore, Network, Networked, Signer,
+    TransactionError, TransactionErrorKind, WalletError, WalletErrorKind,
 };
 use crypto::{Curve, SecretBytes};
 
@@ -85,6 +85,13 @@ impl base::WalletFactory for WalletFactory {
             state: None,
             fee: base::Fee::default(),
         }))
+    }
+
+    /// Up to 21 000 000 BTC in satoshis, all there will ever be.
+    fn carries(&self, _asset: &Asset, units: &Decimal) -> bool {
+        units
+            .to_atomic_u64(0)
+            .is_ok_and(|sats| sats <= bitcoin::Amount::MAX_MONEY.to_sat())
     }
 
     fn fees(&self) -> Arc<dyn base::FeeEstimator> {

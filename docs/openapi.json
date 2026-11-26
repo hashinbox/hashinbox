@@ -1127,6 +1127,93 @@
             ]
           }
         ]
+      },
+      "post": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Add a network",
+        "description": "Stores a network and its native currency in one write, checked by its chain as a start reads it, then registers it at once, with no node: add its nodes with `POST /v1/networks/{chain}/{network}/endpoints`, and it indexes from then on.",
+        "operationId": "create_network",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewNetwork"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Stored and registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfiguredNetwork"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed body, a name that is not a slug, an unknown chain, or a network its chain refuses",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The network exists already",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The network could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.networks.$write"
+            ]
+          }
+        ]
       }
     },
     "/v1/networks/endpoints": {
@@ -1854,6 +1941,105 @@
           },
           "503": {
             "description": "The nodes could not be stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": [
+              "com.hashinbox.endpoints.$write"
+            ]
+          }
+        ]
+      }
+    },
+    "/v1/networks/{chain}/{network}/endpoints/test": {
+      "post": {
+        "tags": [
+          "networks"
+        ],
+        "summary": "Test an RPC node against a network, without adding it",
+        "description": "Asks the node its chain and tip once, as adding it would, and answers them; nothing is stored. A node that fails, or serves another chain, is refused with why (its chain id said).",
+        "operationId": "test_network_endpoint",
+        "parameters": [
+          {
+            "name": "chain",
+            "in": "path",
+            "description": "Chain name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "network",
+            "in": "path",
+            "description": "Network name, as `GET /v1/networks` lists it.",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RpcNodeTest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The node serves this network",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RpcNodeInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed URL, or a node that fails or serves another chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or invalid bearer token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Missing scope",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Network is not configured",
             "content": {
               "application/json": {
                 "schema": {
@@ -7245,6 +7431,27 @@
         ],
         "description": "A mined leg with its transaction's txid and state (null for a reward or\nan adjustment) and its block's time: a row of [`db::find_page`]."
       },
+      "NativeAsset": {
+        "type": "object",
+        "description": "A new network's native currency.",
+        "required": [
+          "ticker",
+          "decimals"
+        ],
+        "properties": {
+          "decimals": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Fractional digits between the display unit and the atomic unit.",
+            "minimum": 0
+          },
+          "ticker": {
+            "type": "string",
+            "description": "Display symbol, such as `ETH`."
+          }
+        },
+        "additionalProperties": false
+      },
       "Network": {
         "type": "object",
         "description": "The chain and network a wallet, address, or transaction belongs to. It\nalways ships as one nested object, never as two sibling fields.",
@@ -7466,9 +7673,17 @@
         "type": "object",
         "description": "Every stored network.",
         "required": [
-          "networks"
+          "networks",
+          "chains"
         ],
         "properties": {
+          "chains": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every chain this server runs, which `POST /v1/networks` takes."
+          },
           "networks": {
             "type": "array",
             "items": {
@@ -7543,6 +7758,55 @@
             "description": "The transactions, with their legs."
           }
         }
+      },
+      "NewNetwork": {
+        "type": "object",
+        "description": "`POST /v1/networks` body.",
+        "required": [
+          "chain",
+          "network",
+          "testnet",
+          "block_time_ms",
+          "confirmations",
+          "native"
+        ],
+        "properties": {
+          "block_time_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The chain's block (slot) time, in milliseconds.",
+            "minimum": 0
+          },
+          "chain": {
+            "type": "string",
+            "description": "A chain of `GET /v1/networks`' `chains`."
+          },
+          "chain_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The chain's own id of the network, as its nodes report it: the EVM\nchain id, the Solana or Tron genesis hash; null or empty for\nBitcoin, which the name identifies."
+          },
+          "confirmations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Positions below the tip before a block counts as confirmed.",
+            "minimum": 0
+          },
+          "native": {
+            "$ref": "#/components/schemas/NativeAsset"
+          },
+          "network": {
+            "type": "string",
+            "description": "The network's name: 1 to 64 of `a-z`, `0-9` and `-` (`my-devnet`).\nBitcoin's names its network (`mainnet`, `testnet`, `signet`,\n`regtest`)."
+          },
+          "testnet": {
+            "type": "boolean",
+            "description": "Whether its coins are test coins."
+          }
+        },
+        "additionalProperties": false
       },
       "Recovery": {
         "type": "object",
@@ -7720,6 +7984,26 @@
           }
         }
       },
+      "RpcNodeInfo": {
+        "type": "object",
+        "description": "What a node reports about itself.",
+        "required": [
+          "chain_id",
+          "tip"
+        ],
+        "properties": {
+          "chain_id": {
+            "type": "string",
+            "description": "The chain it serves, as the network's `chain_id` writes it (EVM\nchain id, Solana or Tron genesis hash), or its name for Bitcoin: the\nnetwork's."
+          },
+          "tip": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its newest block (or slot).",
+            "minimum": 0
+          }
+        }
+      },
       "RpcNodeState": {
         "type": "string",
         "description": "Whether the transport uses a node.",
@@ -7759,6 +8043,20 @@
             "description": "Unix ms of the last; when the node was stored if none."
           }
         }
+      },
+      "RpcNodeTest": {
+        "type": "object",
+        "description": "`POST /v1/networks/{chain}/{network}/endpoints/test` body.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "The node's URL, written as `endpoints` writes one."
+          }
+        },
+        "additionalProperties": false
       },
       "RpcNodes": {
         "type": "object",

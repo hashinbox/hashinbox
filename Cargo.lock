@@ -1105,6 +1105,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "chain-bnb"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "anyhow",
+ "base",
+ "chain-ethereum",
+ "crypto",
+ "futures-executor",
+ "rpc",
+ "serde_json",
+]
+
+[[package]]
 name = "chain-ethereum"
 version = "0.1.0"
 dependencies = [
@@ -1150,6 +1166,25 @@ dependencies = [
  "solana-system-interface",
  "solana-transaction",
  "spl-memo-interface",
+]
+
+[[package]]
+name = "chain-tron"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "anyhow",
+ "base",
+ "chain-tron",
+ "crypto",
+ "futures-executor",
+ "k256",
+ "num-bigint",
+ "reqwest",
+ "rpc",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -2100,8 +2135,10 @@ dependencies = [
  "base64",
  "bitcoin",
  "chain-bitcoin",
+ "chain-bnb",
  "chain-ethereum",
  "chain-solana",
+ "chain-tron",
  "clap",
  "crypto",
  "diesel",

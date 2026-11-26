@@ -39,6 +39,8 @@ fn symbol(ticker: &str) -> Option<&'static str> {
         "BTC" => "BTCUSDT",
         "ETH" => "ETHUSDT",
         "SOL" => "SOLUSDT",
+        "BNB" => "BNBUSDT",
+        "TRX" => "TRXUSDT",
         _ => return None,
     })
 }

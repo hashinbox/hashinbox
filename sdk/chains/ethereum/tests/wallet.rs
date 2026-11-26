@@ -100,6 +100,21 @@ fn spends_to(sources: &[(base::Address, Asset)], to: &base::Address) -> base::Sp
 }
 
 #[test]
+fn a_payment_carries_up_to_a_uint256() {
+    let factory = factory(&Script::new([]));
+    let max = "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+    let over = "115792089237316195423570985008687907853269984665640564039457584007913129639936";
+    let token = Asset {
+        network: network(),
+        id: TOKEN.to_owned(),
+    };
+    for asset in [Asset::native(network()), token] {
+        assert!(factory.carries(&asset, &max.parse().unwrap()));
+        assert!(!factory.carries(&asset, &over.parse().unwrap()));
+    }
+}
+
+#[test]
 fn a_factory_restores_keys_and_parses_addresses() {
     let script = Script::new([]);
     let factory = factory(&script);

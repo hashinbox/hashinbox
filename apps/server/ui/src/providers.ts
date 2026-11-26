@@ -41,6 +41,7 @@ const ALIASES: Record<string, Record<string, string>> = {
   },
   ethereum: { mainnet: 'mainnet', sepolia: 'sepolia', hoodi: 'hoodi' },
   solana: { mainnet: 'mainnet', 'mainnet-beta': 'mainnet', devnet: 'devnet', testnet: 'testnet' },
+  tron: { mainnet: 'mainnet', nile: 'nile' },
 };
 
 /**

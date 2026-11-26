@@ -44,7 +44,7 @@ use base::{InfoClient, NetworkConfig, NodeInfo};
 use futures_util::future::join_all;
 use rpc::{Answer, Batch, BoxFuture, Error, ErrorKind, RawJson, Repetition, Request, Retry};
 
-use super::nodes::{Node, NodeFactory, Nodes, reader};
+use super::nodes::{Node, NodeFactory, Nodes, Open, reader};
 use crate::{
     db::Db,
     models::{Endpoint, Endpoints, Route},
@@ -85,21 +85,23 @@ struct Rotation {
 }
 
 impl Transport {
-    /// No nodes yet. `I` is used only to make each node's reader. `config`
-    /// gives the chain ID every node must serve and the block time the tips
-    /// are cached for; each stored node is turned off and counted in `db`.
-    pub(crate) fn new<I: InfoClient + 'static>(config: &NetworkConfig, db: Db) -> Self {
-        Self::with::<I>(config, Some(db))
+    /// No nodes yet. `I` is used only to make each node's reader, `open`
+    /// each node's transport. `config` gives the chain ID every node must
+    /// serve and the block time the tips are cached for; each stored node is
+    /// turned off and counted in `db`.
+    pub(crate) fn new<I: InfoClient + 'static>(config: &NetworkConfig, db: Db, open: Open) -> Self {
+        Self::with::<I>(config, Some(db), open)
     }
 
     /// [`Self::new`], its stored nodes neither turned off nor counted when
     /// `db` is `None`.
-    fn with<I: InfoClient + 'static>(config: &NetworkConfig, db: Option<Db>) -> Self {
+    fn with<I: InfoClient + 'static>(config: &NetworkConfig, db: Option<Db>, open: Open) -> Self {
         let network = &config.network;
         Self(Arc::new(Shared {
             table: RwLock::default(),
             factory: NodeFactory {
                 reader: reader::<I>,
+                open,
                 chain_id: config
                     .chain_id
                     .clone()
@@ -122,7 +124,7 @@ impl Transport {
         clients: Vec<Arc<dyn rpc::Client>>,
         db: Option<Db>,
     ) -> Self {
-        let transport = Self::with::<I>(config, db);
+        let transport = Self::with::<I>(config, db, super::nodes::http);
         let url = rpc::Endpoint::new("http://test.invalid/").parse();
         let url = url.expect("a test URL");
         let nodes = clients.into_iter().map(|client| {
@@ -147,11 +149,7 @@ impl Transport {
         let mut nodes = Vec::new();
         let mut ids = Vec::new();
         let mut failed = Vec::new();
-        let open = |endpoint: &Endpoint| -> anyhow::Result<Node> {
-            let url = endpoint.url.parse()?;
-            let http = Arc::new(rpc::Http::new(&url, endpoint.url.clone())?);
-            self.0.factory.build(http, &url, Some(endpoint.id))
-        };
+        let open = |endpoint: &Endpoint| self.0.factory.open(&endpoint.url, Some(endpoint.id));
         for endpoint in endpoints
             .iter()
             .filter(|endpoint| endpoint.disabled.is_none())
@@ -204,9 +202,7 @@ impl Transport {
         allow(dead_code, reason = "082: no route swaps one node yet")
     )]
     pub(crate) fn replace(&self, node: &Node, endpoint: &rpc::Endpoint) -> anyhow::Result<()> {
-        let url = endpoint.parse()?;
-        let http = Arc::new(rpc::Http::new(&url, endpoint.clone())?);
-        let fresh = Arc::new(self.0.factory.build(http, &url, node.endpoint_id)?);
+        let fresh = Arc::new(self.0.factory.open(endpoint, node.endpoint_id)?);
         let mut table = write(&self.0.table);
         let slot = table
             .nodes
@@ -226,9 +222,7 @@ impl Transport {
     ///
     /// An invalid endpoint, a node failure, or a node of another chain.
     pub(crate) async fn verify(&self, endpoint: &rpc::Endpoint) -> anyhow::Result<NodeInfo> {
-        let url = endpoint.parse()?;
-        let http = Arc::new(rpc::Http::new(&url, endpoint.clone())?);
-        let info = self.0.factory.build(http, &url, None)?.info().await?;
+        let info = self.0.factory.open(endpoint, None)?.info().await?;
         let expected = &self.0.factory.chain_id;
         ensure!(
             info.chain_id == *expected,

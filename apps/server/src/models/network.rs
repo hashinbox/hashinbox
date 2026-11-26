@@ -145,7 +145,9 @@ pub(crate) mod db {
     use diesel::{prelude::*, sqlite::Sqlite};
 
     use crate::models::{
-        Endpoint, EndpointFailure, EndpointStats, Json, schema::network_state, uint,
+        Endpoint, EndpointFailure, EndpointStats, Json, int, network_asset,
+        schema::{network as table, network_state},
+        uint,
     };
 
     /// One `network_state` row as the file holds it.
@@ -247,5 +249,43 @@ pub(crate) mod db {
             .first(connection)
             .optional()?;
         row.map(TryInto::try_into).transpose()
+    }
+
+    /// Keeps `network`'s row and its assets (its nodes, routes and index
+    /// are not written); `false`: its chain and name are stored already.
+    ///
+    /// # Errors
+    ///
+    /// A value above SQLite's range, or the write.
+    pub(crate) fn insert(
+        connection: &mut SqliteConnection,
+        network: &Network,
+    ) -> anyhow::Result<bool> {
+        let added = diesel::insert_into(table::table)
+            .values((
+                table::chain.eq(&network.chain),
+                table::name.eq(&network.network),
+                table::chain_id.eq(&network.chain_id),
+                table::testnet.eq(network.testnet),
+                table::enabled.eq(network.enabled),
+                table::block_time_ms.eq(int(network.block_time_ms)?),
+                table::confirmations.eq(int(network.confirmations)?),
+                table::max_depth.eq(network.max_depth.map(int).transpose()?),
+                table::explorer_address.eq(&network.explorer_address),
+                table::explorer_transaction.eq(&network.explorer_transaction),
+                table::settings.eq(network.settings.to_string()),
+            ))
+            .execute(connection);
+        match added {
+            Err(diesel::result::Error::DatabaseError(
+                diesel::result::DatabaseErrorKind::UniqueViolation,
+                _,
+            )) => return Ok(false),
+            added => added?,
+        };
+        for asset in &network.assets {
+            network_asset::db::insert(connection, &network.chain, &network.network, asset)?;
+        }
+        Ok(true)
     }
 }

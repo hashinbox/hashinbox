@@ -72,11 +72,22 @@ async fn main() -> Result<(), AnyError> {
     let container = Arc::new(Container::<usecase::Transport>::new(
         usecase::sdk::Stores::storage(db.clone(), candles.clone()),
     ));
+    // Every chain this server runs; `POST /v1/networks` registers a new
+    // network through the same.
+    let chains = Arc::new(
+        usecase::Chains::default()
+            .with::<chain_bitcoin::Info, chain_bitcoin::Factory>()
+            .with::<chain_bnb::Info, chain_bnb::Factory>()
+            .with::<chain_ethereum::Info, chain_ethereum::Factory>()
+            .with::<chain_solana::Info, chain_solana::Factory>()
+            // Tron's HTTP API is REST: its own transport.
+            .over::<chain_tron::Info, chain_tron::Factory>(|url, endpoint| {
+                Ok(Arc::new(chain_tron::Rest::new(url, endpoint)?))
+            }),
+    );
     usecase::Networks::new(db.clone())
         .await?
-        .register::<chain_bitcoin::Info, chain_bitcoin::Factory>(&container)
-        .register::<chain_ethereum::Info, chain_ethereum::Factory>(&container)
-        .register::<chain_solana::Info, chain_solana::Factory>(&container);
+        .register(&chains, &container);
     // Whether a user exists, once `--config` has seeded an empty file:
     // `/v1/version` says `missing_root` until one does.
     let root_exists = usecase::bootstrap::bootstrap(&db, config.bootstrap.as_deref()).await?;
@@ -87,6 +98,7 @@ async fn main() -> Result<(), AnyError> {
         db,
         logs,
         candles: candles.clone(),
+        chains,
         root_exists: root_exists.into(),
     });
 

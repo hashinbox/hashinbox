@@ -1,0 +1,38 @@
+[package]
+name = "chain-tron"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Tron for hashinbox: a block-by-block chain over the HTTP API, TRX and TRC-20 wallets, and a broadcaster."
+
+[features]
+default = []
+# The test fixtures (`chain_tron::testing`). Dev-dependencies only.
+testing = ["base/testing", "rpc/testing"]
+
+[dependencies]
+anyhow.workspace = true
+base = { path = "../../base" }
+crypto = { path = "../../../packages/crypto" }
+rpc = { path = "../../../packages/rpc" }
+# Keccak-256 (addresses, the `Transfer` topic), 256-bit amounts and hex.
+alloy-primitives.workspace = true
+num-bigint.workspace = true
+# The HTTP API's REST calls (`Rest`).
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+# This crate on itself: turns `testing` on for its own tests.
+chain-tron = { path = ".", features = ["testing"] }
+futures-executor.workspace = true
+# Recovers a signature's signer in tests; production signing is `crypto`'s.
+k256.workspace = true
+# The scripted node double (`rpc::testing`): tests only.
+rpc = { path = "../../../packages/rpc", features = ["testing"] }
+# A loopback node for `Rest`'s tests.
+tokio = { workspace = true, features = ["io-util", "net", "rt"] }
+
+[lints]
+workspace = true

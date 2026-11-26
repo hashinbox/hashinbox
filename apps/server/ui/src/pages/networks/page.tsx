@@ -65,6 +65,7 @@ function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boo
 /** The networks beside the one whose RPC nodes are shown. */
 export function Networks({ shell }: { shell: Shell }) {
   const [networks, setNetworks] = useState<ConfiguredNetwork[]>([]);
+  const [chains, setChains] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
   // networks/{chain}/{network}[/settings | /mempool | /blocks/{position}]
   const [, chain, network, page, position] = useSegments();
@@ -73,7 +74,10 @@ export function Networks({ shell }: { shell: Shell }) {
 
   const refresh = useCallback(() => {
     call(client.GET('/v1/networks'))
-      .then((list) => setNetworks(list.networks))
+      .then((list) => {
+        setNetworks(list.networks);
+        setChains(list.chains);
+      })
       .catch(shell.fail);
   }, [shell.fail]);
 
@@ -95,7 +99,7 @@ export function Networks({ shell }: { shell: Shell }) {
           <Side
             title="Networks"
             actions={
-              <Tooltip title="Add a provider to every network">
+              <Tooltip title="Add nodes: a provider's, or your own">
                 <IconButton
                   size="small"
                   aria-label="Add RPC nodes"
@@ -177,6 +181,7 @@ export function Networks({ shell }: { shell: Shell }) {
       <AddNodes
         shell={shell}
         networks={networks}
+        chains={chains}
         open={adding}
         onClose={() => setAdding(false)}
         onAdded={(changed) => {
@@ -186,6 +191,7 @@ export function Networks({ shell }: { shell: Shell }) {
           );
           refresh();
         }}
+        onCreated={refresh}
       />
     </>
   );

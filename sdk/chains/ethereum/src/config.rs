@@ -12,7 +12,7 @@ use base::{
 use serde::Deserialize;
 
 use crate::{
-    CHAIN_NAME, Chain, Client, ETH_DECIMALS, ETH_NAME, ETH_TICKER, FeeLimits, Network, Tokens,
+    CHAIN_NAME, Chain, Client, ETH_DECIMALS, ETHEREUM, Family, FeeLimits, Network, Tokens,
     WalletFactory, fee_estimator::Estimator, fee_rate::RateProvider,
 };
 
@@ -20,6 +20,8 @@ use crate::{
 /// [`Config::new`] or from a [`base::NetworkConfig`].
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// The chain family of the network: Ethereum's or another EVM chain's.
+    pub family: Family,
     /// The stable application name of the network, such as `mainnet`.
     pub network: String,
     /// The EIP-155 chain ID the node is checked against.
@@ -104,6 +106,7 @@ impl Config {
     pub fn new(network: Network) -> Self {
         let settings = Settings::default();
         Self {
+            family: network.family,
             network: network.slug,
             chain_id: network.chain_id,
             tokens: Vec::new(),
@@ -120,7 +123,7 @@ impl Config {
     /// The configured network.
     #[must_use]
     pub fn native(&self) -> Network {
-        Network::new(self.chain_id, self.network.as_str())
+        Network::of(self.family.clone(), self.chain_id, self.network.as_str())
     }
 
     /// Rejects the value on its own, without I/O.
@@ -139,15 +142,16 @@ impl Config {
         self.limits.validate()
     }
 
-    /// Ether and every allowlisted token, in its configured decimals.
+    /// The native currency and every allowlisted token, in its configured
+    /// decimals.
     #[must_use]
     pub fn assets(&self) -> Assets {
         let network = base::Network::from(&self.native());
         let ether = AssetInfo {
             asset: Asset::native(network.clone()),
             decimals: ETH_DECIMALS,
-            name: Some(ETH_NAME.to_owned()),
-            ticker: Some(ETH_TICKER.to_owned()),
+            name: Some(self.family.name.to_owned()),
+            ticker: Some(self.family.ticker.to_owned()),
             display_decimals: self.display_decimals,
         };
         let tokens = self.tokens.iter().map(|token| {
@@ -189,9 +193,20 @@ fn contract(text: &str) -> anyhow::Result<alloy_primitives::Address> {
 impl TryFrom<&NetworkConfig> for Config {
     type Error = anyhow::Error;
 
-    /// Its chain ID, assets and limits, and its knobs from
-    /// `settings`.
+    /// An Ethereum network's [`Config::stored`].
     fn try_from(config: &NetworkConfig) -> anyhow::Result<Self> {
+        Self::stored(config, ETHEREUM)
+    }
+}
+
+impl Config {
+    /// A stored network of `family`: its chain ID, assets and limits, and
+    /// its knobs from `settings`.
+    ///
+    /// # Errors
+    ///
+    /// Settings that do not decode, or a network of another chain.
+    pub fn stored(config: &NetworkConfig, family: Family) -> anyhow::Result<Self> {
         let settings = Settings::deserialize(&config.settings).context("Ethereum settings")?;
         let chain_id = config
             .chain_id
@@ -217,6 +232,7 @@ impl TryFrom<&NetworkConfig> for Config {
             });
         }
         let built = Self {
+            family,
             network: config.network.name.clone(),
             chain_id: chain_id.parse().context("Ethereum chain_id")?,
             tokens,

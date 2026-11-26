@@ -98,6 +98,20 @@ fn spends_to(sources: &[(base::Address, Asset)], to: &base::Address) -> base::Sp
 }
 
 #[test]
+fn a_payment_carries_up_to_a_u64() {
+    let factory =
+        Factory::from(config()).wallets(&client(Script::default()), Arc::new(base::NoHoldings));
+    let token = Asset {
+        network: network(),
+        id: MINT.to_owned(),
+    };
+    for asset in [Asset::native(network()), token] {
+        assert!(factory.carries(&asset, &u64::MAX.into()));
+        assert!(!factory.carries(&asset, &"18446744073709551616".parse().unwrap()));
+    }
+}
+
+#[test]
 fn a_wallet_keeps_its_ed25519_key_and_parses_canonical_addresses() {
     let script = Script::default();
     let wallet = wallet(&script);

@@ -254,7 +254,11 @@ export interface paths {
          */
         get: operations["list_networks"];
         put?: never;
-        post?: never;
+        /**
+         * Add a network
+         * @description Stores a network and its native currency in one write, checked by its chain as a start reads it, then registers it at once, with no node: add its nodes with `POST /v1/networks/{chain}/{network}/endpoints`, and it indexes from then on.
+         */
+        post: operations["create_network"];
         delete?: never;
         options?: never;
         head?: never;
@@ -357,6 +361,26 @@ export interface paths {
          * @description Appends the nodes after the network's current ones, stores the list, then sends every later call of the network to it.
          */
         post: operations["add_network_endpoints"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/networks/{chain}/{network}/endpoints/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test an RPC node against a network, without adding it
+         * @description Asks the node its chain and tip once, as adding it would, and answers them; nothing is stored. A node that fails, or serves another chain, is refused with why (its chain id said).
+         */
+        post: operations["test_network_endpoint"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1742,6 +1766,16 @@ export interface components {
             timestamp: number | null;
             txid?: string | null;
         };
+        /** @description A new network's native currency. */
+        NativeAsset: {
+            /**
+             * Format: int32
+             * @description Fractional digits between the display unit and the atomic unit.
+             */
+            decimals: number;
+            /** @description Display symbol, such as `ETH`. */
+            ticker: string;
+        };
         /**
          * @description The chain and network a wallet, address, or transaction belongs to. It
          *     always ships as one nested object, never as two sibling fields.
@@ -1852,6 +1886,8 @@ export interface components {
         };
         /** @description Every stored network. */
         NetworkList: {
+            /** @description Every chain this server runs, which `POST /v1/networks` takes. */
+            chains: string[];
             /** @description Networks in chain, then name, order. */
             networks: components["schemas"]["ConfiguredNetwork"][];
         };
@@ -1877,6 +1913,36 @@ export interface components {
             next_cursor: string | null;
             /** @description The transactions, with their legs. */
             transactions: components["schemas"]["Transaction"][];
+        };
+        /** @description `POST /v1/networks` body. */
+        NewNetwork: {
+            /**
+             * Format: int64
+             * @description The chain's block (slot) time, in milliseconds.
+             */
+            block_time_ms: number;
+            /** @description A chain of `GET /v1/networks`' `chains`. */
+            chain: string;
+            /**
+             * @description The chain's own id of the network, as its nodes report it: the EVM
+             *     chain id, the Solana or Tron genesis hash; null or empty for
+             *     Bitcoin, which the name identifies.
+             */
+            chain_id?: string | null;
+            /**
+             * Format: int64
+             * @description Positions below the tip before a block counts as confirmed.
+             */
+            confirmations: number;
+            native: components["schemas"]["NativeAsset"];
+            /**
+             * @description The network's name: 1 to 64 of `a-z`, `0-9` and `-` (`my-devnet`).
+             *     Bitcoin's names its network (`mainnet`, `testnet`, `signet`,
+             *     `regtest`).
+             */
+            network: string;
+            /** @description Whether its coins are test coins. */
+            testnet: boolean;
         };
         /** @description `GET /v1/recovery`: whether a passphrase is set, never its words. */
         Recovery: {
@@ -1966,6 +2032,20 @@ export interface components {
              */
             next_cursor: string | null;
         };
+        /** @description What a node reports about itself. */
+        RpcNodeInfo: {
+            /**
+             * @description The chain it serves, as the network's `chain_id` writes it (EVM
+             *     chain id, Solana or Tron genesis hash), or its name for Bitcoin: the
+             *     network's.
+             */
+            chain_id: string;
+            /**
+             * Format: int64
+             * @description Its newest block (or slot).
+             */
+            tip: number;
+        };
         /**
          * @description Whether the transport uses a node.
          * @enum {string}
@@ -1993,6 +2073,11 @@ export interface components {
              * @description Unix ms of the last; when the node was stored if none.
              */
             updated_at: number;
+        };
+        /** @description `POST /v1/networks/{chain}/{network}/endpoints/test` body. */
+        RpcNodeTest: {
+            /** @description The node's URL, written as `endpoints` writes one. */
+            url: string;
         };
         /** @description `POST` and `PUT /v1/networks/{chain}/{network}/endpoints` body. */
         RpcNodes: {
@@ -3465,6 +3550,75 @@ export interface operations {
             };
         };
     };
+    create_network: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewNetwork"];
+            };
+        };
+        responses: {
+            /** @description Stored and registered */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConfiguredNetwork"];
+                };
+            };
+            /** @description Malformed body, a name that is not a slug, an unknown chain, or a network its chain refuses */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The network exists already */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description The network could not be stored */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
     add_endpoints: {
         parameters: {
             query?: never;
@@ -3949,6 +4103,71 @@ export interface operations {
             };
             /** @description The nodes could not be stored */
             503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    test_network_endpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Chain name, as `GET /v1/networks` lists it. */
+                chain: string;
+                /** @description Network name, as `GET /v1/networks` lists it. */
+                network: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RpcNodeTest"];
+            };
+        };
+        responses: {
+            /** @description The node serves this network */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RpcNodeInfo"];
+                };
+            };
+            /** @description Malformed URL, or a node that fails or serves another chain */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing or invalid bearer token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Missing scope */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description Network is not configured */
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

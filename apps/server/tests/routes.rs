@@ -113,6 +113,7 @@ async fn wallets_balance_legs_and_sends() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -252,8 +253,9 @@ async fn wallets_balance_legs_and_sends() {
     let list = json!({ "transfers": [{ "destination": "bob", "amount": "0.1" }] });
     let (status, _) = call(&router, Method::POST, &from, Some(list)).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    // A sign, or more than all bitcoin: refused before any job.
-    for amount in ["+0.1", "21000000.00000001"] {
+    // A sign, or more than the chain carries (the scripted one: `u64::MAX`
+    // atomic units): refused before any job.
+    for amount in ["+0.1", "184467440737.09551616"] {
         let body = json!({ "destination": "bob", "amount": amount });
         let (status, body) = call(&router, Method::POST, &from, Some(body)).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{amount}: {body}");
@@ -397,6 +399,7 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -525,6 +528,7 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -636,6 +640,7 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -861,6 +866,7 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -916,6 +922,7 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -954,6 +961,7 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -1049,6 +1057,7 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -1174,6 +1183,7 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -1232,6 +1242,7 @@ async fn app(
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: crate::usecase::logs::feed(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -1494,7 +1505,11 @@ async fn a_node_of_another_chain_is_disabled_by_the_probe() {
     let stored = networks.iter().find(|n| n.key() == network()).unwrap();
     let mut config = base::NetworkConfig::from(stored);
     config.chain_id = Some("elsewhere".to_owned());
-    let transport = crate::usecase::Transport::new::<base::testing::Unasked>(&config, db.clone());
+    let transport = crate::usecase::Transport::new::<base::testing::Unasked>(
+        &config,
+        db.clone(),
+        crate::usecase::http,
+    );
     transport.load(&stored.endpoints, &[]).unwrap();
     let failed = transport.request(rpc::Request::new("m", json!([]))).await;
     assert!(failed.is_err(), "its only node, off");
@@ -2224,6 +2239,7 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: feed.clone(),
         candles: Default::default(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -2359,6 +2375,7 @@ async fn markets_list_set_read_candles_and_log() {
         actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
         logs: feed.clone(),
         candles: candles.clone(),
+        chains: Default::default(),
         root_exists: Default::default(),
     });
     let config = http_server::Config::new(
@@ -2450,11 +2467,127 @@ async fn markets_list_set_read_candles_and_log() {
     )
     .await;
     assert_eq!(answered[0]["level"], "debug");
-    assert_eq!(answered[0]["fields"]["assets"], "5", "every seeded ticker");
+    assert_eq!(answered[0]["fields"]["assets"], "7", "every seeded ticker");
     let (_, all) = call(&router, Method::GET, "/v1/logs?market=kraken", None).await;
     let all = all["logs"].as_array().unwrap();
     assert!(
         all.iter().all(|entry| entry["market"] == "kraken"),
         "{all:?}"
     );
+}
+
+/// An Ethereum node on loopback serving chain id `chain_id` at tip 16.
+async fn evm_node(chain_id: &'static str) -> String {
+    replying(match chain_id {
+        "0x539" => |call| {
+            let result = if call["method"] == "eth_chainId" {
+                "0x539"
+            } else {
+                "0x10"
+            };
+            (
+                200,
+                json!({"jsonrpc": "2.0", "id": call["id"], "result": result}),
+            )
+        },
+        _ => |call| {
+            let result = if call["method"] == "eth_chainId" {
+                "0x1"
+            } else {
+                "0x10"
+            };
+            (
+                200,
+                json!({"jsonrpc": "2.0", "id": call["id"], "result": result}),
+            )
+        },
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_network_is_created_live_its_node_tested_and_added() {
+    let (_, db, _directory) = seeded().await;
+    let state = Arc::new(AppState {
+        container: container(&db, Arc::new(Script::default())),
+        db: db.clone(),
+        queue: crate::usecase::tasks::queue(db.clone()),
+        actions: Arc::new(crate::usecase::workers::trigger::actions::registry()),
+        logs: crate::usecase::logs::feed(),
+        candles: Default::default(),
+        chains: Arc::new(
+            crate::usecase::Chains::default()
+                .with::<chain_ethereum::Info, chain_ethereum::Factory>(),
+        ),
+        root_exists: Default::default(),
+    });
+    let config = http_server::Config::new(
+        "127.0.0.1:0".parse().expect("an address"),
+        http_server::TransportSecurity::PlaintextLoopback,
+        None,
+        http_server::RequestLimits::default(),
+    );
+    let router = as_root(api::router(state, &config).expect("a router")).await;
+    let new = |chain: &str, name: &str, chain_id: Value| {
+        json!({
+            "chain": chain, "network": name, "chain_id": chain_id, "testnet": true,
+            "block_time_ms": 2000, "confirmations": 1,
+            "native": {"ticker": "ETH", "decimals": 18},
+        })
+    };
+
+    let body = new("ethereum", "my-devnet", json!("1337"));
+    let (status, created) = call(&router, Method::POST, "/v1/networks", Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["chain_id"], "1337");
+    assert_eq!(created["assets"][0]["ticker"], "ETH");
+    assert_eq!(created["endpoints"], json!([]));
+    let (_, listed) = call(&router, Method::GET, "/v1/networks", None).await;
+    assert_eq!(listed["chains"], json!(["ethereum"]));
+    let names: Vec<&Value> = listed["networks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| &n["network"])
+        .collect();
+    assert!(names.contains(&&json!("my-devnet")), "{listed}");
+
+    // Registered without a restart: its node is tested, then added.
+    let endpoints = "/v1/networks/ethereum/my-devnet/endpoints";
+    let url = evm_node("0x539").await;
+    let test = format!("{endpoints}/test");
+    let (status, told) = call(&router, Method::POST, &test, Some(json!({ "url": url }))).await;
+    assert_eq!(status, StatusCode::OK, "{told}");
+    assert_eq!(told, json!({"chain_id": "1337", "tip": 16}));
+    let other = evm_node("0x1").await;
+    let (status, refused) = call(&router, Method::POST, &test, Some(json!({ "url": other }))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["message"].as_str().unwrap().contains("serves 1"),
+        "{refused}"
+    );
+    let (_, unknown) = call(&router, Method::GET, endpoints, None).await;
+    assert_eq!(unknown["endpoints"], json!([]), "a test stores nothing");
+    let add = json!({ "endpoints": [url] });
+    let (status, added) = call(&router, Method::POST, endpoints, Some(add)).await;
+    assert_eq!(status, StatusCode::OK, "{added}");
+    assert_eq!(added["endpoints"].as_array().unwrap().len(), 1);
+
+    let again = new("ethereum", "my-devnet", json!("1337"));
+    let (status, body) = call(&router, Method::POST, "/v1/networks", Some(again)).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["kind"], "already_exists", "{body}");
+    for (refused, why) in [
+        (new("dogecoin", "mainnet", Value::Null), "unknown chain"),
+        (new("ethereum", "no-id", Value::Null), "chain_id"),
+        (new("ethereum", "Bad Name", json!("1")), "network name"),
+    ] {
+        let (status, body) = call(&router, Method::POST, "/v1/networks", Some(refused)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(body["kind"], "invalid_argument", "{body}");
+        assert!(
+            body["message"].as_str().unwrap().contains(why),
+            "{why}: {body}"
+        );
+    }
 }

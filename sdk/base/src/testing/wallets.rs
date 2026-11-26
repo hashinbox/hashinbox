@@ -117,6 +117,11 @@ impl WalletFactory for Keys {
         Err(TransactionError::failed("Keys build through their wallets"))
     }
 
+    /// Up to `u64::MAX` atomic units, as most chains.
+    fn carries(&self, _asset: &Asset, units: &Decimal) -> bool {
+        units.to_atomic_u64(0).is_ok()
+    }
+
     fn fees(&self) -> Arc<dyn FeeEstimator> {
         unimplemented!("Keys price no sends")
     }

@@ -24,8 +24,10 @@ axum = "0.8"
 base = { path = "../../sdk/base" }
 crypto = { path = "../../packages/crypto" }
 chain-bitcoin = { path = "../../sdk/chains/bitcoin" }
+chain-bnb = { path = "../../sdk/chains/bnb" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
+chain-tron = { path = "../../sdk/chains/tron" }
 # The stream of `GET .../tip/search` (axum's SSE takes a `Stream`); the market feeds asked at once (`join_all`).
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex.workspace = true

@@ -37,6 +37,7 @@ pub(super) fn routes() -> OpenApiRouter<Arc<AppState>> {
     OpenApiRouter::new()
         .routes(routes!(list, add, replace))
         .routes(routes!(add_many))
+        .routes(routes!(test))
         .routes(routes!(remove))
         .routes(routes!(set_state))
         .routes(routes!(list_failures))
@@ -179,6 +180,63 @@ async fn replace(
     let nodes =
         networks::replace_endpoints(container, db, &state.queue, &network, request.nodes()).await?;
     Ok(Json(nodes.into()))
+}
+
+/// `POST /v1/networks/{chain}/{network}/endpoints/test` body.
+#[derive(Clone, Deserialize, utoipa::ToSchema)]
+#[schema(as = RpcNodeTest)]
+#[serde(deny_unknown_fields)]
+struct TestRequest {
+    /// The node's URL, written as `endpoints` writes one.
+    url: String,
+}
+
+/// What a node reports about itself.
+#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
+#[schema(as = RpcNodeInfo)]
+struct TestResponse {
+    /// The chain it serves, as the network's `chain_id` writes it (EVM
+    /// chain id, Solana or Tron genesis hash), or its name for Bitcoin: the
+    /// network's.
+    chain_id: String,
+    /// Its newest block (or slot).
+    tip: u64,
+}
+
+#[scope::utoipa(
+    post,
+    path = "/v1/networks/{chain}/{network}/endpoints/test",
+    operation_id = "test_network_endpoint",
+    summary = "Test an RPC node against a network, without adding it",
+    description = "Asks the node its chain and tip once, as adding it would, and answers \
+        them; nothing is stored. A node that fails, or serves another chain, is refused \
+        with why (its chain id said).",
+    params(NetworkPath),
+    request_body = TestRequest,
+    responses(
+        (status = 200, description = "The node serves this network", body = TestResponse),
+        (status = 400, description = "Malformed URL, or a node that fails or serves another \
+            chain", body = Error),
+        (status = 401, description = "Missing or invalid bearer token", body = Error),
+        (status = 403, description = "Missing scope", body = Error),
+        (status = 404, description = "Network is not configured", body = Error)
+    ),
+    tag = "networks"
+)]
+async fn test(
+    caller: Caller,
+    State(state): State<Arc<AppState>>,
+    Path(path): Path<NetworkPath>,
+    request: Result<Json<TestRequest>, JsonRejection>,
+) -> Result<Json<TestResponse>, Error> {
+    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    let Json(request) = request?;
+    let endpoint = rpc::Endpoint::new(request.url);
+    let info = networks::test_endpoint(&state.container, &path.network(), &endpoint).await?;
+    Ok(Json(TestResponse {
+        chain_id: info.chain_id,
+        tip: info.tip,
+    }))
 }
 
 /// One node to add, and its network.

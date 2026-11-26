@@ -2,7 +2,13 @@ import Box from '@mui/material/Box';
 import { useState } from 'react';
 
 /** Each chain's short name in icon file names. */
-const SHORT: Record<string, string> = { bitcoin: 'btc', ethereum: 'eth', solana: 'sol' };
+const SHORT: Record<string, string> = {
+  bitcoin: 'btc',
+  bnb: 'bnb',
+  ethereum: 'eth',
+  solana: 'sol',
+  tron: 'trx',
+};
 
 /**
  * A network asset by its chain and ticker: its icon, served at

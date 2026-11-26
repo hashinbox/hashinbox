@@ -114,6 +114,36 @@ pub(crate) mod db {
         rows.into_iter().map(decoded).collect()
     }
 
+    /// Keeps `asset` of network `chain`/`network`.
+    ///
+    /// # Errors
+    ///
+    /// The write.
+    pub(crate) fn insert(
+        connection: &mut SqliteConnection,
+        chain: &str,
+        network: &str,
+        asset: &NetworkAsset,
+    ) -> anyhow::Result<()> {
+        let kind = match asset.kind {
+            NetworkAssetKind::Native => "native",
+            NetworkAssetKind::Contract => "contract",
+        };
+        diesel::insert_into(network_asset::table)
+            .values((
+                network_asset::chain.eq(chain),
+                network_asset::network.eq(network),
+                network_asset::asset.eq(&asset.asset),
+                network_asset::kind.eq(kind),
+                network_asset::contract.eq(&asset.contract),
+                network_asset::ticker.eq(&asset.ticker),
+                network_asset::decimals.eq(i64::from(asset.decimals)),
+                network_asset::display_decimals.eq(asset.display_decimals.map(i64::from)),
+            ))
+            .execute(connection)?;
+        Ok(())
+    }
+
     /// `row` decoded.
     fn decoded(row: Row) -> anyhow::Result<NetworkAsset> {
         Ok(NetworkAsset {

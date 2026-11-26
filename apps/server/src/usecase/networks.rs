@@ -1,6 +1,7 @@
 //! Networks and their nodes. [`Networks`]: every stored network with its
 //! nodes and routes, read in one go; registered into the container once at
-//! start, and loaded into a network's transport after every edit. Then what
+//! start by its chain ([`Chains`]), a created one at once, and loaded into a
+//! network's transport after every edit. Then what
 //! is asked of them: every network with its live tip; a network's nodes and
 //! routes, and changing them (each new node asked first, the change stored,
 //! then in use); its kept blocks and transactions; and the search for its
@@ -8,12 +9,12 @@
 
 use std::collections::BTreeMap;
 
-use base::{Container, InfoClient, NetworkConfig, ServiceFactory};
+use base::{Container, InfoClient, NetworkConfig, NodeInfo, ServiceFactory};
 use tasks::Worker;
 use tokio::sync::mpsc;
 
 use super::{
-    Served as _, Transport, now,
+    Open, Served as _, Transport, now,
     tasks::Queue,
     workers::index::{Index, Target},
 };
@@ -48,24 +49,14 @@ impl Networks {
         Ok(Self { networks, db })
     }
 
-    /// Every indexed network of `F::CHAIN`: a transport read by `I`
-    /// (`Transport::new::<I>`), its stored nodes turned off and counted in
-    /// the database read, loaded with its nodes and routes, registered with
-    /// `F`. Main only, once per chain.
-    pub(crate) fn register<I: InfoClient + 'static, F: ServiceFactory>(
-        &self,
-        container: &Container<Transport>,
-    ) -> &Self {
-        let indexed = self.networks.iter().filter(|network| network.enabled);
-        for network in indexed.filter(|network| network.key().chain == F::CHAIN) {
-            let config = NetworkConfig::from(network);
-            let transport = Transport::new::<I>(&config, self.db.clone());
-            // Every stored URL was checked when stored; one that no longer
-            // builds is left out, and the API shows it without state.
-            let _ = transport.load(&network.endpoints, &network.routes);
-            container.register::<F>(config, transport);
+    /// Every indexed network of a chain in `chains`, registered by it
+    /// ([`Chains`]); one of another chain is left out. Main only, once.
+    pub(crate) fn register(&self, chains: &Chains, container: &Container<Transport>) {
+        for network in self.networks.iter().filter(|network| network.enabled) {
+            if let Some(mount) = chains.mount(&network.chain) {
+                (mount.register)(container, network, self.db.clone(), mount.open);
+            }
         }
-        self
     }
 
     /// `network`'s stored nodes and routes into its transport
@@ -85,6 +76,138 @@ impl Networks {
         };
         transport.load(&stored.endpoints, &stored.routes)
     }
+}
+
+/// Every chain the server runs, by name: how a network of it is checked and
+/// registered, without naming its types (main names them, once).
+#[derive(Default)]
+pub(crate) struct Chains(Vec<Mount>);
+
+/// One chain of [`Chains`].
+struct Mount {
+    chain: base::Chain,
+    /// Its config read as the chain reads it (`F::new`), asking no node.
+    check: fn(&NetworkConfig) -> anyhow::Result<()>,
+    /// A transport read by its `I` (`Transport::new::<I>`), its stored
+    /// nodes turned off and counted in the database, loaded with its nodes
+    /// and routes, registered with its `F`.
+    register: fn(&Container<Transport>, &Network, Db, Open),
+    /// Each node's transport.
+    open: Open,
+}
+
+impl Chains {
+    /// `F::CHAIN` added: its nodes JSON-RPC over HTTP, read by `I`, its
+    /// networks built by `F`.
+    #[must_use]
+    pub(crate) fn with<I: InfoClient + 'static, F: ServiceFactory>(self) -> Self {
+        self.over::<I, F>(super::nodes::http)
+    }
+
+    /// [`Self::with`], each node's transport `open`'s.
+    #[must_use]
+    pub(crate) fn over<I: InfoClient + 'static, F: ServiceFactory>(mut self, open: Open) -> Self {
+        self.0.push(Mount {
+            chain: F::CHAIN,
+            check: check::<F>,
+            register: register::<I, F>,
+            open,
+        });
+        self
+    }
+
+    /// The chains' names, in the order added.
+    pub(crate) fn names(&self) -> Vec<String> {
+        self.0.iter().map(|mount| mount.chain.to_string()).collect()
+    }
+
+    /// The chain named `chain`; none: not run here.
+    fn mount(&self, chain: &str) -> Option<&Mount> {
+        self.0.iter().find(|mount| mount.chain.as_str() == chain)
+    }
+}
+
+/// `config` read by `F`.
+fn check<F: ServiceFactory>(config: &NetworkConfig) -> anyhow::Result<()> {
+    F::new(config).map(drop)
+}
+
+/// `network` registered into `container`, as [`Mount::register`] says.
+fn register<I: InfoClient + 'static, F: ServiceFactory>(
+    container: &Container<Transport>,
+    network: &Network,
+    db: Db,
+    open: Open,
+) {
+    let config = NetworkConfig::from(network);
+    let transport = Transport::new::<I>(&config, db, open);
+    // Every stored URL was checked when stored; one that no longer
+    // builds is left out, and the API shows it without state.
+    let _ = transport.load(&network.endpoints, &network.routes);
+    container.register::<F>(config, transport);
+}
+
+/// Stores `network` (its row and assets, no node yet) and registers it as
+/// a start does, in use at once: its nodes are added by the endpoint
+/// routes. Answers it as stored.
+///
+/// # Errors
+///
+/// Invalid for a network name that is not a slug, a chain not run here or
+/// a network its chain refuses (no chain id, wrong decimals, ...); already
+/// exists for a stored chain and name; the store.
+pub(crate) async fn create(
+    container: &Container<Transport>,
+    db: &Db,
+    chains: &Chains,
+    network: Network,
+) -> Result<Network, Error> {
+    let slug = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
+    let name = &network.network;
+    if name.is_empty() || name.len() > 64 || !name.chars().all(slug) || name.starts_with('-') {
+        return Err(Error::invalid_argument(
+            "a network name is 1 to 64 of a-z, 0-9 and -, not starting with -",
+        ));
+    }
+    let Some(mount) = chains.mount(&network.chain) else {
+        let known = chains.names().join(", ");
+        return Err(Error::invalid_argument(format!(
+            "unknown chain {}; this server runs {known}",
+            network.chain
+        )));
+    };
+    (mount.check)(&NetworkConfig::from(&network))
+        .map_err(|error| Error::invalid_argument(format!("{error:#}")))?;
+    let kept = network.clone();
+    if !db
+        .write(move |connection| network::db::insert(connection, &kept))
+        .await?
+    {
+        return Err(Error::already_exists("the network exists already"));
+    }
+    let key = network.key();
+    let stored = stored_network(db, &key).await?.unwrap_or(network);
+    (mount.register)(container, &stored, db.clone(), mount.open);
+    Ok(stored)
+}
+
+/// What the node at `endpoint` reports (its chain id and tip), asked once
+/// through `network`'s reader; nothing is stored.
+///
+/// # Errors
+///
+/// Not found for an unconfigured network; invalid for a malformed URL, a
+/// node that fails or one serving another chain (its chain id said).
+pub(crate) async fn test_endpoint(
+    container: &Container<Transport>,
+    network: &base::Network,
+    endpoint: &rpc::Endpoint,
+) -> Result<NodeInfo, Error> {
+    let transport = container.transport(network)?;
+    transport
+        .verify(endpoint)
+        .await
+        .map_err(|error| Error::invalid_argument(format!("{error:#}")))
 }
 
 /// A network's nodes as stored, in failover order, each with its state.

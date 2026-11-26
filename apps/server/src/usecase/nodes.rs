@@ -36,6 +36,19 @@ const RECOVERY: Duration = Duration::from_secs(30);
 /// The longest a node's tip may take: a slower node is not one to pick.
 const PROBE: Duration = Duration::from_secs(3);
 
+/// A chain's transport of one node, under its stack ([`NodeFactory::build`]):
+/// [`http`], or the chain's own (Tron's REST).
+pub(crate) type Open = fn(&rpc::Url, rpc::Endpoint) -> Result<Arc<dyn rpc::Client>, rpc::Error>;
+
+/// JSON-RPC over HTTP ([`rpc::Http`]): every chain's but those that bring
+/// their own.
+pub(crate) fn http(
+    url: &rpc::Url,
+    endpoint: rpc::Endpoint,
+) -> Result<Arc<dyn rpc::Client>, rpc::Error> {
+    Ok(Arc::new(rpc::Http::new(url, endpoint)?))
+}
+
 /// A chain's reader of one node.
 pub(super) type Reader = fn(Arc<dyn rpc::Client>) -> Arc<dyn InfoClient>;
 
@@ -48,6 +61,8 @@ pub(super) fn reader<I: InfoClient + 'static>(node: Arc<dyn rpc::Client>) -> Arc
 pub(super) struct NodeFactory {
     /// The chain's reader of one node.
     pub(super) reader: Reader,
+    /// The chain's transport of one node.
+    pub(super) open: Open,
     /// What every node must serve: the network's chain ID, or its name.
     pub(super) chain_id: String,
     /// How long a tip is kept.
@@ -60,6 +75,17 @@ pub(super) struct NodeFactory {
 }
 
 impl NodeFactory {
+    /// The node at `endpoint` over the chain's transport, stored as
+    /// `endpoint_id`; asks it nothing.
+    pub(super) fn open(
+        &self,
+        endpoint: &rpc::Endpoint,
+        endpoint_id: Option<i64>,
+    ) -> anyhow::Result<Node> {
+        let url = endpoint.parse()?;
+        self.build((self.open)(&url, endpoint.clone())?, &url, endpoint_id)
+    }
+
     /// The node of this network around `inner` (its HTTP client, or a
     /// test's), stored as `endpoint_id` (`None`: not stored); asks it nothing.
     pub(super) fn build(

@@ -36,6 +36,8 @@ fn pair(ticker: &str) -> Option<&'static str> {
         "BTC" => "XXBTZUSD",
         "ETH" => "XETHZUSD",
         "SOL" => "SOLUSD",
+        "BNB" => "BNBUSD",
+        "TRX" => "TRXUSD",
         "USDT" => "USDTZUSD",
         "USDC" => "USDCUSD",
         "DAI" => "DAIUSD",

@@ -124,7 +124,17 @@
       "bitcoin/mainnet": "https://bitcoin-rpc.publicnode.com",
       "ethereum/mainnet": "https://ethereum-rpc.publicnode.com",
       "ethereum/sepolia": "https://ethereum-sepolia-rpc.publicnode.com",
-      "solana/mainnet": "https://solana-rpc.publicnode.com"
+      "solana/mainnet": "https://solana-rpc.publicnode.com",
+      "tron/mainnet": "https://tron-rpc.publicnode.com"
+    }
+  },
+  {
+    "name": "TronGrid",
+    "docs": "https://developers.tron.network/reference/select-network",
+    "auth": { "in": "header", "name": "TRON-PRO-API-KEY" },
+    "networks": {
+      "tron/mainnet": "https://api.trongrid.io",
+      "tron/nile": "https://nile.trongrid.io"
     }
   },
   {

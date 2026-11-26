@@ -26,7 +26,7 @@ pub use config::{Config, Factory, Token};
 pub type Tokens = base::Tokens<alloy_primitives::Address>;
 pub use fee::FeeLimits;
 pub use key::KeyPair;
-pub use network::{CHAIN_NAME, ETH_DECIMALS, ETH_NAME, ETH_TICKER, Network};
+pub use network::{CHAIN_NAME, ETH_DECIMALS, ETH_NAME, ETH_TICKER, ETHEREUM, Family, Network};
 pub use rpc::Client;
 pub use rpc_info::Info;
 pub use transaction::Transaction;

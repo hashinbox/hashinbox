@@ -1,0 +1,25 @@
+[package]
+name = "chain-bnb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "BNB Smart Chain for hashinbox: chain-ethereum's EVM machinery under the `bnb` chain, BNB and BEP-20 wallets."
+
+[dependencies]
+anyhow.workspace = true
+base = { path = "../../base" }
+chain-ethereum = { path = "../ethereum" }
+rpc = { path = "../../../packages/rpc" }
+serde_json.workspace = true
+
+[dev-dependencies]
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-primitives.workspace = true
+crypto = { path = "../../../packages/crypto" }
+futures-executor.workspace = true
+# The scripted node double (`rpc::testing`): tests only.
+rpc = { path = "../../../packages/rpc", features = ["testing"] }
+
+[lints]
+workspace = true

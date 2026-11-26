@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use base::{
-    Address, Addressed, Asset, Future, Network, Networked, Signer, TransactionError, WalletError,
-    WalletErrorKind,
+    Address, Addressed, Asset, Decimal, Future, Network, Networked, Signer, TransactionError,
+    WalletError, WalletErrorKind,
 };
 use crypto::{Curve, Ed25519, PrivateKey as _, SecretBytes};
 
@@ -83,6 +83,12 @@ impl base::WalletFactory for WalletFactory {
             ticker: None,
             display_decimals: None,
         })))
+    }
+
+    /// Up to `u64::MAX`, SOL and tokens alike: lamports and SPL amounts are
+    /// a `u64`.
+    fn carries(&self, _asset: &Asset, units: &Decimal) -> bool {
+        units.to_atomic_u64(0).is_ok()
     }
 
     fn fees(&self) -> Arc<dyn base::FeeEstimator> {

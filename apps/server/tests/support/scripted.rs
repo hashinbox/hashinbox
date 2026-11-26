@@ -235,6 +235,10 @@ impl base::WalletFactory for Priced {
         self.0.transaction(asset)
     }
 
+    fn carries(&self, asset: &Asset, units: &base::Decimal) -> bool {
+        self.0.carries(asset, units)
+    }
+
     fn fees(&self) -> Arc<dyn base::FeeEstimator> {
         Arc::new(base::testing::Fees::new(
             network(),
