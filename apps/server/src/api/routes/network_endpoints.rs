@@ -85,7 +85,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    scope::require!(session, "com.hashinbox.endpoints.$read");
+    scope::require!(session, "com.hashinbox.networks.endpoints:read");
     let nodes = networks::endpoints(&state.container, &state.db, &path.network()).await?;
     Ok(Json(nodes.into()))
 }
@@ -137,7 +137,7 @@ async fn add(
     Path(path): Path<NetworkPath>,
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let Json(request) = request?;
     let (container, db, network) = (&state.container, &state.db, path.network());
     let nodes =
@@ -174,7 +174,7 @@ async fn replace(
     Path(path): Path<NetworkPath>,
     request: Result<Json<NodesRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let Json(request) = request?;
     let (container, db, network) = (&state.container, &state.db, path.network());
     let nodes =
@@ -229,7 +229,7 @@ async fn test(
     Path(path): Path<NetworkPath>,
     request: Result<Json<TestRequest>, JsonRejection>,
 ) -> Result<Json<TestResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let Json(request) = request?;
     let endpoint = rpc::Endpoint::new(request.url);
     let info = networks::test_endpoint(&state.container, &path.network(), &endpoint).await?;
@@ -306,7 +306,7 @@ async fn add_many(
     State(state): State<Arc<AppState>>,
     request: Result<Json<AddManyRequest>, JsonRejection>,
 ) -> Result<Json<AddManyResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let Json(request) = request?;
     let changed =
         networks::add_endpoints_each(&state.container, &state.db, &state.queue, request.nodes()?);
@@ -348,7 +348,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NodePath>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     let nodes =
         networks::remove_endpoint(&state.container, &state.db, &state.queue, &network, path.id);
@@ -407,7 +407,7 @@ async fn set_state(
     Path(path): Path<NodePath>,
     request: Result<Json<StateRequest>, JsonRejection>,
 ) -> Result<Json<EndpointsResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.endpoints");
     let Json(request) = request?;
     let network = base::Network::new(base::Chain::new(path.chain), path.network);
     let (container, db) = (&state.container, &state.db);
@@ -464,7 +464,7 @@ async fn list_failures(
     Path(path): Path<NodePath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<FailuresResponse>, Error> {
-    scope::require!(session, "com.hashinbox.endpoints.$read");
+    scope::require!(session, "com.hashinbox.networks.endpoints:read");
     let Query(index) = index?;
     let page = index.page("failures", |cursor| cursor.parse().ok())?;
     let limit = page.limit;

@@ -12,7 +12,6 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type ReactNode } from 'react';
 import type { Wallet } from '@hashinbox/client';
-import type { Shell } from '@/layout';
 import { assetName, networkChoices } from '@/money';
 import { mono } from '@/theme';
 import { NetworkSelect } from '@/_components/network-select';
@@ -31,9 +30,9 @@ import {
   type Compare,
   type Definition,
 } from './forms';
+import { useApp } from '@/store/app';
 
 interface Props {
-  shell: Shell;
   wallets: Wallet[];
   /** Every tag in use, offered when choosing wallets. */
   tags: string[];
@@ -64,12 +63,13 @@ const COMPARE: Compare = {
  * Any trigger, step by step: basics, target, filter, check and action, each
  * a full form of what the server takes, summed up in a line when closed.
  */
-export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }: Props) {
+export function TriggerForm({ wallets, tags, value: def, onChange, kept }: Props) {
+  const listings = useApp((s) => s.listings);
   const [active, setActive] = useState(kept ? -1 : 0);
-  const assets = shell.listings
+  const assets = listings
     .filter((l) => l.network.chain === def.chain && l.network.name === def.network)
     .map((l) => l.asset);
-  const name = (asset: string) => assetName(shell.listings, def.chain, def.network, asset);
+  const name = (asset: string) => assetName(listings, def.chain, def.network, asset);
   const choices: Choices = {
     self: SELF.one,
     chain: def.chain,
@@ -116,7 +116,7 @@ export function TriggerForm({ shell, wallets, tags, value: def, onChange, kept }
           )}
           <NetworkSelect
             value={`${def.chain}/${def.network}`}
-            networks={networkChoices(shell.listings)}
+            networks={networkChoices(listings)}
             onChange={(value) => {
               const [chain = '', network = ''] = value.split('/');
               update({ chain, network });

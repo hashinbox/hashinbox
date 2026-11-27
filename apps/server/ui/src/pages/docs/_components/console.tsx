@@ -4,7 +4,7 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { address, exchange, type Exchange } from '@/api/client';
+import { ApiError, address, exchange, type Exchange } from '@/api/client';
 import { Copy } from '@/_components/copy';
 import { mono } from '@/theme';
 import { example, type Document, type Endpoint } from './spec';
@@ -99,7 +99,7 @@ export function Console({ document, endpoint, secured, onNotify }: Props) {
     exchange(endpoint.method, path, body)
       .then(setAnswer)
       .catch((error: unknown) => {
-        onNotify(error instanceof Error ? error.message : String(error), true);
+        onNotify(ApiError.from(error).message, true);
       })
       .finally(() => setBusy(false));
   };

@@ -18,7 +18,8 @@ final readonly class Session
      * @param string $token The JWT, sent as `Authorization: Bearer …`.
      * @param string $issuer `iss` (= the header's `kid`): `user/{id}`, or a key's `hip/…`.
      * @param ?string $subject `sub`: a user's id, or who a key's session is for.
-     * @param Scopes $scopes What it may do, unpacked.
+     * @param Scopes $scopes What it may do: its claim unpacked and expanded
+     *        with `DEPENDS`, as `GET /v1/session` answers and the server checks.
      * @param int $issuedAt `iat`, Unix seconds.
      * @param int $expiresAt `exp`, Unix seconds.
      * @param list<Amr> $amr How its login proved who it is; empty for a key's.
@@ -69,7 +70,7 @@ final readonly class Session
             token: $token,
             issuer: $issuer,
             subject: is_string($subject) ? $subject : null,
-            scopes: Scopes::parse($scopes),
+            scopes: Scopes::parse($scopes)->expand(DEPENDS),
             issuedAt: $iat,
             expiresAt: $exp,
             amr: array_values(array_map(static fn(mixed $method): Amr => Amr::from(Json::string($method)), $amr)),

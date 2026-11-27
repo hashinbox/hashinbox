@@ -7,7 +7,7 @@ files of `apps/server/clients/`). Open questions are at the end.
 
 - Third parties call the hashinbox API by hand, or run a generic generator over
   `docs/openapi.json`. No generator understands our `security`:
-  `"bearer": ["com.hashinbox.wallets[{id}].$read"]` is a scope **template**, filled from the
+  `"bearer": ["com.hashinbox.wallets[{id}]:read"]` is a scope **template**, filled from the
   request, and checked with `packages/scope`'s coverage rules.
 - A client wants to know, before it calls, which scopes a call needs (to sign a narrow key
   session, 096) and whether its session holds them (to hide a button, to fail fast).
@@ -96,8 +96,8 @@ pub struct Param { pub name: String, pub ty: Type, pub path: bool, pub required:
   are hoisted into models named after where they were (`PetOwner`, `ReadHealthResponse`);
   `allOf` of objects is flattened; a schema that is only an alias (`String`) is inlined;
   `oneOf [null, X]` and `type: [T, "null"]` are `Optional(X)`. Generators need no lookups.
-- `error` is the model most error bodies are (`Error`); an `ApiError` decodes it and keeps the
-  body's text, so another body (`read_health`'s 503 `Report`) is not lost.
+- `error` is the model most error bodies are (`Error`); `ApiError.from` decodes it, and keeps
+  another body's text (`read_health`'s 503 `Report`) as `metadata.response`.
 - Order: models by name, operations by tag then id. Two runs give the same bytes.
 
 ### Operation ids and the name-clash rule
@@ -199,8 +199,29 @@ starting point the clients grow from:
 
 - The transport prefixes its base URL and adds the credential; generated code never sees a
   header or a host.
-- **Errors:** a non-2xx answer is `ApiError { status, text, body }`: the body as sent, and decoded
-  when it is the API's error model (`Error`). A transport failure is its own error.
+- **Errors:** one `ApiError` for any failure: a plain typed value of `kind`, `message`,
+  `reason?`, `metadata`, `status`; its constructor takes those fields and parses nothing
+  (defaults: `kind` `unavailable`, `status` 0, `metadata` empty). `from(x)` (Python `of`) is the
+  one way to make one of anything, and every client path (send, stream open and reconnect,
+  login, a key's scope read) goes through it:
+  1. an `ApiError`: as is;
+  2. an answer the client got (its status and read body): JSON in the error shape (`Error`: a
+     known `kind`, a `message`) is that error with its status; anything else (an HTML 502, an
+     empty body, other JSON, an unknown kind) is `unavailable`, message `could not parse the
+     response (HTTP <status>)`, its status, `metadata.response` its first 1024 characters;
+  3. an error thrown (network, timeout, abort, …): `unavailable`, status 0, its message, the
+     original as its cause;
+  4. anything else: `unavailable`, as a string.
+
+  A call the session's scopes do not cover is refused locally, unsent, as the server's own
+  refusal, built with the constructor: status 403, `permission_denied`, reason `missing_scope`,
+  message `<operation> needs scope <scope>`, metadata `{scope, operation}`. One error type for
+  local and server refusals. `Reason` names the server's reasons
+  (`wrong_credentials`, `totp_required`, `session_expired`, `missing_scope`):
+  TS `ApiError.from(e).reason === Reason.TotpRequired`; Go `APIErrorFrom(err).Reason ==
+  ReasonTOTPRequired`; Rust `ApiError::from(e).reason.as_deref() == Some(reason::TOTP_REQUIRED)`;
+  Python `ApiError.of(e).reason == Reason.TOTP_REQUIRED`; PHP `ApiError::from($e)->reason ===
+  Reason::TotpRequired`.
 - **Cancellation:** TS `AbortSignal`, Go `context.Context`, Rust dropping the future.
 
 ### Rust: `apps/server/clients/rust`
@@ -216,7 +237,7 @@ the trait, the models, the operations, `Session` and `Secret` still compile.
 | `Session` | `{ token, issuer, subject, scopes, issued_at, expires_at, amr }`; `Session::parse(jwt)` (decoded, **not verified**: HS256, `kid` = `iss`); `expired()`; `can(&OPERATION, &[("id", "…")])`; implements `client::Session` |
 | `Secret` | `Secret::parse("hip/…", "his/…")` (base 58, CRC32 checked); `secret.issue(Issue::new().scope("…")?.subject("…").ttl(d))`: HS256, the `his/…` text the key, header `{typ, alg, kid}` and claims `{iss, sub?, iat, exp, scopes}` in the server's order (byte-identical to its `jsonwebtoken`); TTL 10 min unless set, 1 s to 24 h |
 | `Client` | `Client::builder(url).session(s).secret(s).scopes(s).ttl(d).http(reqwest::Client).timeout(d).check_scopes(bool).build()`; implements `client::Client` and `client::Streamer`; `login(email, password, totp)`, `logout(all)`, `session()`, `stream(&request)` → `Events<T, http::Error>` |
-| Errors | `Error::Api { status, kind, message, reason, metadata }` (a body that is not the API's error: `kind: Unknown("")`, the text as `message`); `Error::MissingScope { operation, scope }`, unsent; `Error::Decode`; `Error::Transport(http::Error)`; `error.reason()` (`totp_required`, `wrong_credentials`, …) |
+| Errors | `ApiError { status, kind, message, reason, metadata, cause }` (`..ApiError::default()`: `Unavailable`, status 0); `ApiError::from(response)` (`From<Response>`) and `ApiError::from(error)` (`From<Error<T>>`: `Api` as is, any other with `cause`); `Error::Api(ApiError)` (an answer, or a missing scope, unsent); `Error::Decode`; `Error::Transport(http::Error)`; `error.reason()`; `reason::{WRONG_CREDENTIALS, TOTP_REQUIRED, SESSION_EXPIRED, MISSING_SCOPE}` |
 
 - **A session is always a JWT; a secret never goes over the wire.** With `.secret(..)` the client
   signs its own sessions and sends them as the bearer; there is no `Bearer his/…` path. It keeps
@@ -228,8 +249,8 @@ the trait, the models, the operations, `Session` and `Secret` still compile.
 - **Clock:** the server takes `iat` at most 60 s ahead of its clock, at most 24 h of life, and
   refuses an `exp` in its past. A signer whose clock is more than 60 s fast, or slower than the TTL,
   is refused: keep it on NTP.
-- `check_scopes` (on by default): a call the kept session lacks a scope for fails as
-  `MissingScope`, unsent (the trait's `missing(scopes)`; `None` when it cannot tell, before a
+- `check_scopes` (on by default): a call the kept session lacks a scope for fails as the
+  server's 403 `missing_scope` `Error::Api`, unsent (the trait's `missing(scopes)`; `None` when it cannot tell, before a
   key's first session).
 - `stream()`: a minimal SSE reader (`event`, multi-line `data`, `id`; comments skipped) behind
   the reconnecting handle `Events` ([Streams](#streams-the-15-s-window-and-the-handle)):
@@ -237,7 +258,7 @@ the trait, the models, the operations, `Session` and `Secret` still compile.
   `cursor`, `Streamer::sleep` waits the backoff.
 - Tests (`cargo test --offline` in the folder): the `_golden/` scope and session cases (the
   signing byte-identical, a server-made token parsed), the client against a loopback server
-  (path, query, body, bearer, error mapping, `MissingScope`, signing and re-signing, login,
+  (path, query, body, bearer, error mapping, a local missing scope, signing and re-signing, login,
   SSE), a live smoke test when `HASHINBOX_URL` is set; `examples/backend.rs` creates a wallet
   with a secret and issues a 15-minute browser token.
 
@@ -254,7 +275,7 @@ generated operations take the `Client` interface, so the default transport is `*
 | `Session` | `{Token, Issuer, Subject, Scopes, IssuedAt, ExpiresAt, Amr}`; `ParseSession(jwt)` (decoded, **not verified**); `.Expired(now)`; `.Can(op, params)` |
 | `Secret` | `ParseSecret("hip/…", "his/…")` (base 58, CRC32 checked); `secret.Issue(WithScopes(s), WithSubject(sub), WithTTL(d))`: HS256, the `his/…` text the key, header `{typ, alg, kid}` and claims `{iss, sub?, iat, exp, scopes}` in the server's order, no HTML escaping (byte-identical to its `jsonwebtoken`); TTL 10 min unless set, 1 s to `MaxTTL` (24 h); `String()` prints the id only |
 | `HTTPClient` | `NewClient(baseURL, WithSession(s) \| WithSecret(s), WithSecretScopes(s), WithSessionTTL(d), WithHTTPClient(c), WithTimeout(d), WithUserAgent(ua), WithoutScopeCheck())`; `Do` (`Client`), `Open` (`Streamer`); `Login(ctx, LoginRequest{Email, Password \| Passphrase, TOTP})`, `Logout(ctx, all)`, `Session()` |
-| Errors | `*APIError{Status, Kind, Message, Reason, Metadata, Raw}`; `errors.Is` with `ErrMissingScope`, `ErrTOTPRequired`, `ErrWrongCredentials`, `ErrSessionExpired` matches its `Reason`; a local missing scope is `ErrMissingScope` wrapped (operation and scope), unsent |
+| Errors | `*APIError{Status, Kind, Message, Reason, Metadata, Cause}`, a struct literal; `APIErrorFrom(x any)` (never nil; the `*APIError` an error wraps, as is); `ReasonWrongCredentials`, `ReasonTOTPRequired`, `ReasonSessionExpired`, `ReasonMissingScope`; `errors.Is` with `ErrMissingScope`, `ErrTOTPRequired`, `ErrWrongCredentials`, `ErrSessionExpired` matches its `Reason`; a local missing scope is the server's 403 `*APIError`, unsent |
 
 - **A session is always a JWT; a secret never goes over the wire.** `WithSecret` makes the
   client sign its own sessions (`secret.Issue`) and send them; there is no `Bearer his/…` path.
@@ -277,7 +298,7 @@ generated operations take the `Client` interface, so the default transport is `*
   `WithStreamBackoff(first, most)`. The first connect is in `Open`, its error returned there.
 - Tests (`go test ./...` in the folder): every `_golden/scope.json` case; `_golden/session.json`
   signed byte for byte and a user token parsed; `HTTPClient` against `httptest` (path, query,
-  body, bearer, error mapping, local `ErrMissingScope`, signing, caching, re-signing, retry,
+  body, bearer, error mapping, a local missing scope, signing, caching, re-signing, retry,
   login, logout, SSE cancelled by ctx); a live smoke test when `HASHINBOX_URL` is set (and
   `HASHINBOX_KEY_ID`, `HASHINBOX_SECRET` for a key). `examples/backend/main.go` creates a
   wallet with a key and issues a 15-minute token that reads only it.
@@ -298,7 +319,7 @@ var walletGet = Operation{
 	ID:        "wallet_get",
 	Method:    "GET",
 	Path:      "/v1/wallets/{id}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$read"},
+	Templates: []string{"com.hashinbox.wallets[{id}]:read"},
 }
 
 // WalletGetRequest is WalletGet's input: its path and query parameters, and its body.
@@ -338,7 +359,7 @@ export const walletGetOperation: Operation = {
   id: "wallet_get",
   method: "GET",
   path: "/v1/wallets/{id}",
-  templates: ["com.hashinbox.wallets[{id}].$read"],
+  templates: ["com.hashinbox.wallets[{id}]:read"],
 };
 
 /** The input of `walletGet`. */
@@ -371,7 +392,7 @@ pub const WALLET_GET: Operation = Operation {
     id: "wallet_get",
     method: Method::Get,
     path: "/v1/wallets/{id}",
-    templates: &["com.hashinbox.wallets[{id}].$read"],
+    templates: &["com.hashinbox.wallets[{id}]:read"],
 };
 
 /// The input of [`wallet_get`].
@@ -426,7 +447,7 @@ WALLET_GET = Operation(
     id="wallet_get",
     method="GET",
     path="/v1/wallets/{id}",
-    templates=("com.hashinbox.wallets[{id}].$read",),
+    templates=("com.hashinbox.wallets[{id}]:read",),
 )
 
 
@@ -490,7 +511,7 @@ const WALLET_GET = new Operation(
     id: 'wallet_get',
     method: 'GET',
     path: '/v1/wallets/{id}',
-    templates: ['com.hashinbox.wallets[{id}].$read'],
+    templates: ['com.hashinbox.wallets[{id}]:read'],
 );
 
 /**
@@ -588,18 +609,25 @@ function walletGet(Client $client, WalletGetRequest $request): Wallet
 - Generated: `can(session, params) = Auth::Any(reqs).any(|r| r.scopes(params).all(session.covers))`.
   `Auth::None` → `true`; `bearer: []` → `session` present.
 - `Session.covers(scope)` is hand-written per language: a port of `Scope::parse`,
-  `Scope::covers`, `Scopes::unpack`, `pack`, `compress` and `escape` (about 150 lines each).
-  Rust uses `packages/scope` itself, no port.
+  `Scope::covers`, `Scopes::unpack`, `pack`, `compress`, `expand` and `escape` (about 150 lines
+  each). Rust uses `packages/scope` itself, no port.
+- **Dependencies:** the document's top-level `x-hashinbox-depends` (source → targets, design
+  096) is read by cligen into `Spec::depends` and generated as `DEPENDS` (Go: `Depends`) in
+  each operations file. `Session.parse` expands its scopes with it, as the server's middleware
+  does, so `can()` answers what the server will.
 - **Conformance vectors** keep the ports honest: a test in `packages/scope`
   (`cargo test -p scope vectors`, `BLESS=1` to rewrite) writes
   `apps/server/clients/_golden/scope.json` from the crate's own answers:
 
 ```json
-{ "parse":   [{ "text": "com.hashinbox.wallets[a,b%5D%20c%25d].$*", "ok": true }],
-  "refuse":  ["", "$read", "wallets[].$read", "wallets[%zz].$read"],
-  "covers":  [{ "ours": "a.*.$read", "theirs": "a.wallets[x].legs.$read", "covers": true }],
-  "pack":    [{ "scopes": ["a.wallets[x].$read", "a.markets.$read"],
-                "packed": { "a": ["markets.$read", "wallets[x].$read"] } }],
+{ "parse":   [{ "text": "com.hashinbox.wallets[a,b%5D%20c%25d]", "display": "…" }],
+  "refuse":  ["", ":read", "wallets:write", "wallets[]", "wallets[%zz]"],
+  "covers":  [{ "ours": "a.wallets[x]", "theirs": "a.wallets[x].tags:read", "covers": true }],
+  "sets":    [{ "scopes": "a.wallets[x]:read a.markets:read", "compressed": "…",
+                "packed": { "a": ["markets:read", "wallets[x]:read"] } }],
+  "first_uncovered": [{ "granted": "…", "asked": "…", "first_uncovered": "…" }],
+  "expand":  { "depends": { "a.triggers": ["a.wallets"] },
+               "cases": [{ "scopes": "a.triggers:read", "expanded": "a.triggers:read a.wallets:read" }] },
   "escape":  [{ "id": "a,b] c%d", "text": "a,b%5D%20c%25d" }] }
 ```
 
@@ -615,7 +643,7 @@ A **Session is always a JWT**; a key's secret never goes over the wire.
 
 | | Does | Scopes from |
 |---|---|---|
-| `Session.parse(jwt)` | holds a JWT someone issued (a login, or a token your backend signed); sent as `Bearer <jwt>` | the JWT's `scopes` claim, unpacked; **not verified** (the client cannot; the server does) |
+| `Session.parse(jwt)` | holds a JWT someone issued (a login, or a token your backend signed); sent as `Bearer <jwt>` | the JWT's `scopes` claim, unpacked and expanded with `DEPENDS`; **not verified** (the client cannot; the server does) |
 | `Secret.issue({scopes?, subject?, ttl?})` | signs an HS256 JWT (096) with the `his/…` text and answers a `Session` | the scopes it signed |
 | the client with a `secret` | signs its own sessions (10 min default), caches them, re-signs within 60 s of expiry or once after `session_expired`; never sends `his/…` | the scopes passed, else the key's own (read once with `GET /v1/session` on a scopeless signed session) |
 
@@ -661,12 +689,13 @@ One universal package: browser and Node ≥ 20, ESM, web standards only (`fetch`
   on a 401 `session_expired` (a second one surfaces). The machine's clock must be roughly right:
   the server takes an `iat` at most 60 s ahead and at most 24 h of life.
 - `send()` fills the path (URI-encoded), the query and the JSON body, adds `Bearer <jwt>`, and
-  joins the caller's `AbortSignal` with `timeout`. A non-2xx answer is `ApiError { status,
-  kind, message, reason, metadata, text, body }`.
+  joins the caller's `AbortSignal` with `timeout`. A non-2xx answer is an `ApiError { status,
+  kind, message, reason, metadata }` (`new ApiError({ kind?, message, reason?, metadata?,
+  status? })`); `ApiError.from(x)` makes one of anything, and `Reason` names the reasons.
 - A 401 calls `onUnauthorized(error)` when a session was sent and its reason is not wrong input
   (`wrong_credentials`, `totp_required`: the 2FA forms' and the login's).
-- `checkScopes`: a call the session's scopes do not cover throws `MissingScope { operation,
-  scope }` before it is sent; an op with no templates is never checked.
+- `checkScopes`: a call the session's scopes do not cover throws the server's 403
+  `missing_scope` `ApiError` before it is sent; an op with no templates is never checked.
 - `login({ email, password | passphrase, totp? })` posts `session_create` with no
   `Authorization`, keeps the session and calls `onSession`; its errors keep their `reason`
   (`totp_required`: ask the code; `wrong_credentials`).
@@ -692,14 +721,15 @@ and the generated files.
 | `scope.py` | `Scope.parse`, `.covers`, `str()`; `Scopes.parse(text \| packed)`, `.covers(scope \| text)`, `.first_uncovered`, `.compress`, `.pack`; `Segment`, `ScopeError`, `escape_id`, `fill(template, params, escape=escape_id)`. A port of `packages/scope`: its grammar (`%+5` too), `%XX` escapes, Rust's `Ord` and `split_whitespace` |
 | `session.py` | `Session.parse(jwt)` (decoded, not verified), a frozen dataclass: `token`, `issuer`, `subject`, `scopes`, `issued_at`, `expires_at` (Unix s), `amr`; `.expired(now=None)`, `.can(operation, params)` |
 | `secret.py` | `Secret.parse(id, value)` checks `his/…`'s base-58 CRC32 (`zlib.crc32`); `secret.issue(scopes=None, subject=None, ttl=600, issued_at=None)`: HS256 with `hmac`/`hashlib`, the claims as serde writes them, byte for byte; its `repr` hides the secret |
-| `client.py` | `Client(base_url, *, session=None, secret=None, scopes=None, ttl=600, http=None, timeout=30.0, check_scopes=True)`, `async with`; `send`, `open`, `stream`, `login(email, password=None, passphrase=None, totp=None)`, `logout(all=False)`, `session` get/set; `ApiError(status, kind, message, reason, metadata)` (+ `text`, `body`), `MissingScope(operation, scope)` |
+| `client.py` | `Client(base_url, *, session=None, secret=None, scopes=None, ttl=600, http=None, timeout=30.0, check_scopes=True)`, `async with`; `send`, `open`, `stream`, `login(email, password=None, passphrase=None, totp=None)`, `logout(all=False)`, `session` get/set; `ApiError(message, *, kind=UNAVAILABLE, reason=None, metadata=None, status=0)`, `ApiError.of(x)` (anything as one, an `httpx.Response` parsed; `from` is reserved), `Reason` |
 
 - **A session is always a JWT; a secret is never sent.** With `secret=`, the client signs its
   own sessions (`scopes`, else the key's own, read once from `GET /v1/session` with a scopeless
   session), keeps one, signs anew within 60 s of its `exp` and once after a 401
   `session_expired`. The machine's clock must be within 60 s of the server's.
 - `send()` fills the path (each parameter URL-escaped), the query and the JSON body, adds
-  `Bearer <jwt>`, and decodes the 2xx JSON; `check_scopes` raises `MissingScope` before sending.
+  `Bearer <jwt>`, and decodes the 2xx JSON; `check_scopes` raises the server's 403
+  `missing_scope` `ApiError` before sending.
 - `stream()` yields `Event(event, data, id)`, the data decoded from JSON; `open()` (the
   generated ops' `Streamer`) yields `RawEvent`s. Both return the reconnecting handle
   `Stream[T]` ([Streams](#streams-the-15-s-window-and-the-handle)): `async for` it; `await
@@ -720,7 +750,7 @@ and the generated files.
 PHP 8.2+, `declare(strict_types=1)`, PHPStan level max clean; runtime needs only `ext-curl`,
 `ext-json`, `ext-hash`. Composer package `hashinbox/client`, PSR-4 `Hashinbox\` → `src/`, the
 generated files through `"files"`. Hand-written, one class per file: `Scope`, `Segment`,
-`ScopeError`, `Scopes`, `Session`, `Secret`, `Client`, `ApiError`, `MissingScope`, `Operation`,
+`ScopeError`, `Scopes`, `Session`, `Secret`, `Client`, `ApiError`, `Operation`,
 `Request`, `Json`, `Event`, `RawEvent`, and the internal `Transport`, `Reply`, `CurlTransport`.
 
 | Piece | API |
@@ -729,7 +759,7 @@ generated files through `"files"`. Hand-written, one class per file: `Scope`, `S
 | `Session` | `Session::parse($jwt)` (decoded, not verified), a readonly class: `token`, `issuer`, `subject`, `scopes`, `issuedAt`, `expiresAt` (Unix s), `amr` (`list<Amr>`); `->expired(?int $now)`, `->can(Operation, array $params)` |
 | `Secret` | `Secret::parse($id, $value)` checks `his/…`'s base-58 CRC32 (`hash('crc32b')`); `->issue(?Scopes $scopes = null, ?string $subject = null, int $ttl = 600, ?int $issuedAt = null)`: HS256 with `hash_hmac`, the `his/…` text the key, header and claims in the server's byte order (`json_encode` unescaped slashes and Unicode, as serde writes them); `print_r`/`var_dump` show the id only |
 | `Client` | `new Client(string $baseUrl, ?Session $session = null, ?Secret $secret = null, ?Scopes $scopes = null, int $ttl = 600, float $timeout = 30.0, bool $checkScopes = true, float $backoff = 0.5, float $backoffMax = 8.0)`; `send(Request): mixed`, `open(Request, ?Closure $decode): Stream<RawEvent>`, `stream(Request): Stream<Event<mixed>>`, `login($email, $password \| $passphrase, $totp): IssuedSession`, `logout(bool $all = false)`, `session()`, `setSession()` |
-| Errors | `ApiError` (`status`, `kind` (`?Kind`), `getMessage()`, `reason`, `metadata`, `text`, `body`); `MissingScope` (`operation`, `scope`), unsent; a transport failure is a `RuntimeException` (`curl: …`) |
+| Errors | `new ApiError($message, kind: Kind::Unavailable, reason: null, metadata: [], status: 0)` (`getMessage()`, `kind`, `reason`, `metadata`, `status`); `ApiError::from($x)` (anything as one: a `Reply` parsed, a `Throwable` as `previous`); `Reason` constants; a missing scope is the server's 403 `missing_scope` `ApiError`, unsent; a transport failure is a `RuntimeException` (`curl: …`) |
 
 - **A session is always a JWT; a secret is never sent.** With `$secret`, the client signs its
   own sessions (`$scopes`, else the key's own: read once with a 60 s scopeless session from
@@ -738,7 +768,8 @@ generated files through `"files"`. Hand-written, one class per file: `Scope`, `S
   within 60 s of the server's (NTP).
 - `send()` fills the path (each parameter `rawurlencode`d), the query and the JSON body, adds
   `Bearer <jwt>`, bounds the call by `$timeout`, and decodes the 2xx JSON (objects as arrays;
-  null when empty). `$checkScopes` throws `MissingScope` before sending.
+  null when empty). `$checkScopes` throws the server's 403
+  `missing_scope` `ApiError` before sending.
 - `open()` and `stream()` return the reconnecting handle `Stream`
   ([Streams](#streams-the-15-s-window-and-the-handle)): `foreach` it; PHP blocks, so
   `$handle->stop()` (called from the loop body) is checked after each event and before each
@@ -755,7 +786,7 @@ generated files through `"files"`. Hand-written, one class per file: `Scope`, `S
 - Tests (PHPUnit in Docker: `composer install`, then `vendor/bin/phpunit` in `php:8.3-cli` and
   `php:8.2-cli`): every `_golden/scope.json` case, `_golden/session.json` signed byte for byte
   and its user token parsed, the client over the fake transport (path, query, body, bearer,
-  error mapping, `MissingScope`, signing, re-signing, login, logout, SSE), a live test when
+  error mapping, a local missing scope, signing, re-signing, login, logout, SSE), a live test when
   `HASHINBOX_URL` is set (and `HASHINBOX_KEY_ID`, `HASHINBOX_KEY_SECRET`).
   `examples/backend.php`: create a wallet with a key, issue a 15-minute token for it. Checks:
   `php -l` on every file, `vendor/bin/phpstan analyse --level=max src tests`.
@@ -919,8 +950,8 @@ apps/server/clients/
 4. **TS integers:** `number` (proposed) or `bigint`/string for `int64`?
 5. **Errors:** one `ApiError` with `Error` for every status (proposed, the spec has one error
    schema), or a per-status union per operation?
-6. **Body-filled scope holes:** never (routes check bodies with unnarrowed scopes, like
-   `create_triggers` with `wallets.$write`), or add `x-scopes` when the first one appears?
+6. **Body-filled scope holes:** never (a route checks one scope; what it needs beyond it is a
+   dependency, like `triggers` → `wallets`), or add `x-scopes` when the first one appears?
 7. **Rust client and `scope`:** depend on the crate (publish `scope` + `scope-macros`), or a
    `scope` feature `macros` off by default?
 8. **`src/lib.rs` for the server:** worth splitting later, so `clients` calls `api::openapi()`

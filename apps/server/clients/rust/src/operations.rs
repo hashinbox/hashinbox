@@ -81,12 +81,31 @@ use crate::models::WalletIndex;
 use crate::models::WalletList;
 use crate::models::WriteSettingRequest;
 
+/// What holding a scope needs beyond its subtree (`x-hashinbox-depends`):
+/// source → targets.
+pub const DEPENDS: &[(&str, &[&str])] = &[
+    (
+        "com.hashinbox.networks.endpoints",
+        &["com.hashinbox.networks:read"],
+    ),
+    (
+        "com.hashinbox.networks.routes",
+        &["com.hashinbox.networks.endpoints:read"],
+    ),
+    (
+        "com.hashinbox.networks.transactions",
+        &["com.hashinbox.networks:read"],
+    ),
+    ("com.hashinbox.triggers", &["com.hashinbox.wallets"]),
+    ("com.hashinbox.wallets", &["com.hashinbox.jobs"]),
+];
+
 /// `GET /v1/assets`.
 pub const ASSETS_LIST: Operation = Operation {
     id: "assets_list",
     method: Method::Get,
     path: "/v1/assets",
-    templates: &["com.hashinbox.assets.$read"],
+    templates: &[],
 };
 
 /// The input of [`assets_list`].
@@ -106,7 +125,7 @@ impl Request for AssetsListRequest {
 
 /// List every configured asset: `GET /v1/assets`.
 ///
-/// Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
+/// Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.
 pub async fn assets_list<C: Client>(
     client: &C,
     request: AssetsListRequest,
@@ -119,7 +138,7 @@ pub const KEY_REVOKE: Operation = Operation {
     id: "key_revoke",
     method: Method::Delete,
     path: "/v1/user/keys/{id}",
-    templates: &["com.hashinbox.keys.$write"],
+    templates: &["com.hashinbox.users.keys"],
 };
 
 /// The input of [`key_revoke`].
@@ -162,7 +181,7 @@ pub const KEY_ROTATE: Operation = Operation {
     id: "key_rotate",
     method: Method::Post,
     path: "/v1/user/keys/{id}/rotate",
-    templates: &["com.hashinbox.keys.$write"],
+    templates: &["com.hashinbox.users.keys"],
 };
 
 /// The input of [`key_rotate`].
@@ -205,7 +224,7 @@ pub const KEYS_CREATE: Operation = Operation {
     id: "keys_create",
     method: Method::Post,
     path: "/v1/user/keys",
-    templates: &["com.hashinbox.keys.$write"],
+    templates: &["com.hashinbox.users.keys"],
 };
 
 /// The input of [`keys_create`].
@@ -244,7 +263,7 @@ pub const KEYS_LIST: Operation = Operation {
     id: "keys_list",
     method: Method::Get,
     path: "/v1/user/keys",
-    templates: &["com.hashinbox.keys.$read"],
+    templates: &["com.hashinbox.users.keys:read"],
 };
 
 /// The input of [`keys_list`].
@@ -363,7 +382,7 @@ pub const RECOVERY_CREATE: Operation = Operation {
     id: "recovery_create",
     method: Method::Post,
     path: "/v1/recovery",
-    templates: &["com.hashinbox.recovery.$write"],
+    templates: &["com.hashinbox.recovery"],
 };
 
 /// The input of [`recovery_create`].
@@ -396,7 +415,7 @@ pub const RECOVERY_DELETE: Operation = Operation {
     id: "recovery_delete",
     method: Method::Delete,
     path: "/v1/recovery",
-    templates: &["com.hashinbox.recovery.$write"],
+    templates: &["com.hashinbox.recovery"],
 };
 
 /// The input of [`recovery_delete`].
@@ -429,7 +448,7 @@ pub const RECOVERY_GET: Operation = Operation {
     id: "recovery_get",
     method: Method::Get,
     path: "/v1/recovery",
-    templates: &["com.hashinbox.recovery.$write"],
+    templates: &["com.hashinbox.recovery"],
 };
 
 /// The input of [`recovery_get`].
@@ -449,7 +468,7 @@ impl Request for RecoveryGetRequest {
 
 /// Read whether the recovery passphrase is set: `GET /v1/recovery`.
 ///
-/// Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+/// Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.
 pub async fn recovery_get<C: Client>(
     client: &C,
     request: RecoveryGetRequest,
@@ -564,7 +583,7 @@ impl Request for SessionGetRequest {
 
 /// Read the caller's session: `GET /v1/session`.
 ///
-/// The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+/// The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.
 pub async fn session_get<C: Client>(
     client: &C,
     request: SessionGetRequest,
@@ -688,7 +707,7 @@ pub const USER_UPDATE: Operation = Operation {
     id: "user_update",
     method: Method::Patch,
     path: "/v1/users/{id}",
-    templates: &["com.hashinbox.users.$write"],
+    templates: &["com.hashinbox.users"],
 };
 
 /// The input of [`user_update`].
@@ -736,7 +755,7 @@ pub const USERS_CREATE: Operation = Operation {
     id: "users_create",
     method: Method::Post,
     path: "/v1/users",
-    templates: &["com.hashinbox.users.$write"],
+    templates: &["com.hashinbox.users"],
 };
 
 /// The input of [`users_create`].
@@ -762,7 +781,7 @@ impl Request for UsersCreateRequest {
 
 /// Create a user, or the root user on a fresh install: `POST /v1/users`.
 ///
-/// With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+/// With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.
 pub async fn users_create<C: Client>(
     client: &C,
     request: UsersCreateRequest,
@@ -775,7 +794,7 @@ pub const USERS_LIST: Operation = Operation {
     id: "users_list",
     method: Method::Get,
     path: "/v1/users",
-    templates: &["com.hashinbox.users.$read"],
+    templates: &["com.hashinbox.users:read"],
 };
 
 /// The input of [`users_list`].
@@ -888,7 +907,7 @@ pub const JOB_GET: Operation = Operation {
     id: "job_get",
     method: Method::Get,
     path: "/v1/jobs/{id}",
-    templates: &["com.hashinbox.jobs.$read"],
+    templates: &["com.hashinbox.jobs:read"],
 };
 
 /// The input of [`job_get`].
@@ -931,7 +950,7 @@ pub const JOBS_LIST: Operation = Operation {
     id: "jobs_list",
     method: Method::Get,
     path: "/v1/jobs",
-    templates: &["com.hashinbox.jobs.$read"],
+    templates: &["com.hashinbox.jobs:read"],
 };
 
 /// The input of [`jobs_list`].
@@ -996,7 +1015,7 @@ pub const LOG_MESSAGES_LIST: Operation = Operation {
     id: "log_messages_list",
     method: Method::Get,
     path: "/v1/logs/messages",
-    templates: &["com.hashinbox.logs.$read"],
+    templates: &["com.hashinbox.logs:read"],
 };
 
 /// The input of [`log_messages_list`].
@@ -1029,7 +1048,7 @@ pub const LOG_TARGETS_LIST: Operation = Operation {
     id: "log_targets_list",
     method: Method::Get,
     path: "/v1/logs/targets",
-    templates: &["com.hashinbox.logs.$read"],
+    templates: &["com.hashinbox.logs:read"],
 };
 
 /// The input of [`log_targets_list`].
@@ -1062,7 +1081,7 @@ pub const LOGS_LIST: Operation = Operation {
     id: "logs_list",
     method: Method::Get,
     path: "/v1/logs",
-    templates: &["com.hashinbox.logs.$read"],
+    templates: &["com.hashinbox.logs:read"],
 };
 
 /// The input of [`logs_list`].
@@ -1165,7 +1184,7 @@ pub const LOGS_STREAM: Operation = Operation {
     id: "logs_stream",
     method: Method::Get,
     path: "/v1/logs/stream",
-    templates: &["com.hashinbox.logs.$read"],
+    templates: &["com.hashinbox.logs:read"],
 };
 
 /// The input of [`logs_stream`].
@@ -1261,7 +1280,7 @@ pub const MARKET_CANDLES_LIST: Operation = Operation {
     id: "market_candles_list",
     method: Method::Get,
     path: "/v1/markets/{name}/candles",
-    templates: &["com.hashinbox.markets.$read"],
+    templates: &[],
 };
 
 /// The input of [`market_candles_list`].
@@ -1303,7 +1322,7 @@ impl Request for MarketCandlesListRequest {
 
 /// List a market's hourly candles of an asset: `GET /v1/markets/{name}/candles`.
 ///
-/// The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+/// The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.
 pub async fn market_candles_list<C: Client>(
     client: &C,
     request: MarketCandlesListRequest,
@@ -1316,7 +1335,7 @@ pub const MARKET_UPDATE: Operation = Operation {
     id: "market_update",
     method: Method::Patch,
     path: "/v1/markets/{name}",
-    templates: &["com.hashinbox.markets.$write"],
+    templates: &["com.hashinbox.markets"],
 };
 
 /// The input of [`market_update`].
@@ -1364,7 +1383,7 @@ pub const MARKETS_LIST: Operation = Operation {
     id: "markets_list",
     method: Method::Get,
     path: "/v1/markets",
-    templates: &["com.hashinbox.markets.$read"],
+    templates: &[],
 };
 
 /// The input of [`markets_list`].
@@ -1384,7 +1403,7 @@ impl Request for MarketsListRequest {
 
 /// List the markets and the latest prices: `GET /v1/markets`.
 ///
-/// Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+/// Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.
 pub async fn markets_list<C: Client>(
     client: &C,
     request: MarketsListRequest,
@@ -1397,7 +1416,7 @@ pub const ENDPOINTS_CREATE: Operation = Operation {
     id: "endpoints_create",
     method: Method::Post,
     path: "/v1/networks/endpoints",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`endpoints_create`].
@@ -1436,7 +1455,7 @@ pub const NETWORK_BLOCK_GET: Operation = Operation {
     id: "network_block_get",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/blocks/{position}",
-    templates: &["com.hashinbox.networks.$read"],
+    templates: &["com.hashinbox.networks:read"],
 };
 
 /// The input of [`network_block_get`].
@@ -1483,7 +1502,7 @@ pub const NETWORK_BLOCK_TRANSACTIONS_LIST: Operation = Operation {
     id: "network_block_transactions_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/blocks/{position}/transactions",
-    templates: &["com.hashinbox.transactions.$read"],
+    templates: &["com.hashinbox.networks.transactions:read"],
 };
 
 /// The input of [`network_block_transactions_list`].
@@ -1543,7 +1562,7 @@ pub const NETWORK_BLOCKS_LIST: Operation = Operation {
     id: "network_blocks_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/blocks",
-    templates: &["com.hashinbox.networks.$read"],
+    templates: &["com.hashinbox.networks:read"],
 };
 
 /// The input of [`network_blocks_list`].
@@ -1602,7 +1621,7 @@ pub const NETWORK_ENDPOINT_DELETE: Operation = Operation {
     id: "network_endpoint_delete",
     method: Method::Delete,
     path: "/v1/networks/{chain}/{network}/endpoints/{id}",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`network_endpoint_delete`].
@@ -1649,7 +1668,7 @@ pub const NETWORK_ENDPOINT_FAILURES_LIST: Operation = Operation {
     id: "network_endpoint_failures_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
-    templates: &["com.hashinbox.endpoints.$read"],
+    templates: &["com.hashinbox.networks.endpoints:read"],
 };
 
 /// The input of [`network_endpoint_failures_list`].
@@ -1709,7 +1728,7 @@ pub const NETWORK_ENDPOINT_STATE_UPDATE: Operation = Operation {
     id: "network_endpoint_state_update",
     method: Method::Put,
     path: "/v1/networks/{chain}/{network}/endpoints/{id}/state",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`network_endpoint_state_update`].
@@ -1761,7 +1780,7 @@ pub const NETWORK_ENDPOINT_TEST: Operation = Operation {
     id: "network_endpoint_test",
     method: Method::Post,
     path: "/v1/networks/{chain}/{network}/endpoints/test",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`network_endpoint_test`].
@@ -1812,7 +1831,7 @@ pub const NETWORK_ENDPOINTS_CREATE: Operation = Operation {
     id: "network_endpoints_create",
     method: Method::Post,
     path: "/v1/networks/{chain}/{network}/endpoints",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`network_endpoints_create`].
@@ -1863,7 +1882,7 @@ pub const NETWORK_ENDPOINTS_LIST: Operation = Operation {
     id: "network_endpoints_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/endpoints",
-    templates: &["com.hashinbox.endpoints.$read"],
+    templates: &["com.hashinbox.networks.endpoints:read"],
 };
 
 /// The input of [`network_endpoints_list`].
@@ -1909,7 +1928,7 @@ pub const NETWORK_ENDPOINTS_REPLACE: Operation = Operation {
     id: "network_endpoints_replace",
     method: Method::Put,
     path: "/v1/networks/{chain}/{network}/endpoints",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.endpoints"],
 };
 
 /// The input of [`network_endpoints_replace`].
@@ -1960,7 +1979,7 @@ pub const NETWORK_ROUTES_LIST: Operation = Operation {
     id: "network_routes_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/routes",
-    templates: &["com.hashinbox.endpoints.$read"],
+    templates: &["com.hashinbox.networks.routes:read"],
 };
 
 /// The input of [`network_routes_list`].
@@ -2006,7 +2025,7 @@ pub const NETWORK_ROUTES_REPLACE: Operation = Operation {
     id: "network_routes_replace",
     method: Method::Put,
     path: "/v1/networks/{chain}/{network}/routes",
-    templates: &["com.hashinbox.endpoints.$write"],
+    templates: &["com.hashinbox.networks.routes"],
 };
 
 /// The input of [`network_routes_replace`].
@@ -2057,7 +2076,7 @@ pub const NETWORK_TIP_SEARCH: Operation = Operation {
     id: "network_tip_search",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/tip/search",
-    templates: &["com.hashinbox.networks.$read"],
+    templates: &["com.hashinbox.networks:read"],
 };
 
 /// The input of [`network_tip_search`].
@@ -2113,7 +2132,7 @@ pub const NETWORK_TRANSACTIONS_LIST: Operation = Operation {
     id: "network_transactions_list",
     method: Method::Get,
     path: "/v1/networks/{chain}/{network}/transactions",
-    templates: &["com.hashinbox.transactions.$read"],
+    templates: &["com.hashinbox.networks.transactions:read"],
 };
 
 /// The input of [`network_transactions_list`].
@@ -2176,7 +2195,7 @@ pub const NETWORKS_CREATE: Operation = Operation {
     id: "networks_create",
     method: Method::Post,
     path: "/v1/networks",
-    templates: &["com.hashinbox.networks.$write"],
+    templates: &["com.hashinbox.networks"],
 };
 
 /// The input of [`networks_create`].
@@ -2215,7 +2234,7 @@ pub const NETWORKS_LIST: Operation = Operation {
     id: "networks_list",
     method: Method::Get,
     path: "/v1/networks",
-    templates: &["com.hashinbox.networks.$read"],
+    templates: &["com.hashinbox.networks:read"],
 };
 
 /// The input of [`networks_list`].
@@ -2281,7 +2300,7 @@ pub const SETTING_UPDATE: Operation = Operation {
     id: "setting_update",
     method: Method::Put,
     path: "/v1/settings/{key}",
-    templates: &["com.hashinbox.settings.$write"],
+    templates: &["com.hashinbox.settings"],
 };
 
 /// The input of [`setting_update`].
@@ -2329,7 +2348,7 @@ pub const SETTINGS_LIST: Operation = Operation {
     id: "settings_list",
     method: Method::Get,
     path: "/v1/settings",
-    templates: &["com.hashinbox.settings.$read"],
+    templates: &["com.hashinbox.settings:read"],
 };
 
 /// The input of [`settings_list`].
@@ -2362,7 +2381,7 @@ pub const STATS_GET: Operation = Operation {
     id: "stats_get",
     method: Method::Get,
     path: "/v1/stats",
-    templates: &["com.hashinbox.stats.$read"],
+    templates: &["com.hashinbox.stats:read"],
 };
 
 /// The input of [`stats_get`].
@@ -2395,7 +2414,7 @@ pub const WALLET_PAYMENT_SEND: Operation = Operation {
     id: "wallet_payment_send",
     method: Method::Post,
     path: "/v1/wallets/{id}/transactions",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].transactions"],
 };
 
 /// The input of [`wallet_payment_send`].
@@ -2443,7 +2462,7 @@ pub const TAGS_LIST: Operation = Operation {
     id: "tags_list",
     method: Method::Get,
     path: "/v1/wallets/tags",
-    templates: &["com.hashinbox.wallets.$read"],
+    templates: &["com.hashinbox.wallets.tags:read"],
 };
 
 /// The input of [`tags_list`].
@@ -2488,7 +2507,7 @@ pub const TRIGGER_DELETE: Operation = Operation {
     id: "trigger_delete",
     method: Method::Delete,
     path: "/v1/triggers/{id}",
-    templates: &["com.hashinbox.triggers.$write"],
+    templates: &["com.hashinbox.triggers"],
 };
 
 /// The input of [`trigger_delete`].
@@ -2529,7 +2548,7 @@ pub const TRIGGER_GET: Operation = Operation {
     id: "trigger_get",
     method: Method::Get,
     path: "/v1/triggers/{id}",
-    templates: &["com.hashinbox.triggers.$read"],
+    templates: &["com.hashinbox.triggers:read"],
 };
 
 /// The input of [`trigger_get`].
@@ -2570,10 +2589,7 @@ pub const TRIGGER_REPLACE: Operation = Operation {
     id: "trigger_replace",
     method: Method::Put,
     path: "/v1/triggers/{id}",
-    templates: &[
-        "com.hashinbox.triggers.$write",
-        "com.hashinbox.wallets.$write",
-    ],
+    templates: &["com.hashinbox.triggers"],
 };
 
 /// The input of [`trigger_replace`].
@@ -2621,7 +2637,7 @@ pub const TRIGGER_RUNS_LIST: Operation = Operation {
     id: "trigger_runs_list",
     method: Method::Get,
     path: "/v1/triggers/{id}/runs",
-    templates: &["com.hashinbox.triggers.$read"],
+    templates: &["com.hashinbox.triggers.runs:read"],
 };
 
 /// The input of [`trigger_runs_list`].
@@ -2675,10 +2691,7 @@ pub const TRIGGERS_CREATE: Operation = Operation {
     id: "triggers_create",
     method: Method::Post,
     path: "/v1/triggers",
-    templates: &[
-        "com.hashinbox.triggers.$write",
-        "com.hashinbox.wallets.$write",
-    ],
+    templates: &["com.hashinbox.triggers"],
 };
 
 /// The input of [`triggers_create`].
@@ -2717,7 +2730,7 @@ pub const TRIGGERS_LIST: Operation = Operation {
     id: "triggers_list",
     method: Method::Get,
     path: "/v1/triggers",
-    templates: &["com.hashinbox.triggers.$read"],
+    templates: &["com.hashinbox.triggers:read"],
 };
 
 /// The input of [`triggers_list`].
@@ -2762,7 +2775,7 @@ pub const WALLET_TAG_ADD: Operation = Operation {
     id: "wallet_tag_add",
     method: Method::Put,
     path: "/v1/wallets/{id}/tags/{tag}",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].tags"],
 };
 
 /// The input of [`wallet_tag_add`].
@@ -2808,7 +2821,7 @@ pub const WALLET_TAG_REMOVE: Operation = Operation {
     id: "wallet_tag_remove",
     method: Method::Delete,
     path: "/v1/wallets/{id}/tags/{tag}",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].tags"],
 };
 
 /// The input of [`wallet_tag_remove`].
@@ -2854,7 +2867,7 @@ pub const WALLET_GET: Operation = Operation {
     id: "wallet_get",
     method: Method::Get,
     path: "/v1/wallets/{id}",
-    templates: &["com.hashinbox.wallets[{id}].$read"],
+    templates: &["com.hashinbox.wallets[{id}]:read"],
 };
 
 /// The input of [`wallet_get`].
@@ -2897,7 +2910,7 @@ pub const WALLET_INDEX_DELETE: Operation = Operation {
     id: "wallet_index_delete",
     method: Method::Delete,
     path: "/v1/wallets/{id}/indexes/{asset}",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /// The input of [`wallet_index_delete`].
@@ -2943,7 +2956,7 @@ pub const WALLET_INDEX_LEGS_LIST: Operation = Operation {
     id: "wallet_index_legs_list",
     method: Method::Get,
     path: "/v1/wallets/{id}/indexes/{asset}/legs",
-    templates: &["com.hashinbox.wallets[{id}].$read"],
+    templates: &["com.hashinbox.wallets[{id}].indexes:read"],
 };
 
 /// The input of [`wallet_index_legs_list`].
@@ -3002,7 +3015,7 @@ pub const WALLET_INDEX_RECONCILE: Operation = Operation {
     id: "wallet_index_reconcile",
     method: Method::Post,
     path: "/v1/wallets/{id}/indexes/{asset}/reconcile",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /// The input of [`wallet_index_reconcile`].
@@ -3048,7 +3061,7 @@ pub const WALLET_INDEX_UPDATE: Operation = Operation {
     id: "wallet_index_update",
     method: Method::Patch,
     path: "/v1/wallets/{id}/indexes/{asset}",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /// The input of [`wallet_index_update`].
@@ -3099,7 +3112,7 @@ pub const WALLET_INDEXES_CREATE: Operation = Operation {
     id: "wallet_indexes_create",
     method: Method::Post,
     path: "/v1/wallets/{id}/indexes",
-    templates: &["com.hashinbox.wallets[{id}].$write"],
+    templates: &["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /// The input of [`wallet_indexes_create`].
@@ -3147,7 +3160,7 @@ pub const WALLETS_CREATE: Operation = Operation {
     id: "wallets_create",
     method: Method::Post,
     path: "/v1/wallets",
-    templates: &["com.hashinbox.wallets.$write"],
+    templates: &["com.hashinbox.wallets"],
 };
 
 /// The input of [`wallets_create`].
@@ -3186,7 +3199,7 @@ pub const WALLETS_LIST: Operation = Operation {
     id: "wallets_list",
     method: Method::Get,
     path: "/v1/wallets",
-    templates: &["com.hashinbox.wallets.$read"],
+    templates: &["com.hashinbox.wallets:read"],
 };
 
 /// The input of [`wallets_list`].

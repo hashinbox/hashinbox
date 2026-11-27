@@ -10,25 +10,26 @@ use Stringable;
 
 /**
  * Hand-written: `packages/scope` ported. A scope is text
- * (`com.hashinbox.wallets[w1].$read`): a path of resources and an action. One
- * covers another, a set packs into the JWT `scopes` claim, and a template's
- * `{name}` holes are filled with escaped ids. The vectors in
- * `apps/server/clients/_golden/scope.json` keep this port honest.
+ * (`com.hashinbox.wallets[w1]:read`): a path of resources, full (read and
+ * write) or read only. It covers its whole subtree, a set packs into the JWT
+ * `scopes` claim, and a template's `{name}` holes are filled with escaped ids.
+ * The vectors in `apps/server/clients/_golden/scope.json` keep this port
+ * honest.
  */
 final readonly class Scope implements Stringable
 {
-    /** `*`: any resource (a segment's name) or any action. */
-    public const ANY = '*';
+    /** The suffix of a read-only scope. */
+    private const READ = ':read';
 
     /**
      * @param list<Segment> $path Its steps, one at least.
-     * @param string $action Its action; `Scope::ANY` for `$*`.
+     * @param bool $read Whether it is read only (`:read`); otherwise full.
      */
-    public function __construct(public array $path, public string $action) {}
+    public function __construct(public array $path, public bool $read = false) {}
 
     /**
-     * `$text`: steps split by `.` (not inside `[` `]`), the last one the
-     * action, `$name` or `$*`.
+     * `$text`: steps split by `.` (not inside `[` `]`), then `:read` or
+     * nothing.
      *
      * @throws ScopeError
      */
@@ -37,8 +38,8 @@ final readonly class Scope implements Stringable
         $steps = [];
         $start = 0;
         $inside = false;
-        $length = strlen($text);
-        for ($at = 0; $at < $length; $at++) {
+        $end = strlen($text);
+        for ($at = 0; $at < $end; $at++) {
             $char = $text[$at];
             if ($char === '[' && !$inside) {
                 $inside = true;
@@ -47,48 +48,56 @@ final readonly class Scope implements Stringable
             } elseif ($char === '.' && !$inside) {
                 $steps[] = substr($text, $start, $at - $start);
                 $start = $at + 1;
+            } elseif ($char === ':' && !$inside) {
+                $end = $at;
+                break;
             }
         }
         if ($inside) {
             throw new ScopeError("bad id in `{$text}`");
         }
-        $last = substr($text, $start);
-        if (!str_starts_with($last, '$')) {
-            throw new ScopeError("`{$text}` does not end with `\$action`");
+        $level = substr($text, $end);
+        if ($level !== '' && $level !== self::READ) {
+            throw new ScopeError("`{$text}` does not end with `:read` or a step");
         }
-        $action = substr($last, 1);
-        if ($action !== self::ANY && !Segment::isName($action)) {
-            throw new ScopeError("`{$action}` is not a name");
+        if ($text === '') {
+            throw new ScopeError('a scope needs a resource');
         }
-        $path = array_map(Segment::parse(...), $steps);
-        return $path === [] ? throw new ScopeError('a scope needs a resource') : new self($path, $action);
+        $steps[] = substr($text, $start, $end - $start);
+        return new self(array_map(Segment::parse(...), $steps), $level === self::READ);
     }
 
     /**
-     * Whether it allows everything `$other` allows: its action the same or
-     * `$*`, its path matching step by step (`*` in the middle: any one step;
-     * at the end: anything below, itself included).
+     * Whether it allows everything `$other` allows: it is full or `$other` is
+     * read only, and its path is a prefix of `$other`'s, step by step. It so
+     * covers its whole subtree; a child never covers its parent.
      */
     public function covers(self $other): bool
     {
-        if ($this->action !== self::ANY && $this->action !== $other->action) {
-            return false;
-        }
-        $last = count($this->path) - 1;
-        foreach ($this->path as $at => $step) {
-            if ($step->name === self::ANY && $at === $last) {
-                return true;
-            }
-            if (!isset($other->path[$at]) || !$step->covers($other->path[$at])) {
-                return false;
-            }
-        }
-        return count($this->path) === count($other->path);
+        return (!$this->read || $other->read) && $this->reaches($other->path);
     }
 
     /**
-     * Rust's order: by path (step by step, a shorter one first), then by
-     * action (a name before `*`).
+     * Whether its path is a prefix of `$path`, step by step.
+     *
+     * @param list<Segment> $path
+     */
+    public function reaches(array $path): bool
+    {
+        if (count($this->path) > count($path)) {
+            return false;
+        }
+        foreach ($this->path as $at => $step) {
+            if (!$step->covers($path[$at])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Rust's order: by path (step by step, a prefix first), then full before
+     * read only.
      */
     public static function compare(self $a, self $b): int
     {
@@ -104,8 +113,7 @@ final readonly class Scope implements Stringable
         if (count($a->path) !== count($b->path)) {
             return -1;
         }
-        $any = ($a->action === self::ANY) <=> ($b->action === self::ANY);
-        return $any !== 0 ? $any : strcmp($a->action, $b->action) <=> 0;
+        return $a->read <=> $b->read;
     }
 
     /**
@@ -143,6 +151,6 @@ final readonly class Scope implements Stringable
 
     public function __toString(): string
     {
-        return implode('', array_map(static fn(Segment $step): string => "{$step}.", $this->path)) . '$' . $this->action;
+        return implode('.', array_map(strval(...), $this->path)) . ($this->read ? self::READ : '');
     }
 }

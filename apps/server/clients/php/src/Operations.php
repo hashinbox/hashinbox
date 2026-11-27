@@ -7,14 +7,20 @@ declare(strict_types=1);
 namespace Hashinbox;
 
 /**
+ * What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+ */
+const DEPENDS = [
+    'com.hashinbox.networks.endpoints' => ['com.hashinbox.networks:read'],
+    'com.hashinbox.networks.routes' => ['com.hashinbox.networks.endpoints:read'],
+    'com.hashinbox.networks.transactions' => ['com.hashinbox.networks:read'],
+    'com.hashinbox.triggers' => ['com.hashinbox.wallets'],
+    'com.hashinbox.wallets' => ['com.hashinbox.jobs'],
+];
+
+/**
  * `GET /v1/assets`.
  */
-const ASSETS_LIST = new Operation(
-    id: 'assets_list',
-    method: 'GET',
-    path: '/v1/assets',
-    templates: ['com.hashinbox.assets.$read'],
-);
+const ASSETS_LIST = new Operation(id: 'assets_list', method: 'GET', path: '/v1/assets', templates: []);
 
 /**
  * The input of `assetsList`.
@@ -45,7 +51,7 @@ final readonly class AssetsListRequest implements Request
 /**
  * List every configured asset: `GET /v1/assets`.
  *
- * Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
+ * Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.
  */
 function assetsList(Client $client, AssetsListRequest $request = new AssetsListRequest()): AssetList
 {
@@ -59,7 +65,7 @@ const KEY_REVOKE = new Operation(
     id: 'key_revoke',
     method: 'DELETE',
     path: '/v1/user/keys/{id}',
-    templates: ['com.hashinbox.keys.$write'],
+    templates: ['com.hashinbox.users.keys'],
 );
 
 /**
@@ -110,7 +116,7 @@ const KEY_ROTATE = new Operation(
     id: 'key_rotate',
     method: 'POST',
     path: '/v1/user/keys/{id}/rotate',
-    templates: ['com.hashinbox.keys.$write'],
+    templates: ['com.hashinbox.users.keys'],
 );
 
 /**
@@ -161,7 +167,7 @@ const KEYS_CREATE = new Operation(
     id: 'keys_create',
     method: 'POST',
     path: '/v1/user/keys',
-    templates: ['com.hashinbox.keys.$write'],
+    templates: ['com.hashinbox.users.keys'],
 );
 
 /**
@@ -209,7 +215,7 @@ const KEYS_LIST = new Operation(
     id: 'keys_list',
     method: 'GET',
     path: '/v1/user/keys',
-    templates: ['com.hashinbox.keys.$read'],
+    templates: ['com.hashinbox.users.keys:read'],
 );
 
 /**
@@ -352,7 +358,7 @@ const RECOVERY_CREATE = new Operation(
     id: 'recovery_create',
     method: 'POST',
     path: '/v1/recovery',
-    templates: ['com.hashinbox.recovery.$write'],
+    templates: ['com.hashinbox.recovery'],
 );
 
 /**
@@ -398,7 +404,7 @@ const RECOVERY_DELETE = new Operation(
     id: 'recovery_delete',
     method: 'DELETE',
     path: '/v1/recovery',
-    templates: ['com.hashinbox.recovery.$write'],
+    templates: ['com.hashinbox.recovery'],
 );
 
 /**
@@ -444,7 +450,7 @@ const RECOVERY_GET = new Operation(
     id: 'recovery_get',
     method: 'GET',
     path: '/v1/recovery',
-    templates: ['com.hashinbox.recovery.$write'],
+    templates: ['com.hashinbox.recovery'],
 );
 
 /**
@@ -476,7 +482,7 @@ final readonly class RecoveryGetRequest implements Request
 /**
  * Read whether the recovery passphrase is set: `GET /v1/recovery`.
  *
- * Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+ * Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.
  */
 function recoveryGet(Client $client, RecoveryGetRequest $request = new RecoveryGetRequest()): Recovery
 {
@@ -611,7 +617,7 @@ final readonly class SessionGetRequest implements Request
 /**
  * Read the caller's session: `GET /v1/session`.
  *
- * The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+ * The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.
  */
 function sessionGet(Client $client, SessionGetRequest $request = new SessionGetRequest()): SessionRead
 {
@@ -757,7 +763,7 @@ const USER_UPDATE = new Operation(
     id: 'user_update',
     method: 'PATCH',
     path: '/v1/users/{id}',
-    templates: ['com.hashinbox.users.$write'],
+    templates: ['com.hashinbox.users'],
 );
 
 /**
@@ -808,7 +814,7 @@ const USERS_CREATE = new Operation(
     id: 'users_create',
     method: 'POST',
     path: '/v1/users',
-    templates: ['com.hashinbox.users.$write'],
+    templates: ['com.hashinbox.users'],
 );
 
 /**
@@ -842,7 +848,7 @@ final readonly class UsersCreateRequest implements Request
 /**
  * Create a user, or the root user on a fresh install: `POST /v1/users`.
  *
- * With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+ * With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.
  */
 function usersCreate(Client $client, UsersCreateRequest $request): CreatedUser
 {
@@ -856,7 +862,7 @@ const USERS_LIST = new Operation(
     id: 'users_list',
     method: 'GET',
     path: '/v1/users',
-    templates: ['com.hashinbox.users.$read'],
+    templates: ['com.hashinbox.users:read'],
 );
 
 /**
@@ -997,7 +1003,7 @@ const JOB_GET = new Operation(
     id: 'job_get',
     method: 'GET',
     path: '/v1/jobs/{id}',
-    templates: ['com.hashinbox.jobs.$read'],
+    templates: ['com.hashinbox.jobs:read'],
 );
 
 /**
@@ -1048,7 +1054,7 @@ const JOBS_LIST = new Operation(
     id: 'jobs_list',
     method: 'GET',
     path: '/v1/jobs',
-    templates: ['com.hashinbox.jobs.$read'],
+    templates: ['com.hashinbox.jobs:read'],
 );
 
 /**
@@ -1128,7 +1134,7 @@ const LOG_MESSAGES_LIST = new Operation(
     id: 'log_messages_list',
     method: 'GET',
     path: '/v1/logs/messages',
-    templates: ['com.hashinbox.logs.$read'],
+    templates: ['com.hashinbox.logs:read'],
 );
 
 /**
@@ -1174,7 +1180,7 @@ const LOG_TARGETS_LIST = new Operation(
     id: 'log_targets_list',
     method: 'GET',
     path: '/v1/logs/targets',
-    templates: ['com.hashinbox.logs.$read'],
+    templates: ['com.hashinbox.logs:read'],
 );
 
 /**
@@ -1220,7 +1226,7 @@ const LOGS_LIST = new Operation(
     id: 'logs_list',
     method: 'GET',
     path: '/v1/logs',
-    templates: ['com.hashinbox.logs.$read'],
+    templates: ['com.hashinbox.logs:read'],
 );
 
 /**
@@ -1338,7 +1344,7 @@ const LOGS_STREAM = new Operation(
     id: 'logs_stream',
     method: 'GET',
     path: '/v1/logs/stream',
-    templates: ['com.hashinbox.logs.$read'],
+    templates: ['com.hashinbox.logs:read'],
 );
 
 /**
@@ -1454,7 +1460,7 @@ const MARKET_CANDLES_LIST = new Operation(
     id: 'market_candles_list',
     method: 'GET',
     path: '/v1/markets/{name}/candles',
-    templates: ['com.hashinbox.markets.$read'],
+    templates: [],
 );
 
 /**
@@ -1499,7 +1505,7 @@ final readonly class MarketCandlesListRequest implements Request
 /**
  * List a market's hourly candles of an asset: `GET /v1/markets/{name}/candles`.
  *
- * The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+ * The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.
  */
 function marketCandlesList(Client $client, MarketCandlesListRequest $request): MarketCandles
 {
@@ -1513,7 +1519,7 @@ const MARKET_UPDATE = new Operation(
     id: 'market_update',
     method: 'PATCH',
     path: '/v1/markets/{name}',
-    templates: ['com.hashinbox.markets.$write'],
+    templates: ['com.hashinbox.markets'],
 );
 
 /**
@@ -1560,12 +1566,7 @@ function marketUpdate(Client $client, MarketUpdateRequest $request): MarketListi
 /**
  * `GET /v1/markets`.
  */
-const MARKETS_LIST = new Operation(
-    id: 'markets_list',
-    method: 'GET',
-    path: '/v1/markets',
-    templates: ['com.hashinbox.markets.$read'],
-);
+const MARKETS_LIST = new Operation(id: 'markets_list', method: 'GET', path: '/v1/markets', templates: []);
 
 /**
  * The input of `marketsList`.
@@ -1596,7 +1597,7 @@ final readonly class MarketsListRequest implements Request
 /**
  * List the markets and the latest prices: `GET /v1/markets`.
  *
- * Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+ * Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.
  */
 function marketsList(Client $client, MarketsListRequest $request = new MarketsListRequest()): MarketList
 {
@@ -1610,7 +1611,7 @@ const ENDPOINTS_CREATE = new Operation(
     id: 'endpoints_create',
     method: 'POST',
     path: '/v1/networks/endpoints',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -1658,7 +1659,7 @@ const NETWORK_BLOCK_GET = new Operation(
     id: 'network_block_get',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/blocks/{position}',
-    templates: ['com.hashinbox.networks.$read'],
+    templates: ['com.hashinbox.networks:read'],
 );
 
 /**
@@ -1709,7 +1710,7 @@ const NETWORK_BLOCK_TRANSACTIONS_LIST = new Operation(
     id: 'network_block_transactions_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/blocks/{position}/transactions',
-    templates: ['com.hashinbox.transactions.$read'],
+    templates: ['com.hashinbox.networks.transactions:read'],
 );
 
 /**
@@ -1775,7 +1776,7 @@ const NETWORK_BLOCKS_LIST = new Operation(
     id: 'network_blocks_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/blocks',
-    templates: ['com.hashinbox.networks.$read'],
+    templates: ['com.hashinbox.networks:read'],
 );
 
 /**
@@ -1841,7 +1842,7 @@ const NETWORK_ENDPOINT_DELETE = new Operation(
     id: 'network_endpoint_delete',
     method: 'DELETE',
     path: '/v1/networks/{chain}/{network}/endpoints/{id}',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -1892,7 +1893,7 @@ const NETWORK_ENDPOINT_FAILURES_LIST = new Operation(
     id: 'network_endpoint_failures_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/endpoints/{id}/failures',
-    templates: ['com.hashinbox.endpoints.$read'],
+    templates: ['com.hashinbox.networks.endpoints:read'],
 );
 
 /**
@@ -1958,7 +1959,7 @@ const NETWORK_ENDPOINT_STATE_UPDATE = new Operation(
     id: 'network_endpoint_state_update',
     method: 'PUT',
     path: '/v1/networks/{chain}/{network}/endpoints/{id}/state',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -2014,7 +2015,7 @@ const NETWORK_ENDPOINT_TEST = new Operation(
     id: 'network_endpoint_test',
     method: 'POST',
     path: '/v1/networks/{chain}/{network}/endpoints/test',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -2066,7 +2067,7 @@ const NETWORK_ENDPOINTS_CREATE = new Operation(
     id: 'network_endpoints_create',
     method: 'POST',
     path: '/v1/networks/{chain}/{network}/endpoints',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -2118,7 +2119,7 @@ const NETWORK_ENDPOINTS_LIST = new Operation(
     id: 'network_endpoints_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/endpoints',
-    templates: ['com.hashinbox.endpoints.$read'],
+    templates: ['com.hashinbox.networks.endpoints:read'],
 );
 
 /**
@@ -2170,7 +2171,7 @@ const NETWORK_ENDPOINTS_REPLACE = new Operation(
     id: 'network_endpoints_replace',
     method: 'PUT',
     path: '/v1/networks/{chain}/{network}/endpoints',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.endpoints'],
 );
 
 /**
@@ -2222,7 +2223,7 @@ const NETWORK_ROUTES_LIST = new Operation(
     id: 'network_routes_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/routes',
-    templates: ['com.hashinbox.endpoints.$read'],
+    templates: ['com.hashinbox.networks.routes:read'],
 );
 
 /**
@@ -2274,7 +2275,7 @@ const NETWORK_ROUTES_REPLACE = new Operation(
     id: 'network_routes_replace',
     method: 'PUT',
     path: '/v1/networks/{chain}/{network}/routes',
-    templates: ['com.hashinbox.endpoints.$write'],
+    templates: ['com.hashinbox.networks.routes'],
 );
 
 /**
@@ -2326,7 +2327,7 @@ const NETWORK_TIP_SEARCH = new Operation(
     id: 'network_tip_search',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/tip/search',
-    templates: ['com.hashinbox.networks.$read'],
+    templates: ['com.hashinbox.networks:read'],
 );
 
 /**
@@ -2394,7 +2395,7 @@ const NETWORK_TRANSACTIONS_LIST = new Operation(
     id: 'network_transactions_list',
     method: 'GET',
     path: '/v1/networks/{chain}/{network}/transactions',
-    templates: ['com.hashinbox.transactions.$read'],
+    templates: ['com.hashinbox.networks.transactions:read'],
 );
 
 /**
@@ -2464,7 +2465,7 @@ const NETWORKS_CREATE = new Operation(
     id: 'networks_create',
     method: 'POST',
     path: '/v1/networks',
-    templates: ['com.hashinbox.networks.$write'],
+    templates: ['com.hashinbox.networks'],
 );
 
 /**
@@ -2512,7 +2513,7 @@ const NETWORKS_LIST = new Operation(
     id: 'networks_list',
     method: 'GET',
     path: '/v1/networks',
-    templates: ['com.hashinbox.networks.$read'],
+    templates: ['com.hashinbox.networks:read'],
 );
 
 /**
@@ -2599,7 +2600,7 @@ const SETTING_UPDATE = new Operation(
     id: 'setting_update',
     method: 'PUT',
     path: '/v1/settings/{key}',
-    templates: ['com.hashinbox.settings.$write'],
+    templates: ['com.hashinbox.settings'],
 );
 
 /**
@@ -2650,7 +2651,7 @@ const SETTINGS_LIST = new Operation(
     id: 'settings_list',
     method: 'GET',
     path: '/v1/settings',
-    templates: ['com.hashinbox.settings.$read'],
+    templates: ['com.hashinbox.settings:read'],
 );
 
 /**
@@ -2696,7 +2697,7 @@ const STATS_GET = new Operation(
     id: 'stats_get',
     method: 'GET',
     path: '/v1/stats',
-    templates: ['com.hashinbox.stats.$read'],
+    templates: ['com.hashinbox.stats:read'],
 );
 
 /**
@@ -2742,7 +2743,7 @@ const WALLET_PAYMENT_SEND = new Operation(
     id: 'wallet_payment_send',
     method: 'POST',
     path: '/v1/wallets/{id}/transactions',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].transactions'],
 );
 
 /**
@@ -2793,7 +2794,7 @@ const TAGS_LIST = new Operation(
     id: 'tags_list',
     method: 'GET',
     path: '/v1/wallets/tags',
-    templates: ['com.hashinbox.wallets.$read'],
+    templates: ['com.hashinbox.wallets.tags:read'],
 );
 
 /**
@@ -2850,7 +2851,7 @@ const TRIGGER_DELETE = new Operation(
     id: 'trigger_delete',
     method: 'DELETE',
     path: '/v1/triggers/{id}',
-    templates: ['com.hashinbox.triggers.$write'],
+    templates: ['com.hashinbox.triggers'],
 );
 
 /**
@@ -2899,7 +2900,7 @@ const TRIGGER_GET = new Operation(
     id: 'trigger_get',
     method: 'GET',
     path: '/v1/triggers/{id}',
-    templates: ['com.hashinbox.triggers.$read'],
+    templates: ['com.hashinbox.triggers:read'],
 );
 
 /**
@@ -2948,7 +2949,7 @@ const TRIGGER_REPLACE = new Operation(
     id: 'trigger_replace',
     method: 'PUT',
     path: '/v1/triggers/{id}',
-    templates: ['com.hashinbox.triggers.$write', 'com.hashinbox.wallets.$write'],
+    templates: ['com.hashinbox.triggers'],
 );
 
 /**
@@ -2999,7 +3000,7 @@ const TRIGGER_RUNS_LIST = new Operation(
     id: 'trigger_runs_list',
     method: 'GET',
     path: '/v1/triggers/{id}/runs',
-    templates: ['com.hashinbox.triggers.$read'],
+    templates: ['com.hashinbox.triggers.runs:read'],
 );
 
 /**
@@ -3057,7 +3058,7 @@ const TRIGGERS_CREATE = new Operation(
     id: 'triggers_create',
     method: 'POST',
     path: '/v1/triggers',
-    templates: ['com.hashinbox.triggers.$write', 'com.hashinbox.wallets.$write'],
+    templates: ['com.hashinbox.triggers'],
 );
 
 /**
@@ -3105,7 +3106,7 @@ const TRIGGERS_LIST = new Operation(
     id: 'triggers_list',
     method: 'GET',
     path: '/v1/triggers',
-    templates: ['com.hashinbox.triggers.$read'],
+    templates: ['com.hashinbox.triggers:read'],
 );
 
 /**
@@ -3162,7 +3163,7 @@ const WALLET_TAG_ADD = new Operation(
     id: 'wallet_tag_add',
     method: 'PUT',
     path: '/v1/wallets/{id}/tags/{tag}',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].tags'],
 );
 
 /**
@@ -3214,7 +3215,7 @@ const WALLET_TAG_REMOVE = new Operation(
     id: 'wallet_tag_remove',
     method: 'DELETE',
     path: '/v1/wallets/{id}/tags/{tag}',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].tags'],
 );
 
 /**
@@ -3266,7 +3267,7 @@ const WALLET_GET = new Operation(
     id: 'wallet_get',
     method: 'GET',
     path: '/v1/wallets/{id}',
-    templates: ['com.hashinbox.wallets[{id}].$read'],
+    templates: ['com.hashinbox.wallets[{id}]:read'],
 );
 
 /**
@@ -3317,7 +3318,7 @@ const WALLET_INDEX_DELETE = new Operation(
     id: 'wallet_index_delete',
     method: 'DELETE',
     path: '/v1/wallets/{id}/indexes/{asset}',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].indexes'],
 );
 
 /**
@@ -3369,7 +3370,7 @@ const WALLET_INDEX_LEGS_LIST = new Operation(
     id: 'wallet_index_legs_list',
     method: 'GET',
     path: '/v1/wallets/{id}/indexes/{asset}/legs',
-    templates: ['com.hashinbox.wallets[{id}].$read'],
+    templates: ['com.hashinbox.wallets[{id}].indexes:read'],
 );
 
 /**
@@ -3435,7 +3436,7 @@ const WALLET_INDEX_RECONCILE = new Operation(
     id: 'wallet_index_reconcile',
     method: 'POST',
     path: '/v1/wallets/{id}/indexes/{asset}/reconcile',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].indexes'],
 );
 
 /**
@@ -3487,7 +3488,7 @@ const WALLET_INDEX_UPDATE = new Operation(
     id: 'wallet_index_update',
     method: 'PATCH',
     path: '/v1/wallets/{id}/indexes/{asset}',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].indexes'],
 );
 
 /**
@@ -3539,7 +3540,7 @@ const WALLET_INDEXES_CREATE = new Operation(
     id: 'wallet_indexes_create',
     method: 'POST',
     path: '/v1/wallets/{id}/indexes',
-    templates: ['com.hashinbox.wallets[{id}].$write'],
+    templates: ['com.hashinbox.wallets[{id}].indexes'],
 );
 
 /**
@@ -3590,7 +3591,7 @@ const WALLETS_CREATE = new Operation(
     id: 'wallets_create',
     method: 'POST',
     path: '/v1/wallets',
-    templates: ['com.hashinbox.wallets.$write'],
+    templates: ['com.hashinbox.wallets'],
 );
 
 /**
@@ -3638,7 +3639,7 @@ const WALLETS_LIST = new Operation(
     id: 'wallets_list',
     method: 'GET',
     path: '/v1/wallets',
-    templates: ['com.hashinbox.wallets.$read'],
+    templates: ['com.hashinbox.wallets:read'],
 );
 
 /**

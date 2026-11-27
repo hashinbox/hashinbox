@@ -120,7 +120,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Wallet>), Error> {
-    scope::require!(caller, "com.hashinbox.wallets.$write");
+    scope::require!(caller, "com.hashinbox.wallets");
     let Json(request) = request?;
     let new = request.wallet()?;
     let (created, wallet) = wallets::create(&state.container, &state.db, new).await?;
@@ -162,7 +162,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.wallets.$read");
+    scope::require!(session, "com.hashinbox.wallets:read");
     let Query(index) = index?;
     let page = index.page("wallet list", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
@@ -204,7 +204,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<WalletPath>,
 ) -> Result<Json<Wallet>, Error> {
-    scope::require!(session, "com.hashinbox.wallets[{id}].$read", id = path.id);
+    scope::require!(session, "com.hashinbox.wallets[{id}]:read", id = path.id);
     let id = WalletId::parse(&path.id)?;
     Ok(Json(wallets::read(&state.container, &state.db, &id).await?))
 }

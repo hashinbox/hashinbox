@@ -27,6 +27,6 @@ $secret = Secret::parse((string) getenv('HASHINBOX_KEY_ID'), (string) getenv('HA
 $api = new Client((string) getenv('HASHINBOX_URL'), secret: $secret);
 $body = new CreateWalletRequest(chain: 'ethereum', network: 'mainnet', externalId: 'customer-1');
 $wallet = walletsCreate($api, new WalletsCreateRequest($body));
-$scope = Scope::fill('com.hashinbox.wallets[{id}].$read', ['id' => $wallet->id]);
+$scope = Scope::fill('com.hashinbox.wallets[{id}]:read', ['id' => $wallet->id]);
 $token = $secret->issue(Scopes::parse($scope), subject: 'customer-1', ttl: 15 * 60);
 echo $wallet->id, "\n", $token->token, "\n";

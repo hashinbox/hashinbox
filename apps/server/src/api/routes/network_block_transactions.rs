@@ -61,7 +61,7 @@ async fn list(
     Path(path): Path<BlockPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.transactions.$read");
+    scope::require!(session, "com.hashinbox.networks.transactions:read");
     let Query(index) = index?;
     let (network, position) = path.at()?;
     let page = index.page("transactions", transaction::parse_key)?;

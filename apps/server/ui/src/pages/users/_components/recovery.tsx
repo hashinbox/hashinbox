@@ -12,10 +12,10 @@ import {
 } from '@hashinbox/client';
 import { api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
-import type { Shell } from '@/layout';
 import { go, href } from '@/route';
 import { NewPassphrase } from './passphrase';
 import { Row, Section } from './section';
+import { fail, notify } from '@/store/app';
 
 /** The section's anchor, which the dashboard's banner links to. */
 const ANCHOR = 'recovery';
@@ -24,9 +24,9 @@ const DISMISSED_KEY = 'hashinbox.recovery.dismissed';
 
 /**
  * The organization's recovery passphrase (`/v1/recovery`): whether it is set,
- * and create, replace or remove it. Shown to a holder of `recovery.$write`.
+ * and create, replace or remove it. Shown to a holder of `recovery`.
  */
-export function Recovery({ shell }: { shell: Shell }) {
+export function Recovery() {
   const [state, setState] = useState<State | null>(null);
   const [busy, setBusy] = useState(false);
   const [replacing, setReplacing] = useState(false);
@@ -35,8 +35,8 @@ export function Recovery({ shell }: { shell: Shell }) {
   const anchor = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    recoveryGet(api).then(setState).catch(shell.fail);
-  }, [shell.fail]);
+    recoveryGet(api).then(setState).catch(fail);
+  }, []);
 
   // Linked from the dashboard's banner: scrolled to once shown.
   useEffect(() => {
@@ -52,7 +52,7 @@ export function Recovery({ shell }: { shell: Shell }) {
         setWords(created.passphrase.split(/\s+/).filter(Boolean));
         setState({ set: true, created_at: Date.now() });
       })
-      .catch(shell.fail)
+      .catch(fail)
       .finally(() => setBusy(false));
   };
 
@@ -60,9 +60,9 @@ export function Recovery({ shell }: { shell: Shell }) {
     recoveryDelete(api)
       .then(() => {
         setState({ set: false, created_at: null });
-        shell.notify('Recovery passphrase removed: passphrase sign-in is off.');
+        notify('Recovery passphrase removed: passphrase sign-in is off.');
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   const set = state?.set === true;
@@ -142,7 +142,7 @@ function dismissed(): boolean {
 
 /**
  * The dashboard's dismissible nudge while no recovery passphrase is set
- * (`GET /v1/recovery`); for a holder of `recovery.$write`.
+ * (`GET /v1/recovery`); for a holder of `recovery`.
  */
 export function RecoveryBanner() {
   const [shown, setShown] = useState(false);

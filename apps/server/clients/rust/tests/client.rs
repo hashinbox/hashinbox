@@ -10,7 +10,7 @@ use futures_util::StreamExt;
 use hashinbox_client::client::RawEvent;
 use hashinbox_client::models::{CreateWalletRequest, Kind};
 use hashinbox_client::operations::*;
-use hashinbox_client::{Client, Error, Issue, Secret, Session};
+use hashinbox_client::{ApiError, Client, Error, Issue, Secret, Session, reason};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -138,7 +138,7 @@ async fn it_sends_the_path_query_body_and_bearer() {
         _ => (204, "application/json", String::new()),
     })
     .await;
-    let held = session("com.hashinbox.*.$*");
+    let held = session("com.hashinbox");
     let client = Client::builder(url).session(held.clone()).build().unwrap();
     let id = "a/b c".to_owned();
     wallet_get(&client, WalletGetRequest { id }).await.unwrap();
@@ -179,51 +179,56 @@ async fn answers_map_to_errors() {
     })
     .await;
     let client = Client::builder(url).build().unwrap();
-    let Err(Error::Api {
-        status,
-        kind,
-        message,
-        reason,
-        metadata,
-    }) = assets_list(&client, AssetsListRequest).await
-    else {
+    let Err(Error::Api(error)) = assets_list(&client, AssetsListRequest).await else {
         panic!("not an API error");
     };
     assert_eq!(
-        (status, kind, message.as_str()),
+        (error.status, error.kind, error.message.as_str()),
         (403, Kind::PermissionDenied, "no")
     );
-    assert_eq!(reason.as_deref(), Some("missing_scope"));
-    assert_eq!(metadata["scope"], "s");
-    let Err(Error::Api {
-        status,
-        kind,
-        message,
-        ..
-    }) = health_get(&client, HealthGetRequest).await
-    else {
+    assert_eq!(error.reason.as_deref(), Some("missing_scope"));
+    assert_eq!(error.metadata["scope"], "s");
+    let Err(Error::Api(error)) = health_get(&client, HealthGetRequest).await else {
         panic!("not an API error");
     };
     assert_eq!(
-        (status, kind, message.as_str()),
-        (503, Kind::Unknown(String::new()), "down")
+        (error.status, error.kind, error.message.as_str()),
+        (
+            503,
+            Kind::Unavailable,
+            "could not parse the response (HTTP 503)"
+        )
     );
+    assert_eq!(error.metadata["response"], "down");
 }
 
 #[tokio::test]
 async fn a_missing_scope_fails_unsent() {
     let (url, log) = server(|_, _| ok(wallet())).await;
-    let held = session("com.hashinbox.wallets[x].$read");
+    let held = session("com.hashinbox.wallets[x]:read");
     let client = Client::builder(&url).session(held.clone()).build().unwrap();
     let request = WalletGetRequest { id: "y".into() };
-    let Err(Error::MissingScope { operation, scope }) = wallet_get(&client, request.clone()).await
+    let Err(Error::Api(ApiError {
+        status,
+        kind,
+        message,
+        reason,
+        metadata,
+        ..
+    })) = wallet_get(&client, request.clone()).await
     else {
         panic!("sent");
     };
     assert_eq!(
-        (operation, scope.as_str()),
-        ("wallet_get", "com.hashinbox.wallets[y].$read")
+        (status, kind, reason.as_deref()),
+        (403, Kind::PermissionDenied, Some(reason::MISSING_SCOPE))
     );
+    assert_eq!(
+        message,
+        "wallet_get needs scope com.hashinbox.wallets[y]:read"
+    );
+    assert_eq!(metadata["scope"], "com.hashinbox.wallets[y]:read");
+    assert_eq!(metadata["operation"], "wallet_get");
     assert!(log.lock().unwrap().is_empty());
     wallet_get(&client, WalletGetRequest { id: "x".into() })
         .await
@@ -240,10 +245,10 @@ async fn a_missing_scope_fails_unsent() {
 #[tokio::test]
 async fn a_secret_signs_its_sessions_with_the_keys_scopes_and_resigns_once() {
     let (url, log) = server(|n, _| match n {
-        0 => ok(session_read(json!({"com.hashinbox": ["wallets.$*"]}))),
+        0 => ok(session_read(json!({"com.hashinbox": ["wallets"]}))),
         1 => ok(wallet()),
         2 | 4 => error(401, "unauthenticated", Some("session_expired")),
-        3 => ok(session_read(json!({"com.hashinbox": ["wallets.$read"]}))),
+        3 => ok(session_read(json!({"com.hashinbox": ["wallets:read"]}))),
         _ => ok(wallet()),
     })
     .await;
@@ -252,11 +257,14 @@ async fn a_secret_signs_its_sessions_with_the_keys_scopes_and_resigns_once() {
     get().await.unwrap();
     let first = client.session().unwrap();
     assert_eq!(first.issuer, secret().id());
-    assert_eq!(first.scopes.to_string(), "com.hashinbox.wallets.$*");
-    let Err(Error::Api { reason, .. }) = get().await else {
+    assert_eq!(
+        first.scopes.to_string(),
+        "com.hashinbox.jobs com.hashinbox.wallets"
+    );
+    let Err(Error::Api(refused)) = get().await else {
         panic!("not refused");
     };
-    assert_eq!(reason.as_deref(), Some("session_expired"));
+    assert_eq!(refused.reason.as_deref(), Some("session_expired"));
     let seen = log.lock().unwrap().clone();
     assert_eq!(seen.len(), 5, "probe, call, refused, probe, retry refused");
     assert_eq!(seen[0].line, "GET /v1/session HTTP/1.1");
@@ -269,14 +277,14 @@ async fn a_secret_signs_its_sessions_with_the_keys_scopes_and_resigns_once() {
     );
     assert_eq!(
         client.session().unwrap().scopes.to_string(),
-        "com.hashinbox.wallets.$read"
+        "com.hashinbox.jobs:read com.hashinbox.wallets:read"
     );
 }
 
 #[tokio::test]
 async fn a_secrets_sessions_take_the_builders_scopes_and_are_kept() {
     let (url, log) = server(|_, _| ok(wallet())).await;
-    let scopes = "com.hashinbox.wallets.$read".parse().unwrap();
+    let scopes = "com.hashinbox.wallets:read".parse().unwrap();
     let ttl = Duration::from_secs(300);
     let client = Client::builder(url)
         .secret(secret())
@@ -302,7 +310,10 @@ async fn a_secrets_sessions_take_the_builders_scopes_and_are_kept() {
         secret: None,
     };
     let refused = wallets_create(&client, WalletsCreateRequest { body: create }).await;
-    assert!(matches!(refused, Err(Error::MissingScope { .. })));
+    assert!(matches!(
+        refused,
+        Err(Error::Api(ApiError { status: 403, reason: Some(reason), .. })) if reason == "missing_scope"
+    ));
     let long = Duration::from_secs(25 * 60 * 60);
     assert!(
         Client::builder("http://x")
@@ -315,7 +326,7 @@ async fn a_secrets_sessions_take_the_builders_scopes_and_are_kept() {
 
 #[tokio::test]
 async fn login_keeps_the_session_and_surfaces_its_reasons() {
-    let token = session("com.hashinbox.*.$*").token;
+    let token = session("com.hashinbox").token;
     let issued = json!({"token": token, "expires_at": 0, "scopes": {}});
     let (url, log) = server(move |n, _| match n {
         0 => error(401, "unauthenticated", Some("totp_required")),
@@ -354,7 +365,7 @@ async fn a_stream_yields_its_events() {
         "event: missed\ndata: {\"missed\":2}\n\n: alive\n\ndata: a\r\ndata: b\r\nid: 7\r\n\r\n";
     let (url, log) = server(move |_, _| (200, "text/event-stream", text.to_owned())).await;
     let client = Client::builder(url)
-        .session(session("com.hashinbox.*.$*"))
+        .session(session("com.hashinbox"))
         .build()
         .unwrap();
     let request = LogsStreamRequest {
@@ -387,7 +398,7 @@ async fn a_stream_yields_its_events() {
 
 /// A client of `url` that may read logs.
 fn streaming(url: String) -> Client {
-    let client = Client::builder(url).session(session("com.hashinbox.*.$*"));
+    let client = Client::builder(url).session(session("com.hashinbox"));
     client.build().unwrap()
 }
 
@@ -470,7 +481,7 @@ async fn a_stream_backs_off_after_an_error_and_ends_on_a_refusal() {
     );
     let refused = events.next().await.unwrap().unwrap_err();
     assert!(
-        matches!(refused, Error::Api { status: 401, .. }),
+        matches!(refused, Error::Api(ApiError { status: 401, .. })),
         "{refused}"
     );
     assert!(events.next().await.is_none());
@@ -479,4 +490,88 @@ async fn a_stream_backs_off_after_an_error_and_ends_on_a_refusal() {
     let resumed: Vec<_> = seen.iter().map(query).collect();
     let cursor = Some("cursor=1");
     assert_eq!(resumed, [None, cursor, cursor, cursor, Some("cursor=2")]);
+}
+
+#[test]
+fn any_error_is_an_api_error() {
+    type Failed = Error<std::io::Error>;
+    let refused = ApiError::from(Failed::Api(ApiError::from(
+        hashinbox_client::client::Response {
+            status: 401,
+            body: json!({"kind": "unauthenticated", "message": "no", "reason": "totp_required"})
+                .to_string(),
+        },
+    )));
+    assert_eq!(refused.reason.as_deref(), Some(reason::TOTP_REQUIRED));
+    assert_eq!(
+        (refused.status, refused.kind, refused.message.as_str()),
+        (401, Kind::Unauthenticated, "no")
+    );
+    assert!(refused.cause.is_none());
+
+    let down = ApiError::from(Failed::Transport(std::io::ErrorKind::TimedOut.into()));
+    assert_eq!(
+        (down.status, down.kind, down.reason),
+        (0, Kind::Unavailable, None)
+    );
+    let cause = down.cause.unwrap();
+    assert!(matches!(cause.downcast_ref(), Some(Failed::Transport(_))));
+    assert_eq!(down.message, cause.to_string());
+
+    let garbled = ApiError::from(Failed::Decode(serde_json::from_str::<u8>("x").unwrap_err()));
+    assert_eq!(
+        (garbled.status, garbled.kind, garbled.reason),
+        (0, Kind::Unavailable, None)
+    );
+    assert!(matches!(
+        garbled.cause.unwrap().downcast_ref(),
+        Some(Failed::Decode(_))
+    ));
+
+    let made = ApiError {
+        message: "made".into(),
+        ..ApiError::default()
+    };
+    assert_eq!(
+        (made.status, made.kind, made.reason, made.metadata.len()),
+        (0, Kind::Unavailable, None, 0)
+    );
+}
+
+#[test]
+fn an_answer_not_the_apis_error_is_unavailable() {
+    let read = |status, body: &str| {
+        let body = body.to_owned();
+        ApiError::from(hashinbox_client::client::Response { status, body })
+    };
+    let html = format!("<html>{}</html>", "x".repeat(2000));
+    for (status, body) in [
+        (502, html.as_str()),
+        (503, ""),
+        (503, r#"{"status":"down"}"#),
+        (500, r#"{"kind":"strange","message":"no"}"#),
+    ] {
+        let error = read(status, body);
+        assert_eq!(
+            (error.status, error.kind, error.reason, error.message),
+            (
+                status,
+                Kind::Unavailable,
+                None,
+                format!("could not parse the response (HTTP {status})")
+            )
+        );
+        let response: String = body.chars().take(1024).collect();
+        assert_eq!(error.metadata, [("response".to_owned(), response)].into());
+    }
+    let error = read(
+        403,
+        r#"{"kind":"permission_denied","message":"no","reason":"missing_scope","metadata":{"scope":"s"}}"#,
+    );
+    assert_eq!(
+        (error.status, error.kind, error.message.as_str()),
+        (403, Kind::PermissionDenied, "no")
+    );
+    assert_eq!(error.reason.as_deref(), Some(reason::MISSING_SCOPE));
+    assert_eq!(error.metadata["scope"], "s");
 }

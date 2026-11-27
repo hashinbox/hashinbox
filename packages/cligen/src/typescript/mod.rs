@@ -30,6 +30,7 @@ impl Typescript {
             .iter()
             .for_each(|model| self.model(&mut models, model));
         let mut operations = marker + &self.imports(spec);
+        self.depends(&mut operations, spec);
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut operations, op));
@@ -37,6 +38,27 @@ impl Typescript {
             (PathBuf::from("models.ts"), models),
             (PathBuf::from("operations.ts"), operations),
         ])
+    }
+
+    /// `DEPENDS`: the document's `x-hashinbox-depends`.
+    fn depends(&self, out: &mut String, spec: &Spec) {
+        let doc = "What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.";
+        let ty = "Readonly<Record<string, readonly string[]>>";
+        if spec.depends.is_empty() {
+            let _ = write!(out, "\n/** {doc} */\nexport const DEPENDS: {ty} = {{}};\n");
+            return;
+        }
+        let entries = spec.depends.iter().map(|(source, targets)| {
+            let targets: Vec<String> = targets.iter().map(|target| quote(target)).collect();
+            (quote(source), format!("[{}]", targets.join(", ")))
+        });
+        let item = Const {
+            doc: doc.into(),
+            name: "DEPENDS".into(),
+            ty: ty.into(),
+            entries: entries.collect(),
+        };
+        let _ = write!(out, "\n{item}");
     }
 
     /// The imports `operations.ts` needs.

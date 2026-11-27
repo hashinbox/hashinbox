@@ -11,29 +11,30 @@ import (
 	"unicode/utf8"
 )
 
-// Scope is one scope: a path of resources and an action, as text
-// `com.hashinbox.wallets[id].$read`.
+// Scope is one scope: a path of resources, full or read only, as text
+// `com.hashinbox.wallets[id]:read`.
 type Scope struct {
-	path   []segment
-	action string // a name, or "*": any
+	path []segment
+	read bool
 }
 
 // segment is one step of a scope's path: a resource, all of it or the one
-// id names, or "*": any one step (at the end, anything below).
+// id names.
 type segment struct {
-	name  string // a name, or "*"
+	name  string
 	id    string
 	hasID bool
 }
 
-// wildcard is the step or action `*`.
-const wildcard = "*"
+// readSuffix ends a read-only scope.
+const readSuffix = ":read"
 
 // ParseScope is the scope text is: steps split by `.` (not inside `[`
-// `]`), the last one the action, `$name` or `$*`.
+// `]`), then `:read` or nothing.
 func ParseScope(text string) (Scope, error) {
 	var steps []string
-	start, inside := 0, false
+	start, inside, end := 0, false, len(text)
+loop:
 	for at := 0; at < len(text); at++ {
 		switch b := text[at]; {
 		case b == '[' && !inside:
@@ -43,15 +44,21 @@ func ParseScope(text string) (Scope, error) {
 		case b == '.' && !inside:
 			steps = append(steps, text[start:at])
 			start = at + 1
+		case b == ':' && !inside:
+			end = at
+			break loop
 		}
 	}
 	if inside {
 		return Scope{}, fmt.Errorf("scope: bad id in %q", text)
 	}
-	action, ok := strings.CutPrefix(text[start:], "$")
-	if !ok || (action != wildcard && !isName(action)) {
-		return Scope{}, fmt.Errorf("scope: %q does not end with $action", text)
+	if rest := text[end:]; rest != "" && rest != readSuffix {
+		return Scope{}, fmt.Errorf("scope: %q does not end with %s or nothing", text, readSuffix)
 	}
+	if text == "" {
+		return Scope{}, errors.New("scope: a scope needs a resource")
+	}
+	steps = append(steps, text[start:end])
 	path := make([]segment, 0, len(steps))
 	for _, step := range steps {
 		parsed, err := parseSegment(step)
@@ -60,17 +67,11 @@ func ParseScope(text string) (Scope, error) {
 		}
 		path = append(path, parsed)
 	}
-	if len(path) == 0 {
-		return Scope{}, errors.New("scope: a scope needs a resource")
-	}
-	return Scope{path: path, action: action}, nil
+	return Scope{path: path, read: end < len(text)}, nil
 }
 
-// parseSegment is the step text is: `*`, `name` or `name[id]`.
+// parseSegment is the step text is: `name` or `name[id]`.
 func parseSegment(text string) (segment, error) {
-	if text == wildcard {
-		return segment{name: wildcard}, nil
-	}
 	name, rest, found := strings.Cut(text, "[")
 	if !found {
 		if !isName(text) {
@@ -174,13 +175,11 @@ func hexDigit(b byte) (byte, bool) {
 
 // String is its text; it parses back to it.
 func (s Scope) String() string {
-	var out strings.Builder
-	for _, step := range s.path {
-		out.WriteString(step.String())
-		out.WriteByte('.')
+	text := joinSteps(s.path)
+	if s.read {
+		text += readSuffix
 	}
-	out.WriteString("$" + s.action)
-	return out.String()
+	return text
 }
 
 func (s segment) String() string {
@@ -190,40 +189,29 @@ func (s segment) String() string {
 	return s.name + "[" + EscapeID(s.id) + "]"
 }
 
-// Covers reports whether s allows everything other allows: its action the
-// same or `$*`, its path matching step by step (a name covers the same
-// name and its ids; `*` in the middle any one step; `*` at the end
-// anything below, nothing included).
+// Covers reports whether s allows everything other allows: s is full or
+// other read only, and s's path is a prefix of other's, step by step (a
+// name covers the same name and its ids). A scope so covers its whole
+// subtree; a child never its parent.
 func (s Scope) Covers(other Scope) bool {
-	actions := s.action == wildcard || s.action == other.action
-	return actions && pathCovers(s.path, other.path)
+	return (!s.read || other.read) && s.reaches(other.path)
 }
 
-func pathCovers(ours, theirs []segment) bool {
-	if len(ours) == 0 {
-		return len(theirs) == 0
-	}
-	if len(ours) == 1 && ours[0].name == wildcard {
-		return true
-	}
-	if len(theirs) == 0 {
+// reaches reports whether its path is a prefix of path, step by step.
+func (s Scope) reaches(path []segment) bool {
+	if len(s.path) > len(path) {
 		return false
 	}
-	return ours[0].covers(theirs[0]) && pathCovers(ours[1:], theirs[1:])
+	for at, step := range s.path {
+		if step.name != path[at].name || step.hasID && (!path[at].hasID || step.id != path[at].id) {
+			return false
+		}
+	}
+	return true
 }
 
-func (s segment) covers(other segment) bool {
-	if s.name == wildcard {
-		return true
-	}
-	if other.name == wildcard || s.name != other.name {
-		return false
-	}
-	return !s.hasID || (other.hasID && s.id == other.id)
-}
-
-// compare orders scopes as packages/scope does: by path, then action; a
-// name before `*`, all of a resource before one id.
+// compare orders scopes as packages/scope does: by path step by step (a
+// prefix first), then full before read only.
 func (s Scope) compare(other Scope) int {
 	for at := 0; at < len(s.path) && at < len(other.path); at++ {
 		if c := s.path[at].compare(other.path[at]); c != 0 {
@@ -233,11 +221,18 @@ func (s Scope) compare(other Scope) int {
 	if c := len(s.path) - len(other.path); c != 0 {
 		return c
 	}
-	return compareNames(s.action, other.action)
+	switch {
+	case s.read == other.read:
+		return 0
+	case s.read:
+		return 1
+	}
+	return -1
 }
 
+// compare orders steps by name, then all of a resource before one id.
 func (s segment) compare(other segment) int {
-	if c := compareNames(s.name, other.name); c != 0 || s.name == wildcard {
+	if c := strings.Compare(s.name, other.name); c != 0 {
 		return c
 	}
 	switch {
@@ -247,19 +242,6 @@ func (s segment) compare(other segment) int {
 		return -1
 	}
 	return strings.Compare(s.id, other.id)
-}
-
-// compareNames orders two names, `*` after every name.
-func compareNames(a, b string) int {
-	switch {
-	case a == b:
-		return 0
-	case a == wildcard:
-		return 1
-	case b == wildcard:
-		return -1
-	}
-	return strings.Compare(a, b)
 }
 
 // Scopes are what a session holds.
@@ -323,6 +305,69 @@ func (s Scopes) FirstUncovered(others Scopes) (Scope, bool) {
 	return Scope{}, false
 }
 
+// Expand is them and every scope depends adds, to a fixed point,
+// compressed. depends maps a source path (`com.hashinbox.triggers`) to the
+// scopes holding it needs. A held scope triggers a source when it covers
+// the source or an id of it, its own ids ignored; each target is added
+// whole, read only when written `:read` or the held scope is read only.
+// An entry whose text does not parse adds nothing.
+func (s Scopes) Expand(depends map[string][]string) Scopes {
+	sources := make([]string, 0, len(depends))
+	for source := range depends {
+		sources = append(sources, source)
+	}
+	sort.Strings(sources)
+	type rule struct {
+		source  Scope
+		targets Scopes
+	}
+	var rules []rule
+	for _, text := range sources {
+		source, err := ParseScope(text)
+		if err != nil {
+			continue
+		}
+		targets := Scopes{}
+		for _, target := range depends[text] {
+			parsed, err := ParseScope(target)
+			if err != nil {
+				targets = nil
+				break
+			}
+			targets = append(targets, parsed)
+		}
+		if targets != nil {
+			rules = append(rules, rule{source, targets})
+		}
+	}
+	held := append(Scopes{}, s...)
+	for at := 0; at < len(held); at++ {
+		scope := held[at]
+		for _, r := range rules {
+			if !triggers(scope, r.source) {
+				continue
+			}
+			for _, target := range r.targets {
+				target.read = target.read || scope.read
+				if !held.Covers(target) {
+					held = append(held, target)
+				}
+			}
+		}
+	}
+	return held.compress()
+}
+
+// triggers reports whether held triggers source's dependencies: it covers
+// source's path, its ids ignored.
+func triggers(held, source Scope) bool {
+	path := make([]segment, len(held.path))
+	for at, step := range held.path {
+		path[at] = segment{name: step.name}
+	}
+	return Scope{path: path}.reaches(source.path)
+}
+
 // String is their text, space-separated.
 func (s Scopes) String() string {
 	texts := make([]string, len(s))
@@ -354,8 +399,8 @@ func (s Scopes) compress() Scopes {
 
 // Pack is them compressed, then grouped by their shared prefix, the
 // shortest text for a JWT claim:
-// `{"com.hashinbox": ["markets.$read", "wallets[a].$read"]}`. A prefix is
-// the leading plain names every scope starting with the same step shares,
+// `{"com.hashinbox": ["triggers", "wallets[a]:read"]}`. A prefix is the
+// leading plain names every scope starting with the same step shares,
 // each scope keeping one step at least. ParseScopes reverses it.
 func (s Scopes) Pack() map[string][]string {
 	compressed := s.compress()
@@ -369,7 +414,7 @@ func (s Scopes) Pack() map[string][]string {
 		shared := sharedPrefix(group)
 		for _, scope := range group {
 			prefix := joinSteps(scope.path[:shared])
-			rest := Scope{path: scope.path[shared:], action: scope.action}
+			rest := Scope{path: scope.path[shared:], read: scope.read}
 			packed[prefix] = append(packed[prefix], rest.String())
 		}
 		start = end
@@ -387,7 +432,7 @@ func sharedPrefix(scopes Scopes) int {
 	first := scopes[0].path
 	at := 0
 	for ; at < shortest-1; at++ {
-		if first[at].hasID || first[at].name == wildcard {
+		if first[at].hasID {
 			break
 		}
 		same := true

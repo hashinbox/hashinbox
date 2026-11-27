@@ -10,8 +10,8 @@ use Hashinbox\CreateWalletRequest;
 use Hashinbox\Json;
 use Hashinbox\Kind;
 use Hashinbox\LogsStreamRequest;
-use Hashinbox\MissingScope;
 use Hashinbox\NetworkTipSearchRequest;
+use Hashinbox\Reason;
 use Hashinbox\Scopes;
 use Hashinbox\Secret;
 use Hashinbox\Session;
@@ -62,7 +62,7 @@ final class ClientTest extends TestCase
         $fake = new FakeTransport(static fn(array $sent): array => $sent['method'] === 'POST'
             ? [201, self::WALLET]
             : [200, '{"items": [], "next_cursor": null}']);
-        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets.$*'));
+        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets'));
         $api = new Client('http://hashinbox.test/', session: $session, transport: $fake);
         walletsCreate($api, new WalletsCreateRequest(new CreateWalletRequest(chain: 'ethereum', network: 'mainnet')));
         $api->send(new WalletsListRequest(limit: 5));
@@ -78,7 +78,7 @@ final class ClientTest extends TestCase
     public function testAPathParameterIsEscaped(): void
     {
         $fake = new FakeTransport(static fn(array $sent): array => [200, self::WALLET]);
-        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets.$read'));
+        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets:read'));
         $wallet = walletGet(new Client('http://hashinbox.test', $session, transport: $fake), new WalletGetRequest('a/b c'));
         self::assertSame('0xabc', $wallet->address);
         self::assertSame([], $wallet->indexes);
@@ -91,7 +91,7 @@ final class ClientTest extends TestCase
             'kind' => 'permission_denied',
             'message' => 'missing scope',
             'reason' => 'missing_scope',
-            'metadata' => ['scope' => 'com.hashinbox.wallets.$read'],
+            'metadata' => ['scope' => 'com.hashinbox.wallets:read'],
         ]));
         try {
             (new Client('http://hashinbox.test', checkScopes: false, transport: $fake))->send(new WalletGetRequest('x'));
@@ -99,19 +99,23 @@ final class ClientTest extends TestCase
         } catch (ApiError $error) {
             self::assertSame([403, Kind::PermissionDenied, 'missing_scope'], [$error->status, $error->kind, $error->reason]);
             self::assertSame('missing scope', $error->getMessage());
-            self::assertSame(['scope' => 'com.hashinbox.wallets.$read'], $error->metadata);
+            self::assertSame(['scope' => 'com.hashinbox.wallets:read'], $error->metadata);
         }
     }
 
     public function testAMissingScopeIsRefusedLocally(): void
     {
         $fake = new FakeTransport(static fn(array $sent): array => throw new \LogicException('sent'));
-        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets[x].$read'));
+        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets[x]:read'));
         try {
             (new Client('http://hashinbox.test', $session, transport: $fake))->send(new WalletGetRequest('y'));
             self::fail('sent');
-        } catch (MissingScope $missing) {
-            self::assertSame('com.hashinbox.wallets[y].$read', $missing->scope);
+        } catch (ApiError $error) {
+            $scope = 'com.hashinbox.wallets[y]:read';
+            self::assertSame(
+                [403, Kind::PermissionDenied, Reason::MissingScope, "wallet_get needs scope {$scope}", ['scope' => $scope, 'operation' => 'wallet_get']],
+                [$error->status, $error->kind, $error->reason, $error->getMessage(), $error->metadata],
+            );
         }
     }
 
@@ -126,7 +130,7 @@ final class ClientTest extends TestCase
                 'id' => $secret->id,
                 'user_id' => 'u1',
                 'name' => 'shop',
-                'scopes' => ['com.hashinbox' => ['wallets.$read']],
+                'scopes' => ['com.hashinbox' => ['wallets:read']],
                 'created_at' => 0,
             ],
             'sub' => null,
@@ -151,11 +155,11 @@ final class ClientTest extends TestCase
         $api->send(new WalletGetRequest('x'));
         self::assertCount(2, $sent);
         [$first, $second] = $sent;
-        self::assertSame('com.hashinbox.wallets.$read', (string) $first->scopes);
+        self::assertSame('com.hashinbox.jobs:read com.hashinbox.wallets:read', (string) $first->scopes);
         self::assertSame(600, $first->expiresAt - $first->issuedAt);
         self::assertSame($second->token, $api->session()?->token);
         // Within a minute of its expiry, a new one is signed.
-        $api->setSession($secret->issue(Scopes::parse('com.hashinbox.wallets.$read'), ttl: 30));
+        $api->setSession($secret->issue(Scopes::parse('com.hashinbox.wallets:read'), ttl: 30));
         $api->send(new WalletGetRequest('x'));
         self::assertGreaterThan(time() + 500, $sent[2]->expiresAt);
         self::assertCount(4, $fake->sent);
@@ -195,7 +199,7 @@ final class ClientTest extends TestCase
             self::assertTrue($request['stream']);
             return [200, $chunks];
         });
-        $api = new Client('http://hashinbox.test', self::secret()->issue(Scopes::parse('com.hashinbox.*.$*')), transport: $fake);
+        $api = new Client('http://hashinbox.test', self::secret()->issue(Scopes::parse('com.hashinbox')), transport: $fake);
         $raw = iterator_to_array(logsStream($api), false);
         self::assertSame(['message', 'missed'], array_map(static fn($event): string => $event->event, $raw));
         $typed = iterator_to_array($api->stream(new LogsStreamRequest()), false);
@@ -218,7 +222,7 @@ final class ClientTest extends TestCase
             }
             return $answer;
         });
-        $scopes = Scopes::parse('com.hashinbox.*.$*');
+        $scopes = Scopes::parse('com.hashinbox');
         $api = new Client('http://hashinbox.test', self::secret()->issue($scopes), transport: $fake, backoff: 0.01, backoffMax: 0.02);
         return [$api, $fake];
     }

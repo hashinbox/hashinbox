@@ -24,10 +24,15 @@ import useMediaQuery from '@mui/material/useMediaQuery';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import {
   walletGet,
+  walletIndexesCreateOperation,
   walletIndexLegsList,
   walletIndexUpdate,
+  walletIndexUpdateOperation,
+  walletPaymentSendOperation,
   walletTagAdd,
+  walletTagAddOperation,
   walletTagRemove,
+  walletTagRemoveOperation,
   type Movement,
   type Wallet as Account,
 } from '@hashinbox/client';
@@ -40,7 +45,6 @@ import { LogsButton } from '@/_components/logs/button';
 import { EmptyRow } from '@/_components/table';
 import { Transaction as Tx } from '@/_components/transaction';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { assetName, assetOf, assetsOf, listingOf, networkOf, tickersOf } from '@/money';
 import { go, href } from '@/route';
 import { mono } from '@/theme';
@@ -48,6 +52,8 @@ import { Balances } from './balances';
 import { Send } from './send';
 import { WatchDialog } from './watch';
 import { haltOf, progressOf } from './watching';
+import { fail, notify, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** A leg's `kind`: 0 received, 1 spent, 2 burned, 3 minted, 4 fee, 5 reward, 6 adjustment. */
 const KIND = ['received', 'spent', 'burned', 'minted', 'fee', 'reward', 'adjustment'];
@@ -115,13 +121,11 @@ const REFRESH_MS = 10_000;
 const figures = { fontFamily: mono, fontWeight: 300, fontVariantNumeric: 'tabular-nums' } as const;
 
 export function Wallet({
-  shell,
   wallet,
   tags,
   onTagged,
   onWatched,
 }: {
-  shell: Shell;
   wallet: Account;
   /** This wallet's tags. */
   tags: string[];
@@ -130,31 +134,38 @@ export function Wallet({
   /** Called with the wallet after it is watched in more assets. */
   onWatched: (wallet: Account) => void;
 }) {
+  const listings = useApp((s) => s.listings);
   const [fresh, setFresh] = useState<Account | null>(null);
   const [picked, setPicked] = useState(assetOf(wallet));
   const asset = picked in wallet.indexes ? picked : assetOf(wallet);
-  const listing = listingOf(wallet, shell.listings, asset)?.metadata;
+  const listing = listingOf(wallet, listings, asset)?.metadata;
   const money = {
     decimals: listing?.decimals ?? 0,
     display: listing?.display_decimals ?? null,
     chain: wallet.chain,
-    ticker: assetName(shell.listings, wallet.chain, wallet.network, asset),
+    ticker: assetName(listings, wallet.chain, wallet.network, asset),
   };
   const [legs, setLegs] = useState<Movement[]>([]);
   const [legsCursor, setLegsCursor] = useState<string | null>(null);
   const [watchOpen, setWatchOpen] = useState(false);
   const [tagOpen, setTagOpen] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
+  const own = { id: wallet.id };
+  const sends = useCan(walletPaymentSendOperation, own);
+  // Watching picks among the assets: their listing too.
+  const watches = useCan(walletIndexesCreateOperation, own);
+  const tagsAdded = useCan(walletTagAddOperation, own);
+  const pauses = useCan(walletIndexUpdateOperation, own);
 
   const refresh = useCallback(() => {
-    walletGet(api, { id: wallet.id }).then(setFresh).catch(shell.fail);
+    walletGet(api, { id: wallet.id }).then(setFresh).catch(fail);
     walletIndexLegsList(api, { id: wallet.id, asset })
       .then((page) => {
         setLegs(page.legs);
         setLegsCursor(page.next_cursor ?? null);
       })
-      .catch(shell.fail);
-  }, [wallet, asset, shell.fail]);
+      .catch(fail);
+  }, [wallet, asset]);
 
   useEffect(() => {
     refresh();
@@ -170,7 +181,7 @@ export function Wallet({
         setLegs((current) => [...current, ...page.legs]);
         setLegsCursor(page.next_cursor ?? null);
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   const theme = useTheme();
@@ -178,7 +189,7 @@ export function Wallet({
 
   /** `id`'s confirmed balance and what is pending on top of it. */
   const balanceOf = (id: string) => {
-    const listed = listingOf(wallet, shell.listings, id)?.metadata;
+    const listed = listingOf(wallet, listings, id)?.metadata;
     const units = { decimals: listed?.decimals ?? 0, display: listed?.display_decimals ?? null };
     const confirmed = fresh ? amountOf(fresh, id) : null;
     const pending = fresh ? pendingOf(fresh, id) : null;
@@ -199,7 +210,7 @@ export function Wallet({
         <Typography sx={{ fontSize: 18, lineHeight: 1.2, color: 'text.primary' }}>
           {confirmed === null ? '—' : format(confirmed, units)}{' '}
           <Box component="span" sx={{ fontSize: 12, color: 'text.secondary' }}>
-            {assetName(shell.listings, wallet.chain, wallet.network, id)}
+            {assetName(listings, wallet.chain, wallet.network, id)}
           </Box>
         </Typography>
         {change !== null && !change.isZero() && (
@@ -228,10 +239,10 @@ export function Wallet({
     )
       .then(() => walletGet(api, { id: wallet.id }))
       .then((changed) => {
-        shell.notify(halt ? 'Indexing resumed.' : 'Indexing paused.');
+        notify(halt ? 'Indexing resumed.' : 'Indexing paused.');
         onWatched(changed);
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
@@ -244,7 +255,7 @@ export function Wallet({
           sx={{ alignItems: 'center', flexWrap: 'wrap', rowGap: 1 }}
         >
           <Box sx={{ display: 'flex', fontSize: 22 }}>
-            <Currencies chain={wallet.chain} tickers={tickersOf(wallet, shell.listings)} />
+            <Currencies chain={wallet.chain} tickers={tickersOf(wallet, listings)} />
           </Box>
           <Box sx={{ minWidth: 0 }}>
             <Box sx={{ fontSize: 15 }}>
@@ -274,21 +285,22 @@ export function Wallet({
                 aria-label="Wallet actions"
                 sx={{ flexWrap: 'wrap' }}
               >
-                {wallet.keyed && assetsOf(wallet).length > 0 && (
+                {sends && wallet.keyed && assetsOf(wallet).length > 0 && (
                   <Button onClick={() => setSendOpen(true)}>Send</Button>
                 )}
-                <Button onClick={() => setWatchOpen(true)}>
-                  {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
-                </Button>
-                <Button onClick={() => setTagOpen(true)}>Add tag</Button>
-                {assetsOf(wallet).length > 0 && (
+                {watches && (
+                  <Button onClick={() => setWatchOpen(true)}>
+                    {assetsOf(wallet).length === 0 ? 'Watch' : 'Watch more'}
+                  </Button>
+                )}
+                {tagsAdded && <Button onClick={() => setTagOpen(true)}>Add tag</Button>}
+                {pauses && assetsOf(wallet).length > 0 && (
                   <Button onClick={toggle}>{halt ? 'Resume' : 'Pause'}</Button>
                 )}
               </ButtonGroup>
               <LogsButton filter={{ wallet_id: wallet.id }} />
             </Stack>
             <Tags
-              shell={shell}
               wallet={wallet}
               tags={tags}
               adding={tagOpen}
@@ -299,9 +311,8 @@ export function Wallet({
         </Stack>
       </Box>
 
-      {wallet.keyed && (
+      {sends && wallet.keyed && (
         <Send
-          shell={shell}
           wallet={wallet}
           asset={asset}
           open={sendOpen}
@@ -324,7 +335,7 @@ export function Wallet({
             <ToggleButton
               key={id}
               value={id}
-              aria-label={assetName(shell.listings, wallet.chain, wallet.network, id)}
+              aria-label={assetName(listings, wallet.chain, wallet.network, id)}
               sx={{
                 px: compact ? 1.5 : 2.5,
                 py: 1,
@@ -338,7 +349,7 @@ export function Wallet({
               <Box sx={{ display: 'flex', fontSize: 22 }}>
                 <Currency
                   chain={wallet.chain}
-                  ticker={assetName(shell.listings, wallet.chain, wallet.network, id)}
+                  ticker={assetName(listings, wallet.chain, wallet.network, id)}
                   label={false}
                 />
               </Box>
@@ -435,13 +446,12 @@ export function Wallet({
         </Button>
       )}
       <WatchDialog
-        shell={shell}
         wallet={wallet}
         open={watchOpen}
         onClose={() => setWatchOpen(false)}
         onDone={(watched) => {
           setWatchOpen(false);
-          shell.notify(`Watching ${assetsOf(watched).join(', ')}.`);
+          notify(`Watching ${assetsOf(watched).join(', ')}.`);
           onWatched(watched);
         }}
       />
@@ -451,14 +461,12 @@ export function Wallet({
 
 /** The wallet's tags, removable; `adding` opens the dialog that adds one. */
 function Tags({
-  shell,
   wallet,
   tags,
   adding,
   onClose,
   onTagged,
 }: {
-  shell: Shell;
   wallet: Account;
   tags: string[];
   adding: boolean;
@@ -466,6 +474,7 @@ function Tags({
   onTagged: () => void;
 }) {
   const [text, setText] = useState('');
+  const removes = useCan(walletTagRemoveOperation, { id: wallet.id });
   const params = (tag: string) => ({ id: wallet.id, tag });
   const add = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -477,17 +486,22 @@ function Tags({
         onClose();
         onTagged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
   const remove = (tag: string) => {
-    walletTagRemove(api, params(tag)).then(onTagged).catch(shell.fail);
+    walletTagRemove(api, params(tag)).then(onTagged).catch(fail);
   };
   return (
     <>
       {tags.length > 0 && (
         <Stack direction="row" sx={{ flexWrap: 'wrap', gap: 0.75 }}>
           {tags.map((tag) => (
-            <Chip key={tag} size="small" label={tag} onDelete={() => remove(tag)} />
+            <Chip
+              key={tag}
+              size="small"
+              label={tag}
+              {...(removes && { onDelete: () => remove(tag) })}
+            />
           ))}
         </Stack>
       )}

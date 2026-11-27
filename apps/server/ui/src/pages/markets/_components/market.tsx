@@ -7,14 +7,16 @@ import { useEffect, useState } from 'react';
 import {
   marketCandlesList,
   marketUpdate,
+  marketUpdateOperation,
   type MarketCandle1h as Candle,
   type MarketListing,
 } from '@hashinbox/client';
 import { api } from '@/api/client';
 import { LineChart } from '@/_components/chart';
 import { LogsButton } from '@/_components/logs/button';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 const BEAT_MS = 10_000;
 const WEEK_MS = 7 * 86_400_000;
@@ -35,23 +37,22 @@ function merged(held: Candle[], fresh: Candle[], since: number): Candle[] {
 
 /** A market: its price feed switch, its candles of each of `tickers` over the last 7 days, its logs. */
 export function Market({
-  shell,
   market,
   tickers,
   onChanged,
 }: {
-  shell: Shell;
   market: MarketListing;
   tickers: string[];
   onChanged: () => void;
 }) {
+  const changes = useCan(marketUpdateOperation, { name: market.name });
   const toggle = () => {
     marketUpdate(api, { name: market.name, body: { feed: !market.feed } })
       .then(() => {
-        shell.notify(`${market.name} price feed ${market.feed ? 'off' : 'on'}.`);
+        notify(`${market.name} price feed ${market.feed ? 'off' : 'on'}.`);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
@@ -60,10 +61,12 @@ export function Market({
         <Typography variant="h2" component="h1" sx={{ fontFamily: mono, flexGrow: 1 }}>
           {market.name}
         </Typography>
-        <FormControlLabel
-          control={<Switch checked={market.feed} onChange={toggle} />}
-          label="Price feed"
-        />
+        {changes && (
+          <FormControlLabel
+            control={<Switch checked={market.feed} onChange={toggle} />}
+            label="Price feed"
+          />
+        )}
         <LogsButton filter={{ market: market.name }} />
       </Stack>
       <Box
@@ -74,7 +77,7 @@ export function Market({
         }}
       >
         {tickers.map((ticker) => (
-          <Candles key={ticker} shell={shell} market={market.name} asset={ticker} />
+          <Candles key={ticker} market={market.name} asset={ticker} />
         ))}
       </Box>
     </Box>
@@ -85,7 +88,7 @@ export function Market({
  * The market's hourly closes of `asset` over the last 7 days; read again
  * every 10 s from the last hour on (its candle still moves).
  */
-function Candles({ shell, market, asset }: { shell: Shell; market: string; asset: string }) {
+function Candles({ market, asset }: { market: string; asset: string }) {
   const [held, setHeld] = useState<Candle[]>([]);
   const [now, setNow] = useState(Date.now);
 
@@ -101,7 +104,7 @@ function Candles({ shell, market, asset }: { shell: Shell; market: string; asset
           setNow(at);
           setHeld((was) => merged(was, fresh.candles, at - WEEK_MS));
         })
-        .catch(shell.fail);
+        .catch(fail);
     };
     read();
     const timer = window.setInterval(read, BEAT_MS);
@@ -109,7 +112,7 @@ function Candles({ shell, market, asset }: { shell: Shell; market: string; asset
       live = false;
       window.clearInterval(timer);
     };
-  }, [market, asset, shell.fail]);
+  }, [market, asset]);
 
   return (
     <Box sx={{ minWidth: 0, p: 1.5, border: 1, borderColor: 'divider', borderRadius: 1 }}>

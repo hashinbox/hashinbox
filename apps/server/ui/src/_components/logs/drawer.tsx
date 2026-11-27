@@ -2,14 +2,13 @@ import Close from '@mui/icons-material/Close';
 import Drawer from '@mui/material/Drawer';
 import IconButton from '@mui/material/IconButton';
 import { useEffect, useState } from 'react';
-import type { Shell } from '@/layout';
 import type { LogSource } from './entries';
 import type { LogFilter } from './filter';
 import { Logs } from './index';
 import { onOpenLogs } from './open';
 
 /** The logs of whatever `openLogs` was given, from the right, live; mounted once. */
-export function LogsDrawer({ shell, source }: { shell: Shell; source: LogSource }) {
+export function LogsDrawer({ source }: { source: LogSource }) {
   const [preset, setPreset] = useState<LogFilter | null>(null);
   useEffect(() => {
     onOpenLogs(setPreset);
@@ -41,9 +40,7 @@ export function LogsDrawer({ shell, source }: { shell: Shell; source: LogSource 
       >
         <Close fontSize="small" />
       </IconButton>
-      {preset && (
-        <Logs key={JSON.stringify(preset)} shell={shell} source={source} preset={preset} />
-      )}
+      {preset && <Logs key={JSON.stringify(preset)} source={source} preset={preset} />}
     </Drawer>
   );
 }

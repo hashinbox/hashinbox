@@ -1,48 +1,36 @@
-//! One scope: a path of resources and an action, as text
-//! `com.hashinbox.wallets[id].$read`.
+//! One scope: a path of resources, full or read only, as text
+//! `com.hashinbox.wallets[id]:read`.
 
 use std::{fmt, str::FromStr};
 
 use crate::ParseError;
 
-/// One step of a scope's path.
+/// One step of a scope's path: a resource, all of it (`wallets`), or only
+/// the one named (`wallets[a]`).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Segment {
-    /// A resource: all of it (`wallets`), or only the one named
-    /// (`wallets[a]`).
-    Name {
-        /// The resource's name: ASCII letters, digits, `_` and `-`.
-        name: String,
-        /// The id it is narrowed to; `None`: every one.
-        id: Option<String>,
-    },
-    /// `*`: any one resource in the middle of a path; at its end, the
-    /// resource before it and anything below.
-    Any,
+pub struct Segment {
+    /// The resource's name: ASCII letters, digits, `_` and `-`.
+    pub name: String,
+    /// The id it is narrowed to; `None`: every one.
+    pub id: Option<String>,
 }
 
-/// What a scope allows doing.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Action {
-    /// One action: `$read`.
-    Named(String),
-    /// `$*`: any action.
-    Any,
-}
-
-/// One scope: `com.hashinbox.wallets[id].$read`.
+/// One scope: `com.hashinbox.wallets[id]` (full: read and write) or
+/// `com.hashinbox.wallets[id]:read` (read only).
 ///
-/// It covers another ([`Scope::covers`]) when its path matches the other's
-/// and its action is the same or `$*`. Its text round-trips through
-/// [`str::parse`]: ids are escaped (`%`, `[`, `]` and whitespace as
-/// `%XX`), so any id is safe in it.
+/// It covers ([`Scope::covers`]) its whole subtree. Its text round-trips
+/// through [`str::parse`]: ids are escaped (`%`, `[`, `]` and whitespace
+/// as `%XX`), so any id is safe in it.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Scope {
     path: Vec<Segment>,
-    action: Action,
+    read: bool,
 }
 
-/// Whether `text` is a resource or action name.
+/// The suffix of a read-only scope.
+const READ: &str = ":read";
+
+/// Whether `text` is a resource name.
 fn is_name(text: &str) -> bool {
     !text.is_empty()
         && text
@@ -51,127 +39,42 @@ fn is_name(text: &str) -> bool {
 }
 
 impl Segment {
-    /// Resource `name`, all of it.
-    ///
-    /// # Errors
-    ///
-    /// When `name` is not a name.
-    pub fn name(name: &str) -> Result<Self, ParseError> {
-        if !is_name(name) {
-            return Err(ParseError::Name(name.to_owned()));
-        }
-        Ok(Self::Name {
-            name: name.to_owned(),
-            id: None,
-        })
-    }
-
-    /// Resource `name`, only `id`.
+    /// Resource `name`, only `id` when it has one.
     ///
     /// # Errors
     ///
     /// When `name` is not a name or `id` is empty.
-    pub fn id(name: &str, id: impl Into<String>) -> Result<Self, ParseError> {
-        let id = id.into();
-        if id.is_empty() {
+    pub fn new(name: &str, id: Option<String>) -> Result<Self, ParseError> {
+        if id.as_deref() == Some("") {
             return Err(ParseError::Id(name.to_owned()));
         }
         if !is_name(name) {
             return Err(ParseError::Name(name.to_owned()));
         }
-        Ok(Self::Name {
+        Ok(Self {
             name: name.to_owned(),
-            id: Some(id),
+            id,
         })
     }
 
-    /// The segment `token` is (`scope!`'s): `*`, or a name narrowed to
-    /// `id`.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __from_token(token: &str, id: Option<String>) -> Self {
-        match token {
-            "*" => Self::Any,
-            name => Self::Name {
-                name: name.to_owned(),
-                id,
-            },
-        }
-    }
-
-    /// Whether it covers `other`, one step of a path.
+    /// Whether it covers `other`, one step of a path: the same name, and
+    /// no id or the same.
     fn covers(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Any, _) => true,
-            (Self::Name { .. }, Self::Any) => false,
-            (
-                Self::Name { name, id },
-                Self::Name {
-                    name: theirs,
-                    id: their_id,
-                },
-            ) => name == theirs && (id.is_none() || id == their_id),
-        }
-    }
-}
-
-impl Action {
-    /// Action `name`.
-    ///
-    /// # Errors
-    ///
-    /// When `name` is not a name.
-    pub fn named(name: &str) -> Result<Self, ParseError> {
-        if !is_name(name) {
-            return Err(ParseError::Name(name.to_owned()));
-        }
-        Ok(Self::Named(name.to_owned()))
-    }
-
-    /// Whether it covers `other`: the same, or `$*`.
-    fn covers(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Any, _) => true,
-            (Self::Named(_), Self::Any) => false,
-            (Self::Named(name), Self::Named(theirs)) => name == theirs,
-        }
-    }
-}
-
-/// Whether path `ours` covers path `theirs`: step by step, a `*` at the
-/// end covering anything below (nothing included).
-fn path_covers(ours: &[Segment], theirs: &[Segment]) -> bool {
-    match (ours.split_first(), theirs.split_first()) {
-        (None, None) | (Some((Segment::Any, [])), _) => true,
-        (Some((step, rest)), Some((their_step, their_rest))) => {
-            step.covers(their_step) && path_covers(rest, their_rest)
-        }
-        _ => false,
+        self.name == other.name && (self.id.is_none() || self.id == other.id)
     }
 }
 
 impl Scope {
-    /// `action` on `path`.
+    /// `path`, read only when `read`.
     ///
     /// # Errors
     ///
     /// When `path` is empty.
-    pub fn new(path: Vec<Segment>, action: Action) -> Result<Self, ParseError> {
+    pub fn new(path: Vec<Segment>, read: bool) -> Result<Self, ParseError> {
         if path.is_empty() {
             return Err(ParseError::Empty);
         }
-        Ok(Self { path, action })
-    }
-
-    /// `scope!`'s scope: `path` (never empty) and `action` (`*` or a name).
-    #[doc(hidden)]
-    #[must_use]
-    pub fn __from_parts(path: Vec<Segment>, action: &str) -> Self {
-        let action = match action {
-            "*" => Action::Any,
-            name => Action::Named(name.to_owned()),
-        };
-        Self { path, action }
+        Ok(Self { path, read })
     }
 
     /// Its path.
@@ -180,33 +83,45 @@ impl Scope {
         &self.path
     }
 
-    /// Its action.
+    /// Whether it is read only (`:read`); otherwise full.
     #[must_use]
-    pub const fn action(&self) -> &Action {
-        &self.action
+    pub const fn is_read(&self) -> bool {
+        self.read
     }
 
-    /// Whether it allows everything `other` allows: its action is the same
-    /// or `$*`, and its path matches step by step, where
-    ///
-    /// - a name covers the same name; `wallets` covers `wallets[a]`, and
-    ///   `wallets[a]` covers only `wallets[a]`;
-    /// - `*` in the middle covers any one step;
-    /// - `*` at the end covers anything below (`wallets.*` covers
-    ///   `wallets`, `wallets[a]` and `wallets[a].legs`).
-    ///
-    /// A path covers no longer path otherwise: `wallets[a]` does not cover
-    /// `wallets[a].legs`.
+    /// Whether it allows everything `other` allows: it is full or `other`
+    /// is read only, and its path is a prefix of `other`'s, step by step
+    /// (`wallets` covers `wallets[a]`, `wallets[a]` only `wallets[a]`).
+    /// A scope so covers its whole subtree: `networks` covers
+    /// `networks[x].endpoints[y]`; a child never covers its parent.
     #[must_use]
     pub fn covers(&self, other: &Self) -> bool {
-        self.action.covers(&other.action) && path_covers(&self.path, &other.path)
+        (!self.read || other.read) && self.reaches(&other.path)
     }
 
-    /// It with its action `action`.
-    pub(crate) fn with_action(&self, action: Action) -> Self {
+    /// Whether its path is a prefix of `path`, step by step.
+    pub(crate) fn reaches(&self, path: &[Segment]) -> bool {
+        self.path.len() <= path.len()
+            && self
+                .path
+                .iter()
+                .zip(path)
+                .all(|(ours, theirs)| ours.covers(theirs))
+    }
+
+    /// It with path `path`.
+    pub(crate) fn with_path(&self, path: Vec<Segment>) -> Self {
+        Self {
+            path,
+            read: self.read,
+        }
+    }
+
+    /// It read only when `read`, else as it is.
+    pub(crate) fn read_if(&self, read: bool) -> Self {
         Self {
             path: self.path.clone(),
-            action,
+            read: self.read || read,
         }
     }
 }
@@ -253,29 +168,25 @@ fn unescape(text: &str) -> Result<String, ParseError> {
 
 impl fmt::Display for Segment {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Any => out.write_str("*"),
-            Self::Name { name, id: None } => out.write_str(name),
-            Self::Name { name, id: Some(id) } => write!(out, "{name}[{}]", escape(id)),
-        }
-    }
-}
-
-impl fmt::Display for Action {
-    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Any => out.write_str("$*"),
-            Self::Named(name) => write!(out, "${name}"),
+        match &self.id {
+            None => out.write_str(&self.name),
+            Some(id) => write!(out, "{}[{}]", self.name, escape(id)),
         }
     }
 }
 
 impl fmt::Display for Scope {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for step in &self.path {
-            write!(out, "{step}.")?;
+        for (at, step) in self.path.iter().enumerate() {
+            if at > 0 {
+                out.write_str(".")?;
+            }
+            write!(out, "{step}")?;
         }
-        write!(out, "{}", self.action)
+        if self.read {
+            out.write_str(READ)?;
+        }
+        Ok(())
     }
 }
 
@@ -283,27 +194,24 @@ impl FromStr for Segment {
     type Err = ParseError;
 
     fn from_str(text: &str) -> Result<Self, ParseError> {
-        if text == "*" {
-            return Ok(Self::Any);
-        }
         let Some((name, rest)) = text.split_once('[') else {
-            return Self::name(text);
+            return Self::new(text, None);
         };
         let id = rest
             .strip_suffix(']')
             .ok_or_else(|| ParseError::Id(name.to_owned()))?;
-        Self::id(name, unescape(id)?)
+        Self::new(name, Some(unescape(id)?))
     }
 }
 
 impl FromStr for Scope {
     type Err = ParseError;
 
-    /// `text`: steps split by `.` (not inside `[` `]`), the last one the
-    /// action, `$name` or `$*`.
+    /// `text`: steps split by `.` (not inside `[` `]`), then `:read` or
+    /// nothing.
     fn from_str(text: &str) -> Result<Self, ParseError> {
         let mut steps = Vec::new();
-        let (mut start, mut inside) = (0, false);
+        let (mut start, mut inside, mut end) = (0, false, text.len());
         for (at, byte) in text.bytes().enumerate() {
             match byte {
                 b'[' if !inside => inside = true,
@@ -312,30 +220,36 @@ impl FromStr for Scope {
                     steps.push(&text[start..at]);
                     start = at + 1;
                 }
+                b':' if !inside => {
+                    end = at;
+                    break;
+                }
                 _ => {}
             }
         }
         if inside {
             return Err(ParseError::Id(text.to_owned()));
         }
-        let action = text[start..]
-            .strip_prefix('$')
-            .ok_or_else(|| ParseError::Action(text.to_owned()))?;
-        let action = match action {
-            "*" => Action::Any,
-            name => Action::named(name)?,
+        let read = match &text[end..] {
+            "" => false,
+            READ => true,
+            _ => return Err(ParseError::Level(text.to_owned())),
         };
+        if text.is_empty() {
+            return Err(ParseError::Empty);
+        }
+        steps.push(&text[start..end]);
         let path = steps
             .into_iter()
             .map(str::parse)
             .collect::<Result<Vec<Segment>, _>>()?;
-        Self::new(path, action)
+        Self::new(path, read)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Scope;
+    use super::{Scope, Segment};
 
     fn scope(text: &str) -> Scope {
         text.parse().unwrap()
@@ -344,11 +258,11 @@ mod tests {
     #[test]
     fn text_round_trips() {
         for text in [
-            "com.hashinbox.wallets.$read",
-            "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read",
-            "com.hashinbox.wallets[a].legs[b].legs.$read",
-            "com.hashinbox.*.$read",
-            "com.hashinbox.wallets.*.$*",
+            "com.hashinbox",
+            "com.hashinbox.wallets:read",
+            "com.hashinbox.wallets[ethereum.mainnet.0xabc]:read",
+            "com.hashinbox.wallets[a].indexes[b]",
+            "com.hashinbox.wallets[a:read]",
         ] {
             assert_eq!(scope(text).to_string(), text);
         }
@@ -356,10 +270,10 @@ mod tests {
 
     #[test]
     fn ids_are_escaped() {
-        let odd = super::Segment::id("wallets", "a,b] c%d").unwrap();
-        let odd = Scope::new(vec![odd], super::Action::Any).unwrap();
+        let odd = Segment::new("wallets", Some("a,b] c%d".to_owned())).unwrap();
+        let odd = Scope::new(vec![odd], false).unwrap();
         let text = odd.to_string();
-        assert_eq!(text, "wallets[a,b%5D%20c%25d].$*");
+        assert_eq!(text, "wallets[a,b%5D%20c%25d]");
         assert_eq!(scope(&text), odd);
     }
 
@@ -367,14 +281,15 @@ mod tests {
     fn bad_text_is_refused() {
         for text in [
             "",
-            "$read",
-            "wallets",
-            "wallets.read",
-            "wallets[].$read",
-            "wallets[a.$read",
-            "wal lets.$read",
-            "wallets.$re ad",
-            "wallets[%zz].$read",
+            ":read",
+            "wallets:write",
+            "wallets:read:read",
+            "wallets.$read",
+            "wallets.*",
+            "wallets[]",
+            "wallets[a",
+            "wal lets",
+            "wallets[%zz]",
         ] {
             assert!(text.parse::<Scope>().is_err(), "{text}");
         }
@@ -384,35 +299,27 @@ mod tests {
     fn coverage() {
         let covers = |ours: &str, theirs: &str| scope(ours).covers(&scope(theirs));
         assert!(
-            covers("a.wallets.$read", "a.wallets[x].$read"),
+            covers("a.wallets:read", "a.wallets[x]:read"),
             "all covers one"
         );
-        assert!(covers("a.wallets[x].$read", "a.wallets[x].$read"));
+        assert!(covers("a.wallets[x]:read", "a.wallets[x]:read"));
         assert!(
-            !covers("a.wallets[x].$read", "a.wallets.$read"),
+            !covers("a.wallets[x]:read", "a.wallets:read"),
             "one, not all"
         );
-        assert!(!covers("a.wallets[x].$read", "a.wallets[y].$read"));
+        assert!(!covers("a.wallets[x]:read", "a.wallets[y]:read"));
+        assert!(covers("a.wallets[x]", "a.wallets[x].tags"), "its subtree");
+        assert!(covers("a.wallets:read", "a.wallets[x].tags:read"));
         assert!(
-            !covers("a.wallets[x].$read", "a.wallets[x].legs.$read"),
-            "no children"
+            !covers("a.wallets:read", "a.wallets[x].tags"),
+            "the level carries"
         );
         assert!(
-            covers("a.*.$read", "a.wallets[x].legs.$read"),
-            "trailing: below"
+            !covers("a.wallets.tags", "a.wallets:read"),
+            "not its parent"
         );
-        assert!(
-            covers("a.wallets.*.$read", "a.wallets.$read"),
-            "trailing: itself too"
-        );
-        assert!(
-            covers("a.*.legs.$read", "a.wallets.legs.$read"),
-            "middle: one step"
-        );
-        assert!(!covers("a.*.legs.$read", "a.wallets.x.legs.$read"));
-        assert!(covers("a.wallets.$*", "a.wallets.$write"));
-        assert!(!covers("a.wallets.$read", "a.wallets.$*"));
-        assert!(!covers("a.wallets.$read", "a.wallets.$write"));
-        assert!(!covers("a.wallets.legs.$read", "a.wallets.*.$read"));
+        assert!(covers("a", "a.wallets[x].tags"), "the root");
+        assert!(covers("a.wallets", "a.wallets:read"), "full covers read");
+        assert!(!covers("a.wallets:read", "a.wallets"));
     }
 }

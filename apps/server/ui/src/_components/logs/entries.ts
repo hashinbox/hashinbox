@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Shell } from '@/layout';
+import { fail, notify } from '@/store/app';
 
 /** One kept entry as a page or the stream holds it. */
 export interface Entry {
@@ -120,11 +120,10 @@ function settle(held: Held, keys: Set<string>): Held {
  * `newer` read the page beyond either end. A live entry goes on top while
  * `atTop`, else it waits until `showWaiting`.
  */
-export function useEntries(source: LogSource, query: Query, shell: Shell, atTop: () => boolean) {
+export function useEntries(source: LogSource, query: Query, atTop: () => boolean) {
   const [held, setHeld] = useState<Held>(NONE);
   const [waiting, setWaiting] = useState<Row[]>([]);
   const loading = useRef(true);
-  const { fail, notify } = shell;
   // Newer pages and the stream run from the jump on, not before it.
   const onward = useMemo(
     () => Object.fromEntries(Object.entries(query).filter(([key]) => key !== 'before')),
@@ -146,7 +145,7 @@ export function useEntries(source: LogSource, query: Query, shell: Shell, atTop:
     return () => {
       current = false;
     };
-  }, [source, query, fail]);
+  }, [source, query]);
 
   const add = useCallback((fresh: Row[]) => {
     setHeld((h) => above(h, fresh, false, false));
@@ -175,25 +174,22 @@ export function useEntries(source: LogSource, query: Query, shell: Shell, atTop:
         if (!abort.signal.aborted) fail(error);
       });
     return () => abort.abort();
-  }, [held.newer, source, onward, atTop, add, notify, fail]);
+  }, [held.newer, source, onward, atTop, add]);
 
   /** Runs `read` unless a read is under way; `then` gets its page. */
-  const load = useCallback(
-    (read: () => Promise<Page>, then: (page: Page) => void) => {
-      if (loading.current) return;
-      loading.current = true;
-      read()
-        .then((page) => {
-          loading.current = false;
-          then(page);
-        })
-        .catch((error: unknown) => {
-          loading.current = false;
-          fail(error);
-        });
-    },
-    [fail],
-  );
+  const load = useCallback((read: () => Promise<Page>, then: (page: Page) => void) => {
+    if (loading.current) return;
+    loading.current = true;
+    read()
+      .then((page) => {
+        loading.current = false;
+        then(page);
+      })
+      .catch((error: unknown) => {
+        loading.current = false;
+        fail(error);
+      });
+  }, []);
 
   const older = useCallback(() => {
     if (!held.older) return;

@@ -13,6 +13,7 @@ import {
   networkBlocksList,
   networkBlockTransactionsList,
   networkTransactionsList,
+  networkTransactionsListOperation,
   type Block as ChainBlock,
   type ConfiguredNetwork,
   type Transaction as ChainTransaction,
@@ -22,10 +23,11 @@ import { Address } from '@/_components/address';
 import { EmptyRow } from '@/_components/table';
 import { Transaction } from '@/_components/transaction';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { Money } from '@/_components/money';
 import { shorten } from '@/money';
 import { mono } from '@/theme';
+import { fail, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 const BEAT_MS = 4000;
 /** How many blocks are asked for: more than the widest strip shows. */
@@ -54,24 +56,24 @@ interface Read {
  * what the picked block (`picked`), or the mempool (`null`), holds.
  */
 export function Chain({
-  shell,
   network,
   picked,
   onPick,
 }: {
-  shell: Shell;
   network: ConfiguredNetwork;
   picked: number | null;
   onPick: (picked: number | null) => void;
 }) {
   const [read, setRead] = useState<Read | null>(null);
   const { chain, network: name } = network;
+  // Without `networks.transactions:read`: the blocks only, no transactions.
+  const reads = useCan(networkTransactionsListOperation);
 
   const refresh = useCallback(() => {
     const path = { chain, network: name };
     Promise.all([
       networkBlocksList(api, { ...path, limit: BLOCKS }),
-      networkTransactionsList(api, { ...path, pending: true }),
+      reads ? networkTransactionsList(api, { ...path, pending: true }) : { transactions: [] },
     ])
       .then(([{ blocks }, { transactions: mempool }]) =>
         setRead((last) => {
@@ -83,8 +85,8 @@ export function Chain({
           return { view, fresh };
         }),
       )
-      .catch(shell.fail);
-  }, [chain, name, shell.fail]);
+      .catch(fail);
+  }, [chain, name, reads]);
 
   useEffect(() => {
     refresh();
@@ -95,7 +97,6 @@ export function Chain({
   const view = read?.view ?? null;
   const blocks = [...(view?.blocks ?? [])].reverse();
   // The picked block and its first page of transactions; `block: null`: none is kept there.
-  const { fail } = shell;
   const [far, setFar] = useState<{
     position: number;
     block: ChainBlock | null;
@@ -105,20 +106,23 @@ export function Chain({
     if (picked === null) return;
     let live = true;
     const params = { chain, network: name, position: picked };
-    Promise.all([networkBlockGet(api, params), networkBlockTransactionsList(api, params)])
+    Promise.all([
+      networkBlockGet(api, params),
+      reads ? networkBlockTransactionsList(api, params) : { transactions: [] },
+    ])
       .then(([found, { transactions }]) => {
         if (live) setFar({ position: picked, block: found, transactions });
       })
       .catch((error: unknown) => {
         if (!live) return;
-        if (error instanceof ApiError && error.status === 404)
+        if (ApiError.from(error).kind === 'not_found')
           setFar({ position: picked, block: null, transactions: [] });
         else fail(error);
       });
     return () => {
       live = false;
     };
-  }, [chain, name, picked, fail]);
+  }, [chain, name, picked, reads]);
   const opened = far?.position === picked ? far : null;
   const block = opened?.block ?? null;
   const shown = picked === null ? (view?.mempool ?? []) : (opened?.transactions ?? []);
@@ -204,7 +208,7 @@ export function Chain({
             const { transfers, fees } = transfersOf(tx.legs);
             const span = Math.max(transfers.length, 1);
             const amount = (asset: string, value: string) => (
-              <Amount shell={shell} chain={chain} network={name} asset={asset} amount={value} />
+              <Amount chain={chain} network={name} asset={asset} amount={value} />
             );
             const side = (address: string | null) =>
               address === null ? (
@@ -305,19 +309,18 @@ function transfersOf(legs: Leg[]): { transfers: Transfer[]; fees: Leg[] } {
 
 /** An atomic amount of `asset`; an unlisted asset by its id. */
 function Amount({
-  shell,
   chain,
   network,
   asset,
   amount,
 }: {
-  shell: Shell;
   chain: string;
   network: string;
   asset: string;
   amount: string;
 }) {
-  const listing = shell.listings.find(
+  const listings = useApp((s) => s.listings);
+  const listing = listings.find(
     (l) => l.asset === asset && l.network.chain === chain && l.network.name === network,
   );
   if (!listing) return `${amount} ${shorten(asset)}`;

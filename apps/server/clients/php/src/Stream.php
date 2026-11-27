@@ -76,8 +76,8 @@ final class Stream implements IteratorAggregate
     /**
      * @return Generator<int, T, mixed, void>
      *
-     * @throws ApiError a refusal other than 5xx or 429
-     * @throws MissingScope a scope the session lacks, unsent
+     * @throws ApiError a refusal other than 5xx or 429, or a scope the
+     *     session lacks, unsent
      */
     public function getIterator(): Generator
     {
@@ -109,8 +109,6 @@ final class Stream implements IteratorAggregate
                 if ($error->status < 500 && $error->status !== 429) {
                     throw $error;
                 }
-            } catch (MissingScope $error) {
-                throw $error;
             } catch (RuntimeException) {
                 // The transport failed, or the body was cut: try again.
             }

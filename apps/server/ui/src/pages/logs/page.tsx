@@ -1,10 +1,9 @@
 import Box from '@mui/material/Box';
 import { logSource } from '@/api/logs';
-import type { Shell } from '@/layout';
 import { Logs as View } from '@/_components/logs';
 
 /** Every kept log entry, newest first, and each new one live; full width, filtered. */
-export function Logs({ shell }: { shell: Shell }) {
+export function Logs() {
   return (
     <Box
       sx={{
@@ -16,7 +15,7 @@ export function Logs({ shell }: { shell: Shell }) {
         flexDirection: 'column',
       }}
     >
-      <View shell={shell} source={logSource} />
+      <View source={logSource} />
     </Box>
   );
 }

@@ -8,6 +8,12 @@ import (
 	"net/url"
 )
 
+// Depends is what holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+var Depends = map[string][]string{
+	"mini.owners.with.a.rather.long.name": {"mini.pets.with.a.long.name:read", "mini.vets"},
+	"mini.pets":                           {"mini.owners:read"},
+}
+
 // animalsList is GET /v1/animals.
 var animalsList = Operation{
 	ID:     "animals_list",
@@ -55,7 +61,7 @@ var logsStream = Operation{
 	ID:        "logs_stream",
 	Method:    "GET",
 	Path:      "/v1/logs/stream",
-	Templates: []string{"mini.logs.$read"},
+	Templates: []string{"mini.logs:read"},
 }
 
 // LogsStreamRequest is LogsStream's input: its path and query parameters, and its body.
@@ -133,7 +139,7 @@ var petDelete = Operation{
 	ID:        "pet_delete",
 	Method:    "DELETE",
 	Path:      "/v1/pets/{id}",
-	Templates: []string{"mini.pets[{id}].$write"},
+	Templates: []string{"mini.pets[{id}]"},
 }
 
 // PetDeleteRequest is PetDelete's input: its path and query parameters, and its body.
@@ -176,7 +182,7 @@ var petEventsStream = Operation{
 	ID:        "pet_events_stream",
 	Method:    "GET",
 	Path:      "/v1/pets/{id}/events",
-	Templates: []string{"mini.pets[{id}].$read"},
+	Templates: []string{"mini.pets[{id}]:read"},
 }
 
 // PetEventsStreamRequest is PetEventsStream's input: its path and query parameters, and its body.
@@ -241,7 +247,7 @@ var petGet = Operation{
 	ID:        "pet_get",
 	Method:    "GET",
 	Path:      "/v1/pets/{id}",
-	Templates: []string{"mini.pets[{id}].$read"},
+	Templates: []string{"mini.pets[{id}]:read"},
 }
 
 // PetGetRequest is PetGet's input: its path and query parameters, and its body.
@@ -287,7 +293,7 @@ var petsCreate = Operation{
 	ID:        "pets_create",
 	Method:    "POST",
 	Path:      "/v1/pets",
-	Templates: []string{"mini.pets.$write", "mini.owners.$read"},
+	Templates: []string{"mini.pets", "mini.owners:read"},
 }
 
 // PetsCreateRequest is PetsCreate's input: its path and query parameters, and its body.
@@ -332,7 +338,7 @@ var petsList = Operation{
 	ID:        "pets_list",
 	Method:    "GET",
 	Path:      "/v1/pets",
-	Templates: []string{"mini.pets.$read"},
+	Templates: []string{"mini.pets:read"},
 }
 
 // PetsListRequest is PetsList's input: its path and query parameters, and its body.

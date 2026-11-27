@@ -15,7 +15,7 @@ use super::{
     json::{PackedScopes, serialize_packed},
     schema::user_key,
 };
-use crate::db::Page;
+use crate::{auth, db::Page};
 
 /// The prefix of a key's client id.
 const ID_PREFIX: &str = "hip/";
@@ -148,12 +148,15 @@ impl UserKey {
 
     /// Whether it lets `session` (one it issued, or its bearer secret's)
     /// call at `now` (Unix ms): not revoked or expired, not invalidated
-    /// since the session was issued, and its scopes covering the session's.
+    /// since the session was issued, and its scopes covering the session's,
+    /// each expanded (`auth::DEPENDS`).
     pub(crate) fn accepts(&self, session: &Session, now: i64) -> bool {
         self.revoked_at.is_none()
             && self.expires_at.is_none_or(|expires| expires > now)
             && !session.is_invalidated_by(self.invalidated_at)
-            && self.scopes.first_uncovered(&session.scopes).is_none()
+            && auth::expanded(&self.scopes)
+                .first_uncovered(&auth::expanded(&session.scopes))
+                .is_none()
     }
 }
 

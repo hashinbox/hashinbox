@@ -1,14 +1,12 @@
 import AccountBalanceWallet from '@mui/icons-material/AccountBalanceWallet';
 import Box from '@mui/material/Box';
 import type { Wallet as Account } from '@hashinbox/client';
-import type { Shell } from '@/layout';
 import { Empty } from '@/_components/empty';
 import { Rail } from './_components/rail';
 import { Wallet } from './_components/wallet';
 import { Split } from '@/_components/split';
 
 interface Props {
-  shell: Shell;
   wallets: Account[];
   selected: string | null;
   onSelect: (id: string) => void;
@@ -22,16 +20,7 @@ interface Props {
 }
 
 /** The wallet list beside the one wallet it has selected. */
-export function Wallets({
-  shell,
-  wallets,
-  selected,
-  onSelect,
-  onClose,
-  onAdded,
-  tags,
-  onTagged,
-}: Props) {
+export function Wallets({ wallets, selected, onSelect, onClose, onAdded, tags, onTagged }: Props) {
   const current = wallets.find((w) => w.id === selected) ?? null;
   return (
     <Split
@@ -40,7 +29,6 @@ export function Wallets({
       onClose={onClose}
       list={
         <Rail
-          shell={shell}
           wallets={wallets}
           selected={selected}
           onSelect={onSelect}
@@ -53,7 +41,6 @@ export function Wallets({
           {current ? (
             <Wallet
               key={current.id}
-              shell={shell}
               wallet={current}
               tags={tags.get(current.id) ?? []}
               onTagged={onTagged}

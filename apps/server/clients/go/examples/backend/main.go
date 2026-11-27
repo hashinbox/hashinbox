@@ -39,7 +39,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	read := hashinbox.Fill("com.hashinbox.wallets[{id}].$read", map[string]string{"id": wallet.ID})
+	read := hashinbox.Fill("com.hashinbox.wallets[{id}]:read", map[string]string{"id": wallet.ID})
 	session, err := secret.Issue(
 		hashinbox.WithScopes(hashinbox.MustScopes(read)),
 		hashinbox.WithSubject(*customer),

@@ -149,7 +149,7 @@ type CreateSessionRequest struct {
 	// A login: the user's password; or `passphrase`, not both.
 	Password *string `json:"password,omitempty"`
 	// Fewer scopes than the issuer's, packed
-	// (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+	// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
 	// absent.
 	Scopes map[string][]string `json:"scopes,omitempty"`
 	// A key's session: who it is for (a customer); logged, grants
@@ -1352,7 +1352,7 @@ type User struct {
 	// Its name, as shown.
 	Name string `json:"name"`
 	// The widest scopes it may issue, packed in JSON
-	// (`{"com.hashinbox": ["wallets.$read"]}`).
+	// (`{"com.hashinbox": ["wallets:read"]}`).
 	Scopes map[string][]string `json:"scopes"`
 }
 

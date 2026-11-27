@@ -15,6 +15,9 @@ import Typography from '@mui/material/Typography';
 import { useEffect, useState } from 'react';
 import {
   networkEndpointDelete,
+  networkEndpointDeleteOperation,
+  networkEndpointsCreateOperation,
+  networkEndpointStateUpdateOperation,
   networkEndpointFailuresList,
   networkEndpointStateUpdate,
   type ConfiguredNetwork,
@@ -24,10 +27,11 @@ import {
 import { api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { AddNode } from './add';
 import { Routes } from './routes';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** A stored node as the server lists it, its URL parsed by the browser; `index` is its position. */
 interface Node {
@@ -48,11 +52,9 @@ function summary(node: RpcNode): string {
 
 /** A network's nodes in failover order, and the one picked, parsed. */
 export function Nodes({
-  shell,
   network,
   onChanged,
 }: {
-  shell: Shell;
   network: ConfiguredNetwork;
   onChanged: () => void;
 }) {
@@ -68,17 +70,18 @@ export function Nodes({
   }));
   const node = nodes[picked] ?? nodes[0] ?? null;
   const name = `${network.chain}/${network.network}`;
+  const adds = useCan(networkEndpointsCreateOperation, network);
 
   const remove = (target: Node) => {
     setRemoving(null);
     const params = { chain: network.chain, network: network.network, id: target.stored.id };
     networkEndpointDelete(api, params)
       .then(() => {
-        shell.notify(`${target.url.origin} removed from ${name}.`);
+        notify(`${target.url.origin} removed from ${name}.`);
         setPicked(0);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   const toggle = (target: Node) => {
@@ -86,10 +89,10 @@ export function Nodes({
     const body = { state: target.enabled ? ('disabled' as const) : ('enabled' as const) };
     networkEndpointStateUpdate(api, { ...params, body })
       .then(() => {
-        shell.notify(`${target.url.origin} ${target.enabled ? 'disabled' : 'enabled'}.`);
+        notify(`${target.url.origin} ${target.enabled ? 'disabled' : 'enabled'}.`);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
@@ -98,9 +101,11 @@ export function Nodes({
         <Typography variant="h2" component="h1" sx={{ fontFamily: mono, flexGrow: 1 }}>
           {name}
         </Typography>
-        <Button variant="outlined" onClick={() => setAdding(true)}>
-          Add node
-        </Button>
+        {adds && (
+          <Button variant="outlined" onClick={() => setAdding(true)}>
+            Add node
+          </Button>
+        )}
       </Stack>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 1, mb: 3, maxWidth: 720 }}>
         Calls go to the healthy node with the highest tip, then to the others in order; a node
@@ -174,15 +179,14 @@ export function Nodes({
           />
         )}
       </Box>
-      <Routes shell={shell} network={network} onChanged={onChanged} />
+      <Routes network={network} onChanged={onChanged} />
       <AddNode
-        shell={shell}
         network={network}
         open={adding}
         onClose={() => setAdding(false)}
         onAdded={() => {
           setAdding(false);
-          shell.notify(`Node added to ${name}; in use now.`);
+          notify(`Node added to ${name}; in use now.`);
           onChanged();
         }}
       />
@@ -216,6 +220,9 @@ function Detail({
   onToggle: () => void;
   last: boolean;
 }) {
+  const own = { chain: network.chain, network: network.network, id: node.stored.id };
+  const changes = useCan(networkEndpointStateUpdateOperation, own);
+  const removes = useCan(networkEndpointDeleteOperation, own);
   const row = (label: string, value: string) => (
     <TableRow>
       <TableCell sx={{ color: 'text.secondary', width: 150 }}>{label}</TableCell>
@@ -268,14 +275,18 @@ function Detail({
         </TableBody>
       </Table>
       <Stack direction="row" spacing={1} sx={{ mt: 1.5, alignItems: 'center' }}>
-        <FormControlLabel
-          control={<Switch checked={node.enabled} onChange={onToggle} />}
-          label={node.enabled ? 'Enabled' : 'Disabled'}
-        />
+        {changes && (
+          <FormControlLabel
+            control={<Switch checked={node.enabled} onChange={onToggle} />}
+            label={node.enabled ? 'Enabled' : 'Disabled'}
+          />
+        )}
         <Box sx={{ flexGrow: 1 }} />
-        <Button color="error" disabled={last} onClick={onRemove}>
-          {last ? 'The last node stays' : 'Remove node'}
-        </Button>
+        {removes && (
+          <Button color="error" disabled={last} onClick={onRemove}>
+            {last ? 'The last node stays' : 'Remove node'}
+          </Button>
+        )}
       </Stack>
       {/* Read again whenever the node is disabled or enabled. */}
       <Failures key={stored.disabled?.id ?? 0} network={network} id={stored.id} />

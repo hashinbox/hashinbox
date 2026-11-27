@@ -192,8 +192,8 @@ pub(crate) struct Issued {
     pub(crate) session: Session,
 }
 
-/// `packed` as scopes the schema knows, each covered by `within` (the
-/// issuer's): what a session, key or user may be issued.
+/// `packed` as scopes the schema knows, covered by `within` (the
+/// issuer's), each expanded: what a session, key or user may be issued.
 ///
 /// # Errors
 ///
@@ -207,7 +207,7 @@ pub(crate) fn narrowed(packed: &Packed, within: &Scopes) -> Result<Scopes, Error
             "{unknown} is not a known scope"
         )));
     }
-    if let Some(wider) = within.first_uncovered(&scopes) {
+    if let Some(wider) = auth::expanded(within).first_uncovered(&auth::expanded(&scopes)) {
         return Err(Error::permission_denied(format!(
             "{wider} is wider than the issuer's scopes"
         )));

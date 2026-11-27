@@ -1,12 +1,13 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
-import { statsGet, type Stats } from '@hashinbox/client';
+import { statsGet, statsGetOperation, type Stats } from '@hashinbox/client';
 import { api } from '@/api/client';
 import { HashinboxMark } from '@/_components/logo';
 import { Sparkline } from '@/_components/sparkline';
 import { Stat } from '@/_components/stat';
-import type { Shell } from '@/layout';
+import { fail } from '@/store/app';
+import { useCan } from '@/store/session';
 
 const BEAT_MS = 10_000;
 const compact = new Intl.NumberFormat(undefined, { notation: 'compact' });
@@ -17,18 +18,21 @@ function hourOf(start: number): string {
 }
 
 /** What the store holds across every network, and its last day, in cards; `banner` above. */
-export function Dashboard({ shell, banner }: { shell: Shell; banner?: ReactNode }) {
+export function Dashboard({ banner }: { banner?: ReactNode }) {
   const [stats, setStats] = useState<Stats | null>(null);
+  const reads = useCan(statsGetOperation);
 
   const refresh = useCallback(() => {
-    statsGet(api).then(setStats).catch(shell.fail);
-  }, [shell.fail]);
+    statsGet(api).then(setStats).catch(fail);
+  }, []);
 
+  // Without `stats:read`, no cards: the dashboard is the title (and the banner).
   useEffect(() => {
+    if (!reads) return;
     refresh();
     const timer = window.setInterval(refresh, BEAT_MS);
     return () => window.clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, reads]);
 
   return (
     <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, position: 'relative', zIndex: 0 }}>
@@ -37,7 +41,7 @@ export function Dashboard({ shell, banner }: { shell: Shell; banner?: ReactNode 
         Dashboard
       </Typography>
       {banner}
-      {stats && <Cards stats={stats} />}
+      {reads && stats && <Cards stats={stats} />}
     </Box>
   );
 }

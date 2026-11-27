@@ -1,11 +1,11 @@
-// Scopes as text (`com.hashinbox.wallets[x].$read`), checked by the SDK's
+// Scopes as text (`com.hashinbox.wallets[x]:read`), checked by the SDK's
 // port of `packages/scope`, so the picker offers only what is held.
-import { Scopes, type Packed } from '@hashinbox/client';
+import { DEPENDS, Scope, Scopes, type Packed } from '@hashinbox/client';
 
 export const ROOT = 'com.hashinbox';
 
-/** Each resource the server checks and its actions: `wallets` → `read`, `write`. */
-export type Resources = [string, string[]][];
+/** The scope tree the server's routes ask for, ids dropped, a parent before its children: `wallets`, `wallets.tags`. */
+export type Resources = string[];
 
 /** Every scope of `packed`, written in full. */
 export function unpack(packed: Packed): string[] {
@@ -14,9 +14,14 @@ export function unpack(packed: Packed): string[] {
   );
 }
 
-/** `scopes` packed under `com.hashinbox`, as the server takes them. */
+/** `scopes` packed under `com.hashinbox` (the root itself as it is), as the server takes them. */
 export function pack(scopes: string[]): Packed {
-  return { [ROOT]: scopes.map(short) };
+  const packed: Packed = {};
+  for (const scope of scopes) {
+    const [prefix, rest] = scope.startsWith(`${ROOT}.`) ? [ROOT, short(scope)] : ['', scope];
+    (packed[prefix] ??= []).push(rest);
+  }
+  return packed;
 }
 
 /** A scope without `com.hashinbox.`. */
@@ -24,59 +29,48 @@ export function short(scope: string): string {
   return scope.startsWith(`${ROOT}.`) ? scope.slice(ROOT.length + 1) : scope;
 }
 
-/** A scope with `com.hashinbox.`. */
+/** A scope with `com.hashinbox.` (`:read` alone: the root's). */
 export function full(scope: string): string {
-  return scope.startsWith(`${ROOT}.`) ? scope : `${ROOT}.${scope}`;
+  if (scope.startsWith(`${ROOT}.`) || scope.startsWith(`${ROOT}:`) || scope === ROOT) return scope;
+  return scope.startsWith(':') ? `${ROOT}${scope}` : `${ROOT}.${scope}`;
 }
 
-/** Its path steps (ids keep their dots) and its action. */
-function parts(scope: string): { path: string[]; action: string } {
-  const at = scope.lastIndexOf('.$');
-  const text = at < 0 ? scope : scope.slice(0, at);
-  const path: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    if (c === '[') depth++;
-    if (c === ']') depth--;
-    if (c === '.' && depth === 0) {
-      path.push(text.slice(start, i));
-      start = i + 1;
-    }
-  }
-  path.push(text.slice(start));
-  return { path, action: at < 0 ? '' : scope.slice(at + 2) };
-}
-
-/** Whether one of `held` allows everything `wanted` allows, as the server checks it. */
+/** Whether `held` (expanded as the server does) allows everything `wanted` allows. */
 export function allows(held: string[], wanted: string): boolean {
-  return Scopes.parse(held.join(' ')).covers(wanted);
+  return Scopes.parse(held.join(' ')).expand(DEPENDS).covers(wanted);
 }
 
-/** What a scope allows, in words: `read wallets`, `everything`. */
+/** What a scope allows, in words: `read wallets › tags`, `everything`. */
 export function readable(scope: string): string {
-  const { path, action } = parts(short(scope));
-  const what = path.join(' › ').replace(/(^| › )\*$/, '$1everything');
-  if (action === '*') return what === 'everything' ? 'everything' : `read and write ${what}`;
-  return `${action} ${what}`;
+  let parsed: Scope;
+  try {
+    parsed = Scope.parse(scope);
+  } catch {
+    return 'unknown';
+  }
+  const steps = parsed.path.slice(2).map((step) => step.name + (step.id ? ` ${step.id}` : ''));
+  const what = steps.length === 0 ? 'everything' : steps.join(' › ');
+  return parsed.read ? `read ${what}` : what === 'everything' ? what : `full ${what}`;
 }
 
-/** The resources and actions the server's routes ask for, from its OpenAPI document. */
+/** What holding `path` (full) also gives, beyond its subtree: `wallets`. */
+export function implied(path: string): string[] {
+  return (DEPENDS[`${ROOT}.${path}`] ?? []).map(short);
+}
+
+/** The scope tree the server's routes ask for, from its OpenAPI document: each path, ids dropped, and its parents. */
 export function resourcesOf(document: unknown): Resources {
-  const byResource = new Map<string, Set<string>>();
-  const paths = (document as { paths?: Record<string, Record<string, unknown>> }).paths ?? {};
-  for (const item of Object.values(paths))
+  const paths = new Set<string>();
+  const routes = (document as { paths?: Record<string, Record<string, unknown>> }).paths ?? {};
+  for (const item of Object.values(routes))
     for (const operation of Object.values(item)) {
       const security = (operation as { security?: Record<string, string[]>[] }).security ?? [];
-      for (const scope of security.flatMap((r) => Object.values(r).flat())) {
-        if (scope.includes('[')) continue;
-        const { path, action } = parts(short(scope));
-        const resource = path.join('.');
-        byResource.set(resource, (byResource.get(resource) ?? new Set()).add(action));
+      for (const template of security.flatMap((r) => Object.values(r).flat())) {
+        const steps = short(template.replace(/\[[^\]]*\]/g, '').replace(/:read$/, '')).split('.');
+        steps.forEach((_, at) => paths.add(steps.slice(0, at + 1).join('.')));
       }
     }
-  return [...byResource.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([resource, actions]) => [resource, [...actions].sort()]);
+  // A space sorts before every name's letter: a parent before its children.
+  const key = (path: string) => path.replaceAll('.', ' ');
+  return [...paths].sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 }

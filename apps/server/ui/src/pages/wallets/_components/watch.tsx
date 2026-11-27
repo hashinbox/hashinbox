@@ -16,10 +16,11 @@ import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import type { Listing, Wallet } from '@hashinbox/client';
-import type { Shell } from '@/layout';
+import { networkTipSearchOperation, type Listing, type Wallet } from '@hashinbox/client';
 import { SearchDialog } from './search';
 import { WATCH_NOTHING, watch, type Watching } from './watching';
+import { fail, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** The assets to index in, and the block to index from. */
 export function WatchFields({
@@ -36,6 +37,7 @@ export function WatchFields({
   freshOnly?: boolean;
 }) {
   const network = offered[0]?.network;
+  const searches = useCan(networkTipSearchOperation);
   const [searching, setSearching] = useState(false);
 
   return (
@@ -84,7 +86,7 @@ export function WatchFields({
               slotProps={{
                 htmlInput: { inputMode: 'numeric' },
                 input: {
-                  endAdornment: network && (
+                  endAdornment: network && searches && (
                     <InputAdornment position="end">
                       <Tooltip title="Find by time">
                         <IconButton
@@ -123,21 +125,20 @@ export function WatchFields({
 
 /** Indexes `wallet` in more assets: step 2 of adding a wallet, alone. */
 export function WatchDialog({
-  shell,
   wallet,
   open,
   onClose,
   onDone,
 }: {
-  shell: Shell;
   wallet: Wallet;
   open: boolean;
   onClose: () => void;
   onDone: (wallet: Wallet) => void;
 }) {
+  const listings = useApp((s) => s.listings);
   const [watching, setWatching] = useState<Watching>(WATCH_NOTHING);
   const [busy, setBusy] = useState(false);
-  const offered = shell.listings.filter(
+  const offered = listings.filter(
     (l) =>
       l.network.chain === wallet.chain &&
       l.network.name === wallet.network &&
@@ -155,7 +156,7 @@ export function WatchDialog({
               setWatching(WATCH_NOTHING);
               onDone(watched);
             })
-            .catch(shell.fail)
+            .catch(fail)
             .finally(() => setBusy(false));
         }}
       >

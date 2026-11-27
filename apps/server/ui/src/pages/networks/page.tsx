@@ -6,10 +6,14 @@ import IconButton from '@mui/material/IconButton';
 import Stack from '@mui/material/Stack';
 import Tooltip from '@mui/material/Tooltip';
 import { useCallback, useEffect, useState } from 'react';
-import { networksList, type ConfiguredNetwork } from '@hashinbox/client';
+import {
+  endpointsCreateOperation,
+  networkEndpointsListOperation,
+  networksList,
+  type ConfiguredNetwork,
+} from '@hashinbox/client';
 import { api } from '@/api/client';
 import { Empty } from '@/_components/empty';
-import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
 import { Nodes } from './_components/nodes';
 import { Chain } from './_components/chain';
@@ -17,6 +21,8 @@ import { AddNodes } from './_components/add';
 import { Split } from '@/_components/split';
 import { Side, SideItem } from '@/_components/side';
 import { LogsButton } from '@/_components/logs/button';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 const BEAT_MS = 4000;
 /** How far behind its tip (in time) a network still counts as live. */
@@ -64,7 +70,7 @@ function syncOf(n: ConfiguredNetwork): { label: string; color: string; live: boo
 }
 
 /** The networks beside the one whose RPC nodes are shown. */
-export function Networks({ shell }: { shell: Shell }) {
+export function Networks() {
   const [networks, setNetworks] = useState<ConfiguredNetwork[]>([]);
   const [chains, setChains] = useState<string[]>([]);
   const [adding, setAdding] = useState(false);
@@ -72,6 +78,8 @@ export function Networks({ shell }: { shell: Shell }) {
   const [, chain, network, page, position] = useSegments();
   const selected = chain && network ? `${chain}/${network}` : null;
   const settings = page === 'settings';
+  const adds = useCan(endpointsCreateOperation);
+  const configures = useCan(networkEndpointsListOperation, { chain, network });
 
   const refresh = useCallback(() => {
     networksList(api)
@@ -79,8 +87,8 @@ export function Networks({ shell }: { shell: Shell }) {
         setNetworks(list.networks);
         setChains(list.chains);
       })
-      .catch(shell.fail);
-  }, [shell.fail]);
+      .catch(fail);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -100,18 +108,20 @@ export function Networks({ shell }: { shell: Shell }) {
           <Side
             title="Networks"
             actions={
-              <Tooltip title="Add nodes: a provider's, or your own">
-                <IconButton
-                  size="small"
-                  aria-label="Add RPC nodes"
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    setAdding(true);
-                  }}
-                >
-                  <Add fontSize="small" />
-                </IconButton>
-              </Tooltip>
+              adds && (
+                <Tooltip title="Add nodes: a provider's, or your own">
+                  <IconButton
+                    size="small"
+                    aria-label="Add RPC nodes"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      setAdding(true);
+                    }}
+                  >
+                    <Add fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )
             }
             empty={networks.length === 0 && 'No network is configured.'}
           >
@@ -124,26 +134,28 @@ export function Networks({ shell }: { shell: Shell }) {
                 onClick={() => go(['networks', n.chain, n.network])}
                 detail={`${String(enabledOf(n))}/${String(n.endpoints.length)} node${n.endpoints.length === 1 ? '' : 's'} enabled · indexed #${String(n.index?.indexed ?? '—')} · tip #${String(n.tip.live ?? '—')}`}
                 extra={
-                  <Tooltip title="Settings">
-                    <IconButton
-                      size="small"
-                      aria-label={`${nameOf(n)} settings`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        go(['networks', n.chain, n.network, 'settings']);
-                      }}
-                      sx={{
-                        p: 0.25,
-                        mr: -0.5,
-                        color:
-                          settings && current !== null && nameOf(n) === nameOf(current)
-                            ? 'text.primary'
-                            : 'text.secondary',
-                      }}
-                    >
-                      <Settings sx={{ fontSize: 16 }} />
-                    </IconButton>
-                  </Tooltip>
+                  configures && (
+                    <Tooltip title="Settings">
+                      <IconButton
+                        size="small"
+                        aria-label={`${nameOf(n)} settings`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          go(['networks', n.chain, n.network, 'settings']);
+                        }}
+                        sx={{
+                          p: 0.25,
+                          mr: -0.5,
+                          color:
+                            settings && current !== null && nameOf(n) === nameOf(current)
+                              ? 'text.primary'
+                              : 'text.secondary',
+                        }}
+                      >
+                        <Settings sx={{ fontSize: 16 }} />
+                      </IconButton>
+                    </Tooltip>
+                  )
                 }
                 problem={n.index?.job_reason}
               />
@@ -157,12 +169,11 @@ export function Networks({ shell }: { shell: Shell }) {
                 <LogsButton filter={{ network: nameOf(current) }} />
               </Stack>
             )}
-            {current && settings ? (
-              <Nodes key={nameOf(current)} shell={shell} network={current} onChanged={refresh} />
+            {current && settings && configures ? (
+              <Nodes key={nameOf(current)} network={current} onChanged={refresh} />
             ) : current ? (
               <Chain
                 key={nameOf(current)}
-                shell={shell}
                 network={current}
                 picked={page === 'blocks' && position ? Number(position) : null}
                 onPick={(picked) => {
@@ -180,14 +191,13 @@ export function Networks({ shell }: { shell: Shell }) {
         }
       />
       <AddNodes
-        shell={shell}
         networks={networks}
         chains={chains}
         open={adding}
         onClose={() => setAdding(false)}
         onAdded={(changed) => {
           setAdding(false);
-          shell.notify(
+          notify(
             `Nodes added to ${changed.map((c) => `${c.network.chain}/${c.network.name}`).join(', ')}; in use now.`,
           );
           refresh();

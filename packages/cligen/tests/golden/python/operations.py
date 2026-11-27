@@ -31,6 +31,16 @@ from .models import (
     animal_from_json,
 )
 
+# What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+DEPENDS: dict[str, tuple[str, ...]] = {
+    "mini.owners.with.a.rather.long.name": (
+        "mini.pets.with.a.long.name:read",
+        "mini.vets",
+    ),
+    "mini.pets": ("mini.owners:read",),
+}
+
+
 # `GET /v1/animals`.
 ANIMALS_LIST = Operation(
     id="animals_list",
@@ -65,7 +75,7 @@ LOGS_STREAM = Operation(
     id="logs_stream",
     method="GET",
     path="/v1/logs/stream",
-    templates=("mini.logs.$read",),
+    templates=("mini.logs:read",),
 )
 
 
@@ -114,7 +124,7 @@ PET_DELETE = Operation(
     id="pet_delete",
     method="DELETE",
     path="/v1/pets/{id}",
-    templates=("mini.pets[{id}].$write",),
+    templates=("mini.pets[{id}]",),
 )
 
 
@@ -145,7 +155,7 @@ PET_EVENTS_STREAM = Operation(
     id="pet_events_stream",
     method="GET",
     path="/v1/pets/{id}/events",
-    templates=("mini.pets[{id}].$read",),
+    templates=("mini.pets[{id}]:read",),
 )
 
 
@@ -195,7 +205,7 @@ PET_GET = Operation(
     id="pet_get",
     method="GET",
     path="/v1/pets/{id}",
-    templates=("mini.pets[{id}].$read",),
+    templates=("mini.pets[{id}]:read",),
 )
 
 
@@ -227,7 +237,7 @@ PETS_CREATE = Operation(
     id="pets_create",
     method="POST",
     path="/v1/pets",
-    templates=("mini.pets.$write", "mini.owners.$read"),
+    templates=("mini.pets", "mini.owners:read"),
 )
 
 
@@ -258,7 +268,7 @@ PETS_LIST = Operation(
     id="pets_list",
     method="GET",
     path="/v1/pets",
-    templates=("mini.pets.$read",),
+    templates=("mini.pets:read",),
 )
 
 

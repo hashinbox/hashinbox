@@ -190,7 +190,7 @@ async fn list(
     query: Result<Query<ListQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.jobs.$read");
+    scope::require!(session, "com.hashinbox.jobs:read");
     let Query(query) = query?;
     let Query(index) = index?;
     let page = index.page("jobs", |cursor| {
@@ -235,6 +235,6 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<JobPath>,
 ) -> Result<Json<Job>, Error> {
-    scope::require!(session, "com.hashinbox.jobs.$read");
+    scope::require!(session, "com.hashinbox.jobs:read");
     Ok(Json(jobs::read(&state.db, &path.id).await?.into()))
 }

@@ -29,7 +29,8 @@ class Session:
     issuer: str
     # `sub`: a user's id, or who a key's session is for.
     subject: str | None
-    # What it may do, unpacked.
+    # What it may do: unpacked, then expanded with `DEPENDS`, as the server
+    # checks it.
     scopes: Scopes
     # `iat`, Unix seconds.
     issued_at: int
@@ -42,6 +43,9 @@ class Session:
     def parse(cls, token: str) -> Session:
         """The session `token` is: its claims decoded, its signature not
         checked. A ValueError when it is not a session JWT."""
+        # The operations import the client, which imports this module.
+        from .operations import DEPENDS
+
         parts = token.split(".")
         if len(parts) != 3:
             raise ValueError("not a JWT")
@@ -59,7 +63,7 @@ class Session:
             token=token,
             issuer=issuer,
             subject=subject if isinstance(subject, str) else None,
-            scopes=Scopes.parse(claims.get("scopes") or {}),
+            scopes=Scopes.parse(claims.get("scopes") or {}).expand(DEPENDS),
             issued_at=iat,
             expires_at=exp,
             amr=tuple(Amr(method) for method in claims.get("amr") or ()),

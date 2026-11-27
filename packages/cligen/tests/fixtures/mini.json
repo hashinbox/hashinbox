@@ -1,6 +1,10 @@
 {
   "openapi": "3.1.0",
   "info": { "title": "mini-api", "version": "1.2.3" },
+  "x-hashinbox-depends": {
+    "mini.pets": ["mini.owners:read"],
+    "mini.owners.with.a.rather.long.name": ["mini.pets.with.a.long.name:read", "mini.vets"]
+  },
   "paths": {
     "/v1/health": {
       "get": {
@@ -37,7 +41,7 @@
           "200": { "description": "A page", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PetList" } } } },
           "400": { "description": "Bad cursor", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
         },
-        "security": [{ "bearer": ["mini.pets.$read"] }]
+        "security": [{ "bearer": ["mini.pets:read"] }]
       },
       "post": {
         "tags": ["pets"],
@@ -52,7 +56,7 @@
           "200": { "description": "Known", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } },
           "201": { "description": "Created", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } }
         },
-        "security": [{ "bearer": ["mini.pets.$write", "mini.owners.$read"] }]
+        "security": [{ "bearer": ["mini.pets", "mini.owners:read"] }]
       }
     },
     "/v1/pets/{id}": {
@@ -65,7 +69,7 @@
           "200": { "description": "The pet", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Pet" } } } },
           "404": { "description": "Unknown", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Problem" } } } }
         },
-        "security": [{ "bearer": ["mini.pets[{id}].$read"] }]
+        "security": [{ "bearer": ["mini.pets[{id}]:read"] }]
       },
       "delete": {
         "tags": ["pets"],
@@ -73,7 +77,7 @@
         "operationId": "pet_delete",
         "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }],
         "responses": { "204": { "description": "Gone" } },
-        "security": [{ "bearer": ["mini.pets[{id}].$write"] }]
+        "security": [{ "bearer": ["mini.pets[{id}]"] }]
       }
     },
     "/v1/pets/{id}/events": {
@@ -96,7 +100,7 @@
             }
           }
         },
-        "security": [{ "bearer": ["mini.pets[{id}].$read"] }]
+        "security": [{ "bearer": ["mini.pets[{id}]:read"] }]
       }
     },
     "/v1/logs/stream": {
@@ -105,7 +109,7 @@
         "summary": "Stream the logs",
         "operationId": "logs_stream",
         "responses": { "200": { "description": "Lines", "content": { "text/event-stream": { "schema": { "type": "string" } } } } },
-        "security": [{ "bearer": ["mini.logs.$read"] }]
+        "security": [{ "bearer": ["mini.logs:read"] }]
       }
     },
     "/v1/animals": {

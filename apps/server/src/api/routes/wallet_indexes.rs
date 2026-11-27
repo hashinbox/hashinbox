@@ -87,7 +87,7 @@ async fn create(
     Path(path): Path<WalletPath>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].indexes", id = path.id);
     let Json(request) = request?;
     let id = WalletId::parse(&path.id)?;
     let (container, db) = (&state.container, &state.db);
@@ -164,7 +164,7 @@ async fn update(
     Path(path): Path<IndexPath>,
     request: Result<Json<UpdateRequest>, JsonRejection>,
 ) -> Result<Json<WalletIndex>, Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].indexes", id = path.id);
     let Json(request) = request?;
     let index_state = request.index_state()?;
     let id = path.wallet()?;
@@ -195,7 +195,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].indexes", id = path.id);
     let id = path.wallet()?;
     wallets::delete_index(&state.container, &state.db, &id, &path.asset).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -231,7 +231,7 @@ async fn reconcile(
     State(state): State<Arc<AppState>>,
     Path(path): Path<IndexPath>,
 ) -> Result<(StatusCode, Json<WalletIndex>), Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].indexes", id = path.id);
     let id = path.wallet()?;
     let index = wallets::reconcile(&state.container, &state.db, &id, &path.asset).await?;
     Ok((StatusCode::ACCEPTED, Json(index)))

@@ -49,6 +49,12 @@ final class ScopeTest extends TestCase
         return Golden::cases('scope.json', 'sets');
     }
 
+    /** @return list<array{array<string, mixed>}> */
+    public static function expand(): array
+    {
+        return Json::list(Json::object(Golden::load('scope.json')['expand'])['cases'], static fn(mixed $case): array => [Json::object($case)]);
+    }
+
     /** @param array<string, mixed> $case */
     #[DataProvider('parse')]
     public function testParse(array $case): void
@@ -77,7 +83,7 @@ final class ScopeTest extends TestCase
     {
         [$id, $text] = [Json::string($case['id']), Json::string($case['text'])];
         self::assertSame($text, Scope::escapeId($id));
-        self::assertSame("a[{$text}].\$read", Scope::fill('a[{id}].$read', ['id' => $id]));
+        self::assertSame("a[{$text}]:read", Scope::fill('a[{id}]:read', ['id' => $id]));
     }
 
     /** @param array<string, mixed> $case */
@@ -100,9 +106,19 @@ final class ScopeTest extends TestCase
         self::assertSame((string) $scopes->compress(), (string) Scopes::parse(Json::object($case['packed'])));
     }
 
+    /** @param array<string, mixed> $case */
+    #[DataProvider('expand')]
+    public function testExpand(array $case): void
+    {
+        $depends = Json::object(Json::object(Golden::load('scope.json')['expand'])['depends']);
+        $depends = array_map(static fn(mixed $targets): array => Json::list($targets, Json::string(...)), $depends);
+        $expanded = Scopes::parse(Json::string($case['scopes']))->expand($depends);
+        self::assertSame(Json::string($case['expanded']), (string) $expanded);
+    }
+
     public function testAHoleNeedsItsParameter(): void
     {
         $this->expectException(\InvalidArgumentException::class);
-        Scope::fill('a[{id}].$read', []);
+        Scope::fill('a[{id}]:read', []);
     }
 }

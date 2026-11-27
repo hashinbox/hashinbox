@@ -58,7 +58,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.wallets.$read");
+    scope::require!(session, "com.hashinbox.wallets.tags:read");
     let Query(index) = index?;
     let page = index.page("tags", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
@@ -102,7 +102,7 @@ async fn add(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].tags", id = path.id);
     let id = WalletId::parse(&path.id)?;
     wallets::set_tag(&state.container, &state.db, &id, path.tag, true).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -131,7 +131,7 @@ async fn remove(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TagPath>,
 ) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(caller, "com.hashinbox.wallets[{id}].tags", id = path.id);
     let id = WalletId::parse(&path.id)?;
     wallets::set_tag(&state.container, &state.db, &id, path.tag, false).await?;
     Ok(StatusCode::NO_CONTENT)

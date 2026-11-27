@@ -170,7 +170,7 @@ export interface CreateSessionRequest {
   password?: string;
   /**
    * Fewer scopes than the issuer's, packed
-   * (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+   * (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
    * absent.
    */
   scopes?: Record<string, string[]>;
@@ -1510,7 +1510,7 @@ export interface User {
   name: string;
   /**
    * The widest scopes it may issue, packed in JSON
-   * (`{"com.hashinbox": ["wallets.$read"]}`).
+   * (`{"com.hashinbox": ["wallets:read"]}`).
    */
   scopes: Record<string, string[]>;
 }

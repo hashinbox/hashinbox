@@ -135,7 +135,7 @@ impl Issue {
         Self::default()
     }
 
-    /// With the scope `text` too (`com.hashinbox.wallets[x].$read`).
+    /// With the scope `text` too (`com.hashinbox.wallets[x]:read`).
     ///
     /// # Errors
     ///

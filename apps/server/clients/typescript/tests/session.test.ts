@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { Secret, Session, walletGetOperation } from "../src/index";
+import {
+  Secret,
+  Session,
+  walletGetOperation,
+  walletsCreateOperation,
+} from "../src/index";
 
 interface Vectors {
   id: string;
@@ -81,4 +86,10 @@ test("can() fills each hole, escaped", () => {
     session.can(walletGetOperation, { id: "ethereum.mainnet.0xdef" }),
     false,
   );
+});
+
+test("a session holds what its scopes depend on, as the server expands them", () => {
+  const session = Session.parse(vectors.sessions[1].token);
+  assert.equal(session.can(walletsCreateOperation), true, "triggers: wallets");
+  assert.ok(session.scopes.covers("com.hashinbox.jobs"), "wallets: jobs");
 });

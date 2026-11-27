@@ -29,7 +29,7 @@ def test_covers(case: dict[str, Any]) -> None:
 @pytest.mark.parametrize("case", VECTORS["escape"])
 def test_escape(case: dict[str, str]) -> None:
     assert escape_id(case["id"]) == case["text"]
-    assert fill("a[{id}].$read", {"id": case["id"]}) == f"a[{case['text']}].$read"
+    assert fill("a[{id}]:read", {"id": case["id"]}) == f"a[{case['text']}]:read"
 
 
 @pytest.mark.parametrize("case", VECTORS["first_uncovered"])
@@ -46,3 +46,9 @@ def test_sets(case: dict[str, Any]) -> None:
     assert str(scopes.compress()) == case["compressed"]
     assert scopes.pack() == case["packed"]
     assert Scopes.parse(case["packed"]) == scopes.compress()
+
+
+@pytest.mark.parametrize("case", VECTORS["expand"]["cases"])
+def test_expand(case: dict[str, str]) -> None:
+    expanded = Scopes.parse(case["scopes"]).expand(VECTORS["expand"]["depends"])
+    assert str(expanded) == case["expanded"]

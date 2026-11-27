@@ -12,21 +12,25 @@ import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type SubmitEvent } from 'react';
 import {
   keyRevoke,
+  keyRevokeOperation,
   keyRotate,
+  keyRotateOperation,
   keysCreate,
+  keysCreateOperation,
   keysList,
   type CreatedKey,
   type UserKey,
 } from '@hashinbox/client';
-import { ApiError, api, keyPath } from '@/api/client';
+import { ApiError, Reason, api, keyPath } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { Dot } from '@/_components/dot';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Picker } from './picker';
 import { pack, short, unpack, type Resources } from './scopes';
 import { Section } from './section';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 const DAY_MS = 86_400_000;
 /** Expiry choices, in days; 0: never. */
@@ -55,15 +59,7 @@ function dotOf(key: UserKey, now: number): { color: string; label: string } {
 }
 
 /** The logged-in user's keys: list, create (its secret shown once), rotate, revoke. */
-export function Keys({
-  shell,
-  held,
-  resources,
-}: {
-  shell: Shell;
-  held: string[];
-  resources: Resources;
-}) {
+export function Keys({ held, resources }: { held: string[]; resources: Resources }) {
   const [keys, setKeys] = useState<UserKey[] | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -71,6 +67,9 @@ export function Keys({
   const [rotating, setRotating] = useState<UserKey | null>(null);
   const [revoking, setRevoking] = useState<UserKey | null>(null);
   const [now] = useState(Date.now);
+  const creates = useCan(keysCreateOperation);
+  const rotates = useCan(keyRotateOperation);
+  const revokes = useCan(keyRevokeOperation);
 
   const refresh = useCallback(() => {
     allKeys()
@@ -79,10 +78,11 @@ export function Keys({
         setProblem(null);
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status === 403) setProblem(error.message);
-        else shell.fail(error);
+        const failure = ApiError.from(error);
+        if (failure.reason === Reason.MissingScope) setProblem(failure.message);
+        else fail(error);
       });
-  }, [shell]);
+  }, []);
 
   useEffect(refresh, [refresh]);
 
@@ -90,29 +90,31 @@ export function Keys({
     setRotating(null);
     keyRotate(api, { id: keyPath(key.id) })
       .then(() => {
-        shell.notify(`${key.name} rotated: its sessions until now end.`);
+        notify(`${key.name} rotated: its sessions until now end.`);
         refresh();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   const revoke = (key: UserKey) => {
     setRevoking(null);
     keyRevoke(api, { id: keyPath(key.id) })
       .then(() => {
-        shell.notify(`${key.name} revoked.`);
+        notify(`${key.name} revoked.`);
         refresh();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
     <Section
       title="Keys"
       actions={
-        <Button onClick={() => setCreating(true)} disabled={problem !== null}>
-          Create key
-        </Button>
+        creates && (
+          <Button onClick={() => setCreating(true)} disabled={problem !== null}>
+            Create key
+          </Button>
+        )
       }
     >
       {problem && <Alert severity="info">{problem}</Alert>}
@@ -130,10 +132,12 @@ export function Keys({
               </Typography>
               {key.revoked_at == null && (
                 <>
-                  <Button onClick={() => setRotating(key)}>Rotate</Button>
-                  <Button color="error" onClick={() => setRevoking(key)}>
-                    Revoke
-                  </Button>
+                  {rotates && <Button onClick={() => setRotating(key)}>Rotate</Button>}
+                  {revokes && (
+                    <Button color="error" onClick={() => setRevoking(key)}>
+                      Revoke
+                    </Button>
+                  )}
                 </>
               )}
               <Dot {...dotOf(key, now)} />
@@ -180,7 +184,7 @@ export function Keys({
           }}
         />
       </Dialog>
-      <Secret created={created} shell={shell} onClose={() => setCreated(null)} />
+      <Secret created={created} onClose={() => setCreated(null)} />
       <Confirm
         open={rotating !== null}
         title={`Rotate ${rotating?.name ?? ''}`}
@@ -238,7 +242,7 @@ function Create({
     };
     keysCreate(api, { body })
       .then(onCreated)
-      .catch((error: unknown) => setProblem(error instanceof Error ? error.message : String(error)))
+      .catch((error: unknown) => setProblem(ApiError.from(error).message))
       .finally(() => setBusy(false));
   };
 
@@ -285,15 +289,7 @@ function Create({
 }
 
 /** A created key's `his/…` secret, this once. */
-function Secret({
-  created,
-  shell,
-  onClose,
-}: {
-  created: CreatedKey | null;
-  shell: Shell;
-  onClose: () => void;
-}) {
+function Secret({ created, onClose }: { created: CreatedKey | null; onClose: () => void }) {
   const secret = created?.secret ?? '';
   return (
     <Dialog open={created !== null} fullWidth maxWidth="sm">
@@ -329,8 +325,8 @@ function Secret({
         <Button
           onClick={() => {
             navigator.clipboard.writeText(secret).then(
-              () => shell.notify('Secret copied.'),
-              () => shell.notify('Copy failed: select the secret and copy it by hand.', true),
+              () => notify('Secret copied.'),
+              () => notify('Copy failed: select the secret and copy it by hand.', true),
             );
           }}
         >

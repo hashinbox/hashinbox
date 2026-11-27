@@ -21,6 +21,10 @@ interface Vectors {
     first_uncovered: string | null;
   }[];
   escape: { id: string; text: string }[];
+  expand: {
+    depends: Record<string, string[]>;
+    cases: { scopes: string; expanded: string }[];
+  };
 }
 
 const vectors = JSON.parse(
@@ -69,9 +73,18 @@ test("escape and fill", () => {
   for (const { id, text } of vectors.escape) {
     assert.equal(escapeId(id), text);
     assert.equal(
-      fill("a.wallets[{id}].$read", { id }),
-      `a.wallets[${text}].$read`,
+      fill("a.wallets[{id}]:read", { id }),
+      `a.wallets[${text}]:read`,
     );
   }
-  assert.throws(() => fill("a[{id}].$read", {}));
+  assert.throws(() => fill("a[{id}]:read", {}));
+});
+
+test("expand", () => {
+  for (const { scopes, expanded } of vectors.expand.cases)
+    assert.equal(
+      Scopes.parse(scopes).expand(vectors.expand.depends).toString(),
+      expanded,
+      scopes,
+    );
 });

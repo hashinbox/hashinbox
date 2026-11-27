@@ -66,7 +66,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.users.$read");
+    scope::require!(caller, "com.hashinbox.users:read");
     let Query(index) = index?;
     let page = index.page("user list", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
@@ -131,7 +131,7 @@ struct CreateResponse {
     description = "With no user yet (`GET /v1/version` says `missing_root`), needs no \
         `Authorization`: creates the root user, holding every scope, logged in at once (its \
         session in the answer); of two racing, one is root and the other answers 409. Else \
-        needs `users.$write`, and the new user's scopes must be covered by the caller's.",
+        needs `users`, and the new user's scopes must be covered by the caller's.",
     request_body = CreateRequest,
     responses(
         (status = 201, description = "Created", body = CreateResponse),
@@ -168,7 +168,7 @@ async fn create(
         };
         return Ok((StatusCode::CREATED, Json(created)));
     };
-    scope::require!(caller, "com.hashinbox.users.$write");
+    scope::require!(caller, "com.hashinbox.users");
     let Json(request) = request?;
     let (user, within) = (&caller.user, &caller.session.scopes);
     let user = users::create(&state.db, user, within, request.user()?).await?;
@@ -229,7 +229,7 @@ async fn update(
     Path(path): Path<UserPath>,
     request: Result<Json<UpdateRequest>, JsonRejection>,
 ) -> Result<Json<User>, Error> {
-    scope::require!(caller, "com.hashinbox.users.$write");
+    scope::require!(caller, "com.hashinbox.users");
     let Json(request) = request?;
     let change = UserChange {
         scopes: request.scopes,

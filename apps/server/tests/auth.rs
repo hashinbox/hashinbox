@@ -171,7 +171,7 @@ async fn root_login_keys_pay_form_revocation_and_two_factor() {
         wallets.push(created["id"].as_str().expect("an id").to_owned());
     }
     let (one, other) = (&wallets[0], &wallets[1]);
-    let new_key = json!({"name": "shop", "scopes": packed("com.hashinbox.wallets.$*")});
+    let new_key = json!({"name": "shop", "scopes": packed("com.hashinbox.wallets")});
     let (status, created) = call(
         &router,
         Method::POST,
@@ -221,12 +221,12 @@ async fn root_login_keys_pay_form_revocation_and_two_factor() {
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(denied["kind"], "permission_denied");
     assert_eq!(denied["reason"], "missing_scope");
-    assert_eq!(denied["metadata"]["scope"], "com.hashinbox.networks.$read");
+    assert_eq!(denied["metadata"]["scope"], "com.hashinbox.networks:read");
 
     // The pay form's token, signed offline by the key's secret (HS256, the
     // `his/…` text as the key): one wallet, read.
     let secret = secret_text.as_bytes();
-    let read_one = format!("com.hashinbox.wallets[{one}].$read");
+    let read_one = format!("com.hashinbox.wallets[{one}]:read");
     let client = Client::Key(key_id.clone());
     let session = Session::new(
         client.clone(),
@@ -321,7 +321,7 @@ async fn root_login_keys_pay_form_revocation_and_two_factor() {
     );
 
     // Narrowing only: wider than the key is refused, issued or forged.
-    let wider = json!({"scopes": packed("com.hashinbox.networks.$read")});
+    let wider = json!({"scopes": packed("com.hashinbox.networks:read")});
     let (status, _) = call(
         &router,
         Method::POST,
@@ -334,7 +334,7 @@ async fn root_login_keys_pay_form_revocation_and_two_factor() {
     let forged = Session::new(
         client.clone(),
         None,
-        "com.hashinbox.*.$*".parse().unwrap(),
+        "com.hashinbox".parse().unwrap(),
         now(),
         600,
     );
@@ -900,11 +900,11 @@ async fn a_setting_round_trips_is_checked_and_shows_in_the_version() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_network_is_created_with_the_networks_write_scope_only() {
+async fn a_network_is_created_with_the_full_networks_scope_only() {
     let (router, _db, _directory) = app().await;
     root(&router).await;
     let scoped = |scopes: &str| login(json!({ "scopes": packed(scopes) }));
-    let body = scoped("com.hashinbox.networks.$read com.hashinbox.endpoints.$write");
+    let body = scoped("com.hashinbox.networks:read com.hashinbox.networks.endpoints");
     let (status, read) = call(&router, Method::POST, "/v1/session", None, Some(body)).await;
     assert_eq!(status, StatusCode::CREATED, "{read}");
     let read = read["token"].as_str().expect("a token").to_owned();
@@ -923,5 +923,34 @@ async fn a_network_is_created_with_the_networks_write_scope_only() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["reason"], "missing_scope", "{body}");
-    assert_eq!(body["metadata"]["scope"], "com.hashinbox.networks.$write");
+    assert_eq!(body["metadata"]["scope"], "com.hashinbox.networks");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_session_holds_what_its_scopes_depend_on() {
+    let (router, _db, _directory) = app().await;
+    root(&router).await;
+    let body = login(json!({ "scopes": packed("com.hashinbox.triggers:read") }));
+    let (status, issued) = call(&router, Method::POST, "/v1/session", None, Some(body)).await;
+    assert_eq!(status, StatusCode::CREATED, "{issued}");
+    let token = issued["token"].as_str().expect("a token").to_owned();
+    let (status, session) = call(&router, Method::GET, "/v1/session", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(
+        session["scopes"],
+        json!({"com.hashinbox": ["jobs:read", "triggers:read", "wallets:read"]})
+    );
+    let (status, _) = call(&router, Method::GET, "/v1/wallets", Some(&token), None).await;
+    assert_eq!(status, StatusCode::OK, "triggers:read reads wallets");
+    let new = json!({"chain": "bitcoin", "network": "regtest", "address": "alice"});
+    let (status, body) = call(
+        &router,
+        Method::POST,
+        "/v1/wallets",
+        Some(&token),
+        Some(new),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["metadata"]["scope"], "com.hashinbox.wallets");
 }

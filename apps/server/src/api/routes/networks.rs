@@ -83,7 +83,7 @@ async fn list(
     session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.networks.$read");
+    scope::require!(session, "com.hashinbox.networks:read");
     let networks = networks::overview(&state.container, &state.db).await?;
     let networks = networks.into_iter().map(Into::into).collect();
     let chains = state.chains.names();
@@ -180,7 +180,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<NetworkResponse>), Error> {
-    scope::require!(caller, "com.hashinbox.networks.$write");
+    scope::require!(caller, "com.hashinbox.networks");
     let Json(request) = request?;
     let (container, db, chains) = (&state.container, &state.db, &state.chains);
     let network = networks::create(container, db, chains, request.into()).await?;

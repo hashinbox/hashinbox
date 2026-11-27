@@ -12,7 +12,7 @@ final readonly class Operation
 {
     /**
      * @param string $path The path template: `/v1/wallets/{id}`.
-     * @param list<string> $templates The scope templates: `com.hashinbox.wallets[{id}].$read`.
+     * @param list<string> $templates The scope templates: `com.hashinbox.wallets[{id}]:read`.
      */
     public function __construct(
         public string $id,

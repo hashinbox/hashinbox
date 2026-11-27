@@ -59,7 +59,7 @@ struct CreateRequest {
     #[schema(nullable = false)]
     sub: Option<String>,
     /// Fewer scopes than the issuer's, packed
-    /// (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+    /// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     /// absent.
     #[serde(default)]
     #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, Vec<String>>>)]
@@ -221,7 +221,7 @@ struct ReadResponse {
     operation_id = "session_get",
     summary = "Read the caller's session",
     description = "The session the bearer token is, decoded and checked: its issuer, user, \
-        key, scopes, times and `amr`.",
+        key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.",
     security(("bearer" = [])),
     responses(
         (status = 200, description = "The session", body = ReadResponse),

@@ -71,7 +71,7 @@ async fn list(
     query: Result<Query<ListQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.transactions.$read");
+    scope::require!(session, "com.hashinbox.networks.transactions:read");
     let Query(query) = query?;
     let Query(index) = index?;
     let page = index.page("transactions", transaction::parse_key)?;

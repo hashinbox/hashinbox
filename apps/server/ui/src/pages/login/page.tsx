@@ -4,15 +4,24 @@ import Link from '@mui/material/Link';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useState, type SubmitEvent } from 'react';
-import { ownUserUpdate } from '@hashinbox/client';
-import { ApiError, api } from '@/api/client';
+import { HashinboxClient, ownUserUpdate } from '@hashinbox/client';
+import { ApiError, Reason, api } from '@/api/client';
 import { Welcome } from '@/_components/welcome';
+import { settings } from '@/settings';
 import { mono } from '@/theme';
 
 const MIN = 8;
 
 function problemOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return ApiError.from(error).message;
+}
+
+/**
+ * The passphrase session's own client: it only sets the new password, so
+ * the dashboard does not open with it (`api`'s session is the store's).
+ */
+function recovery(): HashinboxClient {
+  return new HashinboxClient(settings.apiBase, { checkScopes: false });
 }
 
 /**
@@ -38,6 +47,7 @@ export function Login({
   const [resetting, setResetting] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [client] = useState(recovery);
   const wrong = recovering
     ? 'email, passphrase or code is wrong'
     : 'email, password or code is wrong';
@@ -50,8 +60,8 @@ export function Login({
       ? { passphrase: passphrase.trim().split(/\s+/).join(' ') }
       : { password };
     const login = { email: email.trim(), ...secret, ...(asksCode && { totp: totp.trim() }) };
-    // The client keeps the session; the dashboard opens once `onSession` has it.
-    api
+    // `api` keeps the session, and the dashboard opens; a passphrase's waits for the new password.
+    (recovering ? client : api)
       .login(login)
       .then((session) => {
         if (!recovering) {
@@ -62,17 +72,18 @@ export function Login({
         setResetting(true);
       })
       .catch((error: unknown) => {
-        if (error instanceof ApiError && error.reason === 'totp_required') {
+        const failure = ApiError.from(error);
+        if (failure.reason === Reason.TotpRequired) {
           setAsksCode(true);
           return;
         }
-        if (error instanceof ApiError && error.status === 401) setProblem(wrong);
-        else setProblem(problemOf(error));
+        if (failure.reason === Reason.WrongCredentials) setProblem(wrong);
+        else setProblem(failure.message);
       })
       .finally(() => setBusy(false));
   };
 
-  if (resetting) return <NewPassword instance={instance} onSession={onSession} />;
+  if (resetting) return <NewPassword client={client} instance={instance} onSession={onSession} />;
 
   return (
     <Welcome
@@ -175,9 +186,12 @@ export function Login({
  * answer is the session the dashboard keeps.
  */
 function NewPassword({
+  client,
   instance,
   onSession,
 }: {
+  /** Holds the passphrase session. */
+  client: HashinboxClient;
   instance: string;
   onSession: (token: string) => void;
 }) {
@@ -192,7 +206,7 @@ function NewPassword({
     if (password !== repeat) return;
     setBusy(true);
     setProblem(null);
-    ownUserUpdate(api, { body: { password } })
+    ownUserUpdate(client, { body: { password } })
       .then((session) => onSession(session.token))
       .catch((error: unknown) => setProblem(problemOf(error)))
       .finally(() => setBusy(false));

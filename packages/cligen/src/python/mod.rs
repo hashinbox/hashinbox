@@ -55,7 +55,15 @@ impl Python {
             uses: BTreeSet::new(),
             local: false,
         };
-        let mut items = Vec::new();
+        let depends = spec.depends.iter().map(|(source, targets)| {
+            let targets = targets.iter().map(|target| Value::text(quote(target)));
+            Value::tuple(targets.collect()).prefix(&format!("{}: ", quote(source)))
+        });
+        let mut items = vec![Item::Assign(
+            "What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets."
+                .into(),
+            Value::dict(depends.collect()).prefix("DEPENDS: dict[str, tuple[str, ...]] = "),
+        )];
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut items, op, &mut json));

@@ -723,8 +723,8 @@ mod tests {
 
     #[test]
     fn values_fit_or_break_with_trailing_commas() {
-        let one = Value::tuple(vec![Value::text("\"a.$read\"")]).prefix("templates=");
-        assert_eq!(one.flat(), "templates=(\"a.$read\",)");
+        let one = Value::tuple(vec![Value::text("\"a:read\"")]).prefix("templates=");
+        assert_eq!(one.flat(), "templates=(\"a:read\",)");
         let call = Value::call(
             "X = Operation",
             vec![Value::text(format!("id=\"{}\"", "x".repeat(70))), one],
@@ -732,7 +732,7 @@ mod tests {
         assert_eq!(
             call.render(0, 0),
             format!(
-                "X = Operation(\n    id=\"{}\",\n    templates=(\"a.$read\",),\n)",
+                "X = Operation(\n    id=\"{}\",\n    templates=(\"a:read\",),\n)",
                 "x".repeat(70)
             )
         );

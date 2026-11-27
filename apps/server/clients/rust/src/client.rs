@@ -177,7 +177,7 @@ pub trait Client: Sync {
     fn send(&self, http: Http) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
     /// The first of `scopes` it knows its session lacks: the call then
-    /// fails with [`Error::MissingScope`] unsent. `None`: it holds them,
+    /// fails unsent with the server's 403 `missing_scope` [`Error::Api`]. `None`: it holds them,
     /// or it cannot tell (the server checks).
     fn missing(&self, scopes: &[String]) -> Option<String> {
         let _ = scopes;
@@ -212,28 +212,9 @@ pub trait Streamer: Sync {
 /// Why a call failed.
 #[derive(Debug)]
 pub enum Error<T> {
-    /// A non-2xx answer. A body that is not the API's error is `message`,
-    /// its kind `Unknown("")`.
-    Api {
-        /// Its status.
-        status: u16,
-        /// Its kind (`unauthenticated`, `permission_denied`, …).
-        kind: Kind,
-        /// Its message, for people.
-        message: String,
-        /// What a client acts on: `wrong_credentials`, `totp_required`,
-        /// `session_expired`, `missing_scope`.
-        reason: Option<String>,
-        /// The reason's details: `{"scope": "…"}`.
-        metadata: BTreeMap<String, String>,
-    },
-    /// Refused unsent: the session lacks `scope`.
-    MissingScope {
-        /// The operation's id.
-        operation: &'static str,
-        /// The scope it needs.
-        scope: String,
-    },
+    /// A non-2xx answer (or the server's refusal, made here unsent), as
+    /// [`ApiError::from`] reads it.
+    Api(ApiError),
     /// A 2xx answer that did not decode.
     Decode(serde_json::Error),
     /// The transport failed.
@@ -241,31 +222,10 @@ pub enum Error<T> {
 }
 
 impl<T> Error<T> {
-    /// The non-2xx answer `response` is.
-    pub fn api(response: Response) -> Self {
-        let Ok(body) = serde_json::from_str::<crate::models::Error>(&response.body) else {
-            return Self::Api {
-                status: response.status,
-                kind: Kind::Unknown(String::new()),
-                message: response.body,
-                reason: None,
-                metadata: BTreeMap::new(),
-            };
-        };
-        Self::Api {
-            status: response.status,
-            kind: body.kind,
-            message: body.message,
-            reason: body.reason,
-            metadata: body.metadata.unwrap_or_default(),
-        }
-    }
-
     /// Its reason, when an answer gave one (`totp_required`, …).
     pub fn reason(&self) -> Option<&str> {
         match self {
-            Self::Api { reason, .. } => reason.as_deref(),
-            Self::MissingScope { .. } => Some("missing_scope"),
+            Self::Api(error) => error.reason.as_deref(),
             _ => None,
         }
     }
@@ -274,12 +234,7 @@ impl<T> Error<T> {
 impl<T: fmt::Display> fmt::Display for Error<T> {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Api {
-                status, message, ..
-            } => write!(out, "HTTP {status}: {message}"),
-            Self::MissingScope { operation, scope } => {
-                write!(out, "{operation} needs scope {scope}")
-            }
+            Self::Api(error) => write!(out, "HTTP {}: {}", error.status, error.message),
             Self::Decode(error) => write!(out, "cannot decode the answer: {error}"),
             Self::Transport(error) => error.fmt(out),
         }
@@ -289,14 +244,120 @@ impl<T: fmt::Display> fmt::Display for Error<T> {
 impl<T: std::error::Error + 'static> std::error::Error for Error<T> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Api { .. } | Self::MissingScope { .. } => None,
+            Self::Api(_) => None,
             Self::Decode(error) => Some(error),
             Self::Transport(error) => Some(error),
         }
     }
 }
 
-/// [`Error::MissingScope`] when `missing` names a scope of `request`'s.
+/// The fixed machine strings of [`ApiError::reason`]: what a client acts on.
+pub mod reason {
+    /// A login's email, password or two-factor code is wrong, or the
+    /// current password or the code of a two-factor change (401).
+    pub const WRONG_CREDENTIALS: &str = "wrong_credentials";
+    /// The password was right and the user's two-factor code is needed:
+    /// ask it, post again (401).
+    pub const TOTP_REQUIRED: &str = "totp_required";
+    /// A genuine session (or key) no longer accepted: expired, or
+    /// invalidated since it was issued (401). Log in again.
+    pub const SESSION_EXPIRED: &str = "session_expired";
+    /// The caller lacks a scope; metadata `scope` names it (403).
+    pub const MISSING_SCOPE: &str = "missing_scope";
+}
+
+/// Any failure as the API's error: its kind, message, reason, metadata,
+/// and the answer's status (0 when none came). A plain value, made with its
+/// fields (`..ApiError::default()`: `unavailable`, status 0, no metadata);
+/// `ApiError::from` turns a [`Response`] or an [`Error`] into one.
+#[derive(Debug)]
+pub struct ApiError {
+    /// Its status: 0 when no answer gave one.
+    pub status: u16,
+    /// Its kind (`unauthenticated`, `permission_denied`, …).
+    pub kind: Kind,
+    /// Its message, for people.
+    pub message: String,
+    /// What a client acts on: one of [`reason`].
+    pub reason: Option<String>,
+    /// The reason's details: `{"scope": "…"}`; `response`: an answer's
+    /// body that did not parse, its first 1024 characters.
+    pub metadata: BTreeMap<String, String>,
+    /// The error it wraps, when not an answer.
+    pub cause: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl Default for ApiError {
+    fn default() -> Self {
+        Self {
+            status: 0,
+            kind: Kind::Unavailable,
+            message: String::new(),
+            reason: None,
+            metadata: BTreeMap::new(),
+            cause: None,
+        }
+    }
+}
+
+/// A non-2xx answer: the API's error when its body is one (a kind this
+/// client knows, a message), with its status; else `unavailable`, its
+/// status, its body's first 1024 characters as `metadata.response`.
+impl From<Response> for ApiError {
+    fn from(response: Response) -> Self {
+        let body = serde_json::from_str::<crate::models::Error>(&response.body);
+        let Some(body) = body
+            .ok()
+            .filter(|body| !matches!(body.kind, Kind::Unknown(_)))
+        else {
+            let text = response.body.chars().take(1024).collect();
+            return Self {
+                status: response.status,
+                message: format!("could not parse the response (HTTP {})", response.status),
+                metadata: BTreeMap::from([("response".to_owned(), text)]),
+                ..Self::default()
+            };
+        };
+        Self {
+            status: response.status,
+            kind: body.kind,
+            message: body.message,
+            reason: body.reason,
+            metadata: body.metadata.unwrap_or_default(),
+            cause: None,
+        }
+    }
+}
+
+/// [`Error::Api`] as it is; any other `unavailable`, its message, itself as
+/// `cause`.
+impl<T: std::error::Error + Send + Sync + 'static> From<Error<T>> for ApiError {
+    fn from(error: Error<T>) -> Self {
+        let Error::Api(api) = error else {
+            return Self {
+                message: error.to_string(),
+                cause: Some(Box::new(error)),
+                ..Self::default()
+            };
+        };
+        api
+    }
+}
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.cause.as_deref().map(|cause| cause as _)
+    }
+}
+
+/// The server's 403 `missing_scope` [`Error::Api`], unsent, when `missing`
+/// names a scope of `request`'s.
 fn check<T, R: Request>(
     request: &R,
     missing: impl Fn(&[String]) -> Option<String>,
@@ -305,7 +366,17 @@ fn check<T, R: Request>(
         return Ok(());
     };
     let operation = request.operation().id;
-    Err(Error::MissingScope { operation, scope })
+    Err(Error::Api(ApiError {
+        status: 403,
+        kind: Kind::PermissionDenied,
+        message: format!("{operation} needs scope {scope}"),
+        reason: Some(reason::MISSING_SCOPE.to_owned()),
+        metadata: BTreeMap::from([
+            ("scope".to_owned(), scope),
+            ("operation".to_owned(), operation.to_owned()),
+        ]),
+        cause: None,
+    }))
 }
 
 /// Sends `request` with `client`: the 2xx body decoded.
@@ -322,7 +393,7 @@ where
         .await
         .map_err(Error::Transport)?;
     if !(200..300).contains(&response.status) {
-        return Err(Error::api(response));
+        return Err(Error::Api(response.into()));
     }
     let text = if response.body.trim().is_empty() {
         "null"
@@ -351,7 +422,7 @@ where
         .open(http.clone())
         .await
         .map_err(Error::Transport)?
-        .map_err(Error::api)?;
+        .map_err(|response| Error::Api(response.into()))?;
     Ok(Events {
         streamer,
         http,
@@ -458,7 +529,7 @@ impl<'a, T: Event, S: Streamer> Stream for Events<'a, T, S> {
                     }
                     Ok(Err(response)) => {
                         this.state = State::Done;
-                        return Poll::Ready(Some(Err(Error::api(response))));
+                        return Poll::Ready(Some(Err(Error::Api(response.into()))));
                     }
                     Err(_) => this.state = this.wait(),
                 },

@@ -13,8 +13,9 @@ import (
 )
 
 // Session is a JWT and what it says: who issued it (`user/…` or a key's
-// `hip/…`), for whom, what it may do and when. Its signature is not
-// checked: only the server can.
+// `hip/…`), for whom, what it may do (its claim expanded with Depends, as
+// the server checks it) and when. Its signature is not checked: only the
+// server can.
 type Session struct {
 	Token     string
 	Issuer    string
@@ -67,7 +68,7 @@ func ParseSession(token string) (Session, error) {
 		Token:     token,
 		Issuer:    c.Iss,
 		Subject:   c.Sub,
-		Scopes:    scopes,
+		Scopes:    scopes.Expand(Depends),
 		IssuedAt:  time.Unix(c.Iat, 0),
 		ExpiresAt: time.Unix(c.Exp, 0),
 		Amr:       c.Amr,

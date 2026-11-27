@@ -11,17 +11,19 @@ import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode } from 'react';
 import {
+  triggerDeleteOperation,
   triggerGet,
   triggerReplace,
+  triggerReplaceOperation,
   triggerRunsList,
   type Trigger,
   type TriggerRun,
 } from '@hashinbox/client';
 import { api } from '@/api/client';
+import { useCan } from '@/store/session';
 import { EmptyRow } from '@/_components/table';
 import { LogsButton } from '@/_components/logs/button';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { assetName } from '@/money';
 import { mono } from '@/theme';
 import {
@@ -33,6 +35,7 @@ import {
   describeSend,
   type Definition,
 } from './forms';
+import { fail, useApp } from '@/store/app';
 
 /** How often the trigger, its last round and its runs are read again. */
 const BEAT_MS = 5000;
@@ -45,37 +48,38 @@ function sawOf(stats: TriggerRun['stats']): string {
 
 /** A stored trigger, read only: what it does, its last round and its runs. */
 export function View({
-  shell,
   initial,
   onEdit,
   onDelete,
   onChanged,
 }: {
-  shell: Shell;
   initial: Trigger;
   onEdit: () => void;
   onDelete: () => void;
   /** After it was turned on or off. */
   onChanged: () => void;
 }) {
+  const listings = useApp((s) => s.listings);
   const [trigger, setTrigger] = useState<Trigger>(initial);
   const [runs, setRuns] = useState<TriggerRun[]>([]);
   const id = initial.id;
+  const changes = useCan(triggerReplaceOperation, { id });
+  const deletes = useCan(triggerDeleteOperation, { id });
   useEffect(() => {
     const read = () => {
-      triggerGet(api, { id }).then(setTrigger).catch(shell.fail);
+      triggerGet(api, { id }).then(setTrigger).catch(fail);
       triggerRunsList(api, { id })
         .then((list) => setRuns(list.runs))
-        .catch(shell.fail);
+        .catch(fail);
     };
     read();
     const timer = window.setInterval(read, BEAT_MS);
     return () => window.clearInterval(timer);
-  }, [id, shell.fail]);
+  }, [id]);
 
   // The server keeps the parts as the editor writes them.
   const parts = trigger as unknown as Definition;
-  const name = (asset: string) => assetName(shell.listings, trigger.chain, trigger.network, asset);
+  const name = (asset: string) => assetName(listings, trigger.chain, trigger.network, asset);
   const last = trigger.last_round;
 
   // Turns it on or off: the same trigger kept again with `enabled` flipped.
@@ -87,7 +91,7 @@ export function View({
         setTrigger(saved);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
@@ -96,16 +100,22 @@ export function View({
         <Typography variant="h2" component="h1" sx={{ fontFamily: mono, flexGrow: 1 }}>
           {trigger.id}
         </Typography>
-        <FormControlLabel
-          control={<Switch checked={trigger.enabled} onChange={toggle} />}
-          label={trigger.enabled ? 'On' : 'Off'}
-        />
-        <Button variant="outlined" size="small" onClick={onEdit}>
-          Edit
-        </Button>
-        <Button variant="outlined" size="small" color="error" onClick={onDelete}>
-          Delete
-        </Button>
+        {changes && (
+          <FormControlLabel
+            control={<Switch checked={trigger.enabled} onChange={toggle} />}
+            label={trigger.enabled ? 'On' : 'Off'}
+          />
+        )}
+        {changes && (
+          <Button variant="outlined" size="small" onClick={onEdit}>
+            Edit
+          </Button>
+        )}
+        {deletes && (
+          <Button variant="outlined" size="small" color="error" onClick={onDelete}>
+            Delete
+          </Button>
+        )}
         <LogsButton filter={{ trigger_id: trigger.id }} />
       </Stack>
       <Typography variant="overline" component="p" sx={{ mb: 2 }}>

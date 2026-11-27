@@ -26,23 +26,26 @@ import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
 import { useTheme } from '@mui/material/styles';
 import useMediaQuery from '@mui/material/useMediaQuery';
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import {
   assetsList,
+  jobsListOperation,
+  logsListOperation,
   networksList,
+  networksListOperation,
   ownUserGet,
   recoveryCreateOperation,
   Session,
+  triggersListOperation,
   usersListOperation,
   versionGet,
   walletsList,
-  type Listing,
+  walletsListOperation,
   type User,
-  type UserRead,
   type Wallet,
 } from '@hashinbox/client';
-import { ApiError, api, whenUnauthorized } from '@/api/client';
-import { Toast, type Message } from '@/_components/toast';
+import { api } from '@/api/client';
+import { Toast } from '@/_components/toast';
 import { LogsDrawer } from '@/_components/logs/drawer';
 import { logSource } from '@/api/logs';
 import { Docs } from '@/pages/docs/page';
@@ -60,6 +63,8 @@ import { Me } from '@/pages/users/me';
 import { Users } from '@/pages/users/page';
 import { Wallets } from '@/pages/wallets/page';
 import { go, segments } from '@/route';
+import { fail, notify, useApp, type Root } from '@/store/app';
+import { useCan, useSession } from '@/store/session';
 import { display } from '@/theme';
 
 type View =
@@ -75,11 +80,6 @@ type View =
   | 'docs'
   | 'login'
   | 'setup';
-/**
- * Where setup stands (`GET /v1/version`): not asked yet, no user (fresh
- * install, until setup is done), or done.
- */
-type Root = 'unknown' | 'missing' | 'present';
 const VIEWS: View[] = [
   'dashboard',
   'wallets',
@@ -94,9 +94,6 @@ const VIEWS: View[] = [
   'login',
   'setup',
 ];
-
-/** The name shown when the server's `instance` setting is unset. */
-const NAME = 'hashinbox';
 
 /**
  * The view a state may show: setup on a fresh install, login without a
@@ -114,19 +111,22 @@ function linked(): View {
   return VIEWS.find((v) => v === named) ?? 'dashboard';
 }
 
+/** What a view reads first: without its scopes, neither its tab nor its page. */
+const READS = {
+  wallets: walletsListOperation,
+  triggers: triggersListOperation,
+  networks: networksListOperation,
+  jobs: jobsListOperation,
+  logs: logsListOperation,
+  users: usersListOperation,
+};
+
 /** "Richard Huttar" → "RH", one word → its first letter, no name → the email's. */
 function initials(user: User): string {
   const words = user.name.trim().split(/\s+/).filter(Boolean);
   const first = words[0]?.[0] ?? user.email[0] ?? '?';
   const last = words.length > 1 ? (words[words.length - 1]?.[0] ?? '') : '';
   return (first + last).toUpperCase();
-}
-
-/** Everything a page needs to talk back to the shell. */
-export interface Shell {
-  listings: Listing[];
-  notify: (text: string, bad?: boolean) => void;
-  fail: (error: unknown) => void;
 }
 
 /** Every wallet, page by page. */
@@ -142,37 +142,22 @@ async function allWallets(): Promise<Wallet[]> {
 }
 
 export function Layout() {
-  const [token, setSession] = useState<string | null>(() => api.session?.token ?? null);
-  const [root, setRoot] = useState<Root>('unknown');
-  const [name, setName] = useState(NAME);
-  const [me, setMe] = useState<UserRead | null>(null);
+  const token = useSession((s) => s.session?.token ?? null);
+  const me = useSession((s) => s.me);
+  const ended = useSession((s) => s.ended);
+  const root = useApp((s) => s.root);
+  const name = useApp((s) => s.name);
+  const toast = useApp((s) => s.toast);
   const [meRead, setMeRead] = useState(0);
   const [view, setView] = useState<View>(linked);
-  const [listings, setListings] = useState<Listing[]>([]);
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [tags, setTags] = useState<Map<string, string[]>>(new Map());
   const [tagged, setTagged] = useState(0);
   const [explorers, setExplorers] = useState<Map<string, Explorer>>(new Map());
-  const [toast, setToast] = useState<Message | null>(null);
-
-  const notify = useCallback((text: string, bad = false) => {
-    setToast({ text, bad });
-  }, []);
-  const fail = useCallback(
-    (error: unknown) => {
-      if (error instanceof ApiError && error.status === 401) return;
-      notify(error instanceof Error ? error.message : String(error), true);
-    },
-    [notify],
-  );
 
   /** Forgets this tab's session; the login page follows. */
-  const signOut = useCallback(() => {
-    api.session = undefined;
-    setSession(null);
-    setMe(null);
-  }, []);
+  const signOut = useCallback(() => useSession.getState().logout(), []);
 
   /** Logs out: this session, or (`everywhere`) every one the user issued. */
   const logout = useCallback(
@@ -184,29 +169,28 @@ export function Layout() {
         })
         .finally(signOut);
     },
-    [fail, signOut],
+    [signOut],
   );
 
   useEffect(() => {
-    whenUnauthorized(() => {
-      signOut();
-      notify('The session ended. Log in again.', true);
-    });
-  }, [signOut, notify]);
+    if (ended) notify('The session ended. Log in again.', true);
+  }, [ended]);
 
   // The very first call: a fresh install shows the setup page instead.
   useEffect(() => {
     versionGet(api)
       .then((version) => {
         const instance = version.settings.instance;
-        if (typeof instance === 'string' && instance) setName(instance);
-        setRoot(version.missing_root ? 'missing' : 'present');
+        useApp.setState({
+          root: version.missing_root ? 'missing' : 'present',
+          ...(typeof instance === 'string' && instance && { name: instance }),
+        });
       })
       .catch((error: unknown) => {
-        setRoot('present');
+        useApp.setState({ root: 'present' });
         fail(error);
       });
-  }, [fail]);
+  }, []);
 
   // The logged-in user, read with this tab's session.
   useEffect(() => {
@@ -214,7 +198,7 @@ export function Layout() {
     let live = true;
     ownUserGet(api)
       .then((read) => {
-        if (live) setMe(read);
+        if (live) useSession.getState().setMe(read);
       })
       .catch((error: unknown) => {
         if (live) fail(error);
@@ -222,27 +206,46 @@ export function Layout() {
     return () => {
       live = false;
     };
-  }, [token, root, meRead, fail]);
+  }, [token, root, meRead]);
 
   const open = root === 'present' && token !== null && me !== null;
-  const reads = me !== null && api.session?.can(usersListOperation) === true;
+  const may: Record<View, boolean> = {
+    dashboard: true,
+    wallets: useCan(READS.wallets),
+    triggers: useCan(READS.triggers),
+    networks: useCan(READS.networks),
+    markets: true,
+    jobs: useCan(READS.jobs),
+    logs: useCan(READS.logs),
+    users: useCan(READS.users),
+    user: true,
+    docs: true,
+    login: true,
+    setup: true,
+  };
+  const recovers = useCan(recoveryCreateOperation);
+  const networks = may.networks;
+  const listsWallets = may.wallets;
 
-  // `users/me` was the own page; `users` without `users.$read` shows nothing.
+  // `users/me` was the own page.
   useEffect(() => {
-    if (view !== 'users' || me === null) return;
-    if (segments()[1] === 'me' || !reads) go(['user'], true);
-  }, [view, me, reads]);
+    if (view === 'users' && segments()[1] === 'me') go(['user'], true);
+  }, [view]);
 
   useEffect(() => {
     document.title = name;
   }, [name]);
 
-  // The wallets and the assets they can be made in.
+  // The wallets and the assets they can be made in, those the session may read.
   useEffect(() => {
     if (!open) return;
     let live = true;
-    Promise.all([assetsList(api), allWallets(), networksList(api)])
-      .then(([assets, list, configured]) => {
+    Promise.all([
+      assetsList(api),
+      listsWallets ? allWallets() : [],
+      networks ? networksList(api) : { networks: [] },
+    ])
+      .then(([listed, list, configured]) => {
         if (!live) return;
         const byNetwork = new Map<string, Explorer>();
         for (const n of configured.networks)
@@ -252,7 +255,7 @@ export function Layout() {
               transaction: n.explorer_transaction,
             });
         setExplorers(byNetwork);
-        setListings(assets.assets);
+        useApp.setState({ listings: listed.assets });
         setWallets(list);
         setTags(new Map(list.map((w) => [w.id, w.tags])));
       })
@@ -262,7 +265,7 @@ export function Layout() {
     return () => {
       live = false;
     };
-  }, [open, token, view, tagged, fail]);
+  }, [open, token, view, tagged, listsWallets, networks]);
 
   useEffect(() => {
     const navigate = () => setView(linked());
@@ -271,16 +274,18 @@ export function Layout() {
   }, []);
 
   // Each state shows only the views it may: setup, login, or the dashboard.
+  // A view the session may not read: the dashboard instead.
+  const permitted = may[view];
   useEffect(() => {
     if (root === 'unknown') return;
-    const want = allowed(view, root, token);
+    const allowedView = allowed(view, root, token);
+    const want = allowedView === view && !permitted ? 'dashboard' : allowedView;
     if (want !== view) go([want], true);
-  }, [root, token, view]);
+  }, [root, token, view, permitted]);
 
   /** A new session for this tab: kept, and used from the next call on. */
   const keep = useCallback((value: string) => {
-    api.session = Session.parse(value);
-    setSession(value);
+    useSession.getState().setSession(Session.parse(value));
   }, []);
 
   /** A session from the login page: the dashboard opens. */
@@ -301,7 +306,6 @@ export function Layout() {
     if (linked() !== view || segments().length === 0) go([view], true);
   }, [view]);
 
-  const shell = useMemo<Shell>(() => ({ listings, notify, fail }), [listings, notify, fail]);
   const theme = useTheme();
   // Narrow screens fold the views into a menu that opens from the top.
   const wide = useMediaQuery(theme.breakpoints.up('md'));
@@ -324,11 +328,9 @@ export function Layout() {
           { view: 'markets' as const, label: 'Markets', icon: <ShowChart fontSize="small" /> },
           { view: 'jobs' as const, label: 'Jobs', icon: <WorkHistory fontSize="small" /> },
           { view: 'logs' as const, label: 'Logs', icon: <Notes fontSize="small" /> },
-          ...(reads
-            ? [{ view: 'users' as const, label: 'Users', icon: <People fontSize="small" /> }]
-            : []),
+          { view: 'users' as const, label: 'Users', icon: <People fontSize="small" /> },
           { view: 'docs' as const, label: 'Docs', icon: <MenuBook fontSize="small" /> },
-        ]
+        ].filter((v) => may[v.view])
       : []),
   ];
   const known = root !== 'unknown';
@@ -443,15 +445,9 @@ export function Layout() {
       {open && (
         <Explorers.Provider value={explorers}>
           <Box component="main" sx={{ flexGrow: 1, display: 'flex', flexDirection: 'column' }}>
-            {view === 'dashboard' && (
-              <Dashboard
-                shell={shell}
-                banner={api.session?.can(recoveryCreateOperation) && <RecoveryBanner />}
-              />
-            )}
-            {view === 'wallets' && (
+            {view === 'dashboard' && <Dashboard banner={recovers && <RecoveryBanner />} />}
+            {view === 'wallets' && may.wallets && (
               <Wallets
-                shell={shell}
                 wallets={wallets}
                 selected={selected}
                 onSelect={setSelected}
@@ -461,41 +457,40 @@ export function Layout() {
                 onTagged={() => setTagged((n) => n + 1)}
               />
             )}
-            {view === 'triggers' && <Triggers shell={shell} wallets={wallets} />}
-            {view === 'networks' && <Configured shell={shell} />}
-            {view === 'markets' && <Markets shell={shell} />}
-            {view === 'jobs' && <Jobs shell={shell} />}
-            {view === 'logs' && <Logs shell={shell} />}
-            {view === 'users' && reads && (
-              <Users shell={shell} me={me} onMe={() => setMeRead((n) => n + 1)} />
+            {view === 'triggers' && may.triggers && <Triggers wallets={wallets} />}
+            {view === 'networks' && may.networks && <Configured />}
+            {view === 'markets' && may.markets && <Markets />}
+            {view === 'jobs' && may.jobs && <Jobs />}
+            {view === 'logs' && may.logs && <Logs />}
+            {view === 'users' && may.users && (
+              <Users me={me} onMe={() => setMeRead((n) => n + 1)} />
             )}
             {view === 'user' && (
               <Me
-                shell={shell}
                 me={me}
                 onMe={() => setMeRead((n) => n + 1)}
                 own={{ onLogout: logout, onSignedOut: signOut, onSession: keep }}
               />
             )}
-            {view === 'docs' && <Docs shell={shell} secured />}
+            {view === 'docs' && <Docs secured />}
           </Box>
-          <LogsDrawer shell={shell} source={logSource} />
+          {may.logs && <LogsDrawer source={logSource} />}
         </Explorers.Provider>
       )}
       {shown === 'setup' && (
         <Setup
           instance={name}
           onSession={keep}
-          onInstance={setName}
+          onInstance={(instance) => useApp.setState({ name: instance })}
           onDone={() => {
-            setRoot('present');
+            useApp.setState({ root: 'present' });
             go(['dashboard']);
           }}
         />
       )}
       {shown === 'login' && <Login instance={name} onSession={signIn} />}
 
-      <Toast message={toast} onClose={() => setToast(null)} />
+      <Toast message={toast} onClose={() => useApp.setState({ toast: null })} />
     </Box>
   );
 }

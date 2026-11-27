@@ -11,12 +11,12 @@ import {
   twoFactorStop,
   type TwoFactor as State,
 } from '@hashinbox/client';
-import { ApiError, api } from '@/api/client';
+import { ApiError, Reason, api } from '@/api/client';
 import { Copy } from '@/_components/copy';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Row, Section } from './section';
+import { fail, notify } from '@/store/app';
 
 /** The secret an `otpauth://` URI carries, for typing into an app by hand. */
 function secretOf(uri: string): string {
@@ -29,8 +29,9 @@ function secretOf(uri: string): string {
 
 /** What a wrong code reads as; anything else, the server's own message. */
 function problemOf(error: unknown): string {
-  if (error instanceof ApiError && error.status === 401) return 'The code is wrong.';
-  return error instanceof Error ? error.message : String(error);
+  const failure = ApiError.from(error);
+  if (failure.reason === Reason.WrongCredentials) return 'The code is wrong.';
+  return failure.message;
 }
 
 /**
@@ -39,12 +40,10 @@ function problemOf(error: unknown): string {
  * turning it off asks a code and ends every session.
  */
 export function TwoFactor({
-  shell,
   state,
   onChanged,
   onSignedOut,
 }: {
-  shell: Shell;
   state: State | null;
   onChanged: () => void;
   onSignedOut: () => void;
@@ -61,7 +60,7 @@ export function TwoFactor({
         setUri(started.uri);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
@@ -71,7 +70,7 @@ export function TwoFactor({
     if (on) {
       twoFactorStop(api, { body })
         .then(() => {
-          shell.notify('Two-factor off: every session ended. Log in again.');
+          notify('Two-factor off: every session ended. Log in again.');
           onSignedOut();
         })
         .catch((error: unknown) => setProblem(problemOf(error)));
@@ -81,7 +80,7 @@ export function TwoFactor({
       .then(() => {
         setUri(null);
         setCode('');
-        shell.notify('Two-factor on: a login asks for a code from now.');
+        notify('Two-factor on: a login asks for a code from now.');
         onChanged();
       })
       .catch((error: unknown) => setProblem(problemOf(error)));
@@ -143,7 +142,7 @@ export function TwoFactor({
             <Box component="span" sx={{ fontFamily: mono, wordBreak: 'break-all', mr: 1 }}>
               {secretOf(uri)}
             </Box>
-            <Copy text={secretOf(uri)} label="copy" onDone={shell.notify} />
+            <Copy text={secretOf(uri)} label="copy" onDone={notify} />
           </Row>
           <Row label="otpauth URI">
             <Box
@@ -153,7 +152,7 @@ export function TwoFactor({
             >
               {uri}
             </Box>
-            <Copy text={uri} label="copy" onDone={shell.notify} />
+            <Copy text={uri} label="copy" onDone={notify} />
           </Row>
           <Typography color="text.secondary" sx={{ fontSize: 12.5, mt: 1 }}>
             Then enter the code it shows to turn two-factor on.

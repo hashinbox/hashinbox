@@ -23,9 +23,9 @@ __all__ = [
     "Client",
     "Event",
     "Granted",
-    "MissingScope",
     "Operation",
     "RawEvent",
+    "Reason",
     "Request",
     "Stream",
     "Streamer",
@@ -281,23 +281,37 @@ from .secret import Secret
 from .session import Session
 
 
+class Reason:
+    """The fixed machine strings of `ApiError.reason`: what a client acts on."""
+
+    # A login's email, password or two-factor code is wrong, or the current
+    # password or the code of a two-factor change (401).
+    WRONG_CREDENTIALS = "wrong_credentials"
+    # The password was right and the user's two-factor code is needed: ask
+    # it, post again (401).
+    TOTP_REQUIRED = "totp_required"
+    # A genuine session (or key) no longer accepted: expired, or invalidated
+    # since it was issued (401). Log in again.
+    SESSION_EXPIRED = "session_expired"
+    # The caller lacks a scope; metadata `scope` names it (403).
+    MISSING_SCOPE = "missing_scope"
+
+
 class ApiError(Exception):
-    """A non-2xx answer: its status, the API error body's fields, and the
-    body as sent (`text`; `body` when JSON: another model, as
-    `health_get`'s 503 `Report`). `reason` is what a client acts on:
-    `wrong_credentials`, `totp_required`, `session_expired`,
-    `missing_scope`."""
+    """Any failure as the API's error: `kind`, `message`, `reason` (what a
+    client acts on: `wrong_credentials`, `totp_required`,
+    `session_expired`, `missing_scope`), `metadata`, and the answer's
+    `status` (0 when none came). A plain value; `of` turns anything into
+    one."""
 
     def __init__(
         self,
-        status: int,
-        kind: Kind | None,
         message: str,
+        *,
+        kind: Kind = Kind.UNAVAILABLE,
         reason: str | None = None,
         metadata: dict[str, str] | None = None,
-        *,
-        text: str = "",
-        body: Any = None,
+        status: int = 0,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -305,40 +319,61 @@ class ApiError(Exception):
         self.message = message
         self.reason = reason
         self.metadata = metadata or {}
-        self.text = text
-        self.body = body
 
     @classmethod
-    def read(cls, status: int, text: str) -> ApiError:
+    def of(cls, error: object) -> ApiError:
+        """Anything as an `ApiError`: itself when one; an answer (an
+        `httpx.Response`, read) in the API's error shape that error, with
+        its status; any other answer (an HTML 502 from a proxy, an empty
+        body, other JSON, as `health_get`'s 503 `Report`) `unavailable`,
+        its status, its text's first 1024 characters as
+        `metadata["response"]`; an exception `unavailable`, its message,
+        itself as `__cause__`; anything else `unavailable`, `str` of it."""
+        if isinstance(error, ApiError):
+            return error
+        if isinstance(error, httpx.Response):
+            return cls._answer(error.status_code, error.text)
+        wrapped = cls(str(error))
+        if isinstance(error, BaseException):
+            wrapped.__cause__ = error
+        return wrapped
+
+    @classmethod
+    def _answer(cls, status: int, text: str) -> ApiError:
         """The error a `status` answer with body `text` is."""
         try:
             body: Any = json.loads(text)
         except ValueError:
             body = None
         error = body if isinstance(body, dict) else {}
-        try:
-            kind: Kind | None = Kind(str(error.get("kind")))
-        except ValueError:
-            kind = None
-        message = error.get("message")
+        kind, message = error.get("kind"), error.get("message")
+        reason, metadata = error.get("reason"), error.get("metadata")
+        if (
+            kind not in list(Kind)
+            or not isinstance(message, str)
+            or not isinstance(reason, str | None)
+            or not isinstance(metadata, dict | None)
+        ):
+            return cls(
+                f"could not parse the response (HTTP {status})",
+                metadata={"response": text[:1024]},
+                status=status,
+            )
         return cls(
-            status,
-            kind,
-            message if isinstance(message, str) else f"HTTP {status}",
-            error.get("reason"),
-            error.get("metadata"),
-            text=text,
-            body=body,
+            message, kind=Kind(kind), reason=reason, metadata=metadata, status=status
         )
 
 
-class MissingScope(Exception):
-    """A call the session cannot make: refused here, before it is sent."""
-
-    def __init__(self, operation: str, scope: str) -> None:
-        super().__init__(f"{operation} needs scope {scope}")
-        self.operation = operation
-        self.scope = scope
+def missing_scope(operation: str, scope: str) -> ApiError:
+    """The server's 403 for a call `operation` lacking `scope`, refused
+    here, unsent."""
+    return ApiError(
+        f"{operation} needs scope {scope}",
+        kind=Kind.PERMISSION_DENIED,
+        reason=Reason.MISSING_SCOPE,
+        metadata={"scope": scope, "operation": operation},
+        status=403,
+    )
 
 
 # How long before its `exp` a self-signed session is replaced, seconds.
@@ -357,8 +392,8 @@ class Client:
       within 60 s of the server's.
     - `http`: an httpx.AsyncClient to send with (its transport, proxies);
       not closed by this one.
-    - `check_scopes`: refuse locally (`MissingScope`) a call the session's
-      scopes do not cover.
+    - `check_scopes`: refuse locally, unsent, a call the session's scopes
+      do not cover: the server's 403 `missing_scope` `ApiError`.
     - `backoff`, `max_backoff`: a stream's waits, seconds, before it
       reconnects after a failure (see `Stream`).
     """
@@ -484,14 +519,14 @@ class Client:
             if session is not None and self._check_scopes:
                 for scope in scopes(request):
                     if not session.scopes.covers(scope):
-                        raise MissingScope(request.operation().id, scope)
+                        raise missing_scope(request.operation().id, scope)
             response = await self._fetch(request, session, stream, cursor)
             if response.is_success:
                 return response
             if stream:
                 await response.aread()
                 await response.aclose()
-            error = ApiError.read(response.status_code, response.text)
+            error = ApiError.of(response)
             if retry and error.status == 401 and error.reason == "session_expired":
                 retry = False
                 self._session = None
@@ -550,7 +585,7 @@ class Client:
             probe = secret.issue(ttl=REFRESH)
             response = await self._fetch(SessionGetRequest(), probe)
             if not response.is_success:
-                raise ApiError.read(response.status_code, response.text)
+                raise ApiError.of(response)
             # Read raw: `SessionRead.kind` decodes as the error `Kind`.
             self._scopes = Scopes.parse(response.json()["key"]["scopes"])
         return secret.issue(self._scopes, ttl=self._ttl)

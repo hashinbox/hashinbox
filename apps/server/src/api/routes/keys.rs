@@ -68,7 +68,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.keys.$read");
+    scope::require!(caller, "com.hashinbox.users.keys:read");
     let Query(index) = index?;
     let page = index.page("key list", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
@@ -132,7 +132,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     request: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateResponse>), Error> {
-    scope::require!(caller, "com.hashinbox.keys.$write");
+    scope::require!(caller, "com.hashinbox.users.keys");
     let Json(request) = request?;
     let name = request.name.trim();
     if !(1..=128).contains(&name.chars().count()) {
@@ -187,7 +187,7 @@ async fn revoke(
     State(state): State<Arc<AppState>>,
     Path(path): Path<KeyPath>,
 ) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.keys.$write");
+    scope::require!(caller, "com.hashinbox.users.keys");
     keys::revoke(&state.db, &caller.user, &path.key_id()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -214,7 +214,7 @@ async fn rotate(
     State(state): State<Arc<AppState>>,
     Path(path): Path<KeyPath>,
 ) -> Result<Json<UserKey>, Error> {
-    scope::require!(caller, "com.hashinbox.keys.$write");
+    scope::require!(caller, "com.hashinbox.users.keys");
     let key = keys::rotate(&state.db, &caller.user, &path.key_id()).await?;
     Ok(Json(key))
 }

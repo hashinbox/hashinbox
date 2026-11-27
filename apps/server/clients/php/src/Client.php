@@ -26,8 +26,8 @@ use UnexpectedValueException;
  * - `$timeout`: seconds a call may take (a stream: to connect).
  * - `$backoff`, `$backoffMax`: seconds a stream waits before reconnecting
  *   after an error, doubling from the first up to the second.
- * - `$checkScopes`: refuse locally (`MissingScope`) a call the session's
- *   scopes do not cover.
+ * - `$checkScopes`: refuse locally, unsent, a call the session's scopes do
+ *   not cover: the server's 403 `missing_scope` `ApiError`.
  */
 final class Client
 {
@@ -71,8 +71,7 @@ final class Client
      * `$request` sent with the session: its 2xx body decoded (objects as
      * arrays; null when empty).
      *
-     * @throws ApiError a non-2xx answer
-     * @throws MissingScope a scope the session lacks, unsent
+     * @throws ApiError a non-2xx answer, or a scope the session lacks, unsent
      * @throws RuntimeException the transport failed
      * @throws JsonException a body that is not JSON
      */
@@ -160,7 +159,7 @@ final class Client
             if ($session !== null && $this->checkScopes) {
                 foreach ($request->operation()->scopes($request->params()) as $scope) {
                     if (!$session->scopes->covers($scope)) {
-                        throw new MissingScope($request->operation()->id, $scope);
+                        throw self::missingScope($request->operation()->id, $scope);
                     }
                 }
             }
@@ -168,8 +167,8 @@ final class Client
             if ($reply->ok()) {
                 return $reply;
             }
-            $error = ApiError::read($reply->status, $reply->body());
-            if (!$retry || $error->status !== 401 || $error->reason !== 'session_expired') {
+            $error = ApiError::from($reply);
+            if (!$retry || $error->status !== 401 || $error->reason !== Reason::SessionExpired) {
                 throw $error;
             }
             $retry = false;
@@ -224,6 +223,21 @@ final class Client
     }
 
     /**
+     * The server's 403 for a call `$operation` lacking `$scope`, refused here,
+     * unsent.
+     */
+    private static function missingScope(string $operation, string $scope): ApiError
+    {
+        return new ApiError(
+            "{$operation} needs scope {$scope}",
+            kind: Kind::PermissionDenied,
+            reason: Reason::MissingScope,
+            metadata: ['scope' => $scope, 'operation' => $operation],
+            status: 403,
+        );
+    }
+
+    /**
      * A new session of `$secret`: the scopes asked, or the key's own, read once
      * with a scopeless session.
      *
@@ -233,10 +247,10 @@ final class Client
     {
         if ($this->scopes === null) {
             $reply = $this->fetch(new SessionGetRequest(), $secret->issue(ttl: self::REFRESH), false);
-            $body = $reply->body();
             if (!$reply->ok()) {
-                throw ApiError::read($reply->status, $body);
+                throw ApiError::from($reply);
             }
+            $body = $reply->body();
             $read = SessionRead::fromJson(Json::object(Json::decode($body)));
             if ($read->key === null) {
                 throw new UnexpectedValueException('GET /v1/session answered no key for a key session');

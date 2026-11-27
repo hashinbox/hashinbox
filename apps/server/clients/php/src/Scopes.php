@@ -95,6 +95,47 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
     }
 
     /**
+     * Them and every scope `$depends` adds, to a fixed point, compressed.
+     * `$depends` maps a source path (`com.hashinbox.triggers`) to the scopes
+     * holding it needs (`com.hashinbox.wallets`): the generated `DEPENDS`. A
+     * held scope triggers a source when it covers the source or an id of it
+     * (`triggers`, `triggers[t1]`, `com.hashinbox`; not `triggers.runs`), and
+     * adds each target whole: read only when the target is written `:read` or
+     * the held scope is read only. An entry whose text does not parse adds
+     * nothing.
+     *
+     * @param array<string, list<string>> $depends
+     */
+    public function expand(array $depends): self
+    {
+        $parsed = [];
+        foreach ($depends as $source => $targets) {
+            try {
+                $parsed[] = [Scope::parse((string) $source), array_map(Scope::parse(...), $targets)];
+            } catch (ScopeError) {
+                continue;
+            }
+        }
+        $held = $this->items;
+        for ($at = 0; $at < count($held); $at++) {
+            $scope = $held[$at];
+            $plain = new Scope(array_map(static fn(Segment $step): Segment => new Segment($step->name), $scope->path));
+            foreach ($parsed as [$source, $targets]) {
+                if (!$plain->reaches($source->path)) {
+                    continue;
+                }
+                foreach ($targets as $target) {
+                    $target = new Scope($target->path, $target->read || $scope->read);
+                    if (!(new self($held))->covers($target)) {
+                        $held[] = $target;
+                    }
+                }
+            }
+        }
+        return (new self($held))->compress();
+    }
+
+    /**
      * The fewest scopes allowing the same, sorted.
      */
     public function compress(): self
@@ -131,8 +172,8 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
         foreach ($groups as $scopes) {
             $shared = self::sharedPrefix($scopes);
             foreach ($scopes as $scope) {
-                $steps = array_map(static fn(Segment $step): string => (string) $step, array_slice($scope->path, 0, $shared));
-                $rest = new Scope(array_slice($scope->path, $shared), $scope->action);
+                $steps = array_map(strval(...), array_slice($scope->path, 0, $shared));
+                $rest = new Scope(array_slice($scope->path, $shared), $scope->read);
                 $packed[implode('.', $steps)][] = (string) $rest;
             }
         }
@@ -167,7 +208,7 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
         $first = $scopes[0]->path;
         for ($at = 0; $at < $shortest - 1; $at++) {
             $step = $first[$at];
-            if ($step->name === Scope::ANY || $step->id !== null) {
+            if ($step->id !== null) {
                 return $at;
             }
             foreach ($scopes as $scope) {

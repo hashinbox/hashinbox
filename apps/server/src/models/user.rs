@@ -11,7 +11,7 @@ use super::{
     json::{PackedScopes, serialize_is_some, serialize_packed},
     schema::users,
 };
-use crate::{db::Page, error::Error};
+use crate::{auth, db::Page, error::Error};
 
 /// The fewest characters a password has.
 const MIN_PASSWORD: usize = 8;
@@ -51,7 +51,7 @@ pub(crate) struct User {
     #[schema(value_type = bool)]
     pub(crate) password_hash: Option<String>,
     /// The widest scopes it may issue, packed in JSON
-    /// (`{"com.hashinbox": ["wallets.$read"]}`).
+    /// (`{"com.hashinbox": ["wallets:read"]}`).
     #[diesel(deserialize_as = PackedScopes)]
     #[serde(serialize_with = "serialize_packed")]
     #[schema(value_type = std::collections::BTreeMap<String, Vec<String>>)]
@@ -97,14 +97,16 @@ impl User {
     /// Whether it lets `session` (its own, or one of `key`'s) call: not
     /// disabled, not invalidated since the session was issued, not ended by
     /// the recovery passphrase (set at `recovery_set_at`, Unix ms), and its
-    /// scopes covering the session's and the key's.
+    /// scopes covering the session's and the key's, each expanded
+    /// (`auth::DEPENDS`).
     pub(crate) fn accepts(
         &self,
         session: &Session,
         key: Option<&UserKey>,
         recovery_set_at: Option<i64>,
     ) -> bool {
-        let covers = |scopes: &Scopes| self.scopes.first_uncovered(scopes).is_none();
+        let held = auth::expanded(&self.scopes);
+        let covers = |scopes: &Scopes| held.first_uncovered(&auth::expanded(scopes)).is_none();
         self.disabled_at.is_none()
             && !session.is_invalidated_by(self.invalidated_at)
             && !session.is_ended_by_recovery(recovery_set_at)

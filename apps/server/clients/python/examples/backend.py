@@ -28,7 +28,7 @@ async def main() -> None:
             chain="ethereum", network="mainnet", external_id="customer-1"
         )
         wallet = await wallets_create(api, WalletsCreateRequest(body=body))
-    scope = f"com.hashinbox.wallets[{escape_id(wallet.id)}].$read"
+    scope = f"com.hashinbox.wallets[{escape_id(wallet.id)}]:read"
     token = secret.issue(scope, subject="customer-1", ttl=15 * 60)
     print(wallet.id)
     print(token.token)

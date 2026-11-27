@@ -17,7 +17,7 @@ export async function depositFor(customer: string) {
     body: { chain: "ethereum", network: "mainnet", external_id: customer },
   });
   const session = await secret.issue({
-    scopes: `com.hashinbox.wallets[${wallet.id}].$read`,
+    scopes: `com.hashinbox.wallets[${wallet.id}]:read`,
     subject: customer,
     ttl: 15 * 60,
   });

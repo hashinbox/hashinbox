@@ -10,7 +10,7 @@ pub fn escape_id(id: &str) -> String {
 }
 
 /// `template` with each `{name}` what `value` gives for it:
-/// `fill("a.wallets[{id}].$read", |_| escape_id("x"))`.
+/// `fill("a.wallets[{id}]:read", |_| escape_id("x"))`.
 pub fn fill(template: &str, value: impl Fn(&str) -> String) -> String {
     let mut text = String::new();
     let mut rest = template;

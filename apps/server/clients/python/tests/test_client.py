@@ -13,7 +13,7 @@ from hashinbox import (
     CreateWalletRequest,
     Kind,
     LogsStreamRequest,
-    MissingScope,
+    Reason,
     Secret,
     Session,
     WalletGetRequest,
@@ -60,7 +60,7 @@ async def test_path_query_body_and_bearer() -> None:
             return httpx.Response(201, json=WALLET)
         return httpx.Response(200, json={"items": [], "next_cursor": None})
 
-    session = SECRET.issue("com.hashinbox.wallets.$*")
+    session = SECRET.issue("com.hashinbox.wallets")
     async with client(handler, session=session) as api:
         body = CreateWalletRequest(chain="ethereum", network="mainnet")
         await wallets_create(api, WalletsCreateRequest(body=body))
@@ -80,7 +80,7 @@ async def test_a_path_parameter_is_escaped() -> None:
         seen.append(request)
         return httpx.Response(200, json=WALLET)
 
-    session = SECRET.issue("com.hashinbox.wallets.$read")
+    session = SECRET.issue("com.hashinbox.wallets:read")
     async with client(handler, session=session) as api:
         wallet = await wallet_get(api, WalletGetRequest(id="a/b c"))
     assert wallet.address == "0xabc"
@@ -93,7 +93,7 @@ async def test_an_error_is_mapped() -> None:
             "kind": "permission_denied",
             "message": "missing scope",
             "reason": "missing_scope",
-            "metadata": {"scope": "com.hashinbox.wallets.$read"},
+            "metadata": {"scope": "com.hashinbox.wallets:read"},
         }
         return httpx.Response(403, json=error)
 
@@ -106,18 +106,26 @@ async def test_an_error_is_mapped() -> None:
         Kind.PERMISSION_DENIED,
         "missing_scope",
     )
-    assert error.metadata == {"scope": "com.hashinbox.wallets.$read"}
+    assert error.metadata == {"scope": "com.hashinbox.wallets:read"}
 
 
 async def test_a_missing_scope_is_refused_locally() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("sent")
 
-    session = SECRET.issue("com.hashinbox.wallets[x].$read")
+    session = SECRET.issue("com.hashinbox.wallets[x]:read")
     async with client(handler, session=session) as api:
-        with pytest.raises(MissingScope) as raised:
+        with pytest.raises(ApiError) as raised:
             await api.send(WalletGetRequest(id="y"))
-    assert raised.value.scope == "com.hashinbox.wallets[y].$read"
+    error = raised.value
+    scope = "com.hashinbox.wallets[y]:read"
+    assert (error.status, error.kind, error.reason) == (
+        403,
+        Kind.PERMISSION_DENIED,
+        Reason.MISSING_SCOPE,
+    )
+    assert error.message == f"wallet_get needs scope {scope}"
+    assert error.metadata == {"scope": scope, "operation": "wallet_get"}
 
 
 async def test_a_secret_signs_its_own_sessions_and_re_signs_on_expiry() -> None:
@@ -127,7 +135,7 @@ async def test_a_secret_signs_its_own_sessions_and_re_signs_on_expiry() -> None:
         session = bearer(request)
         assert VECTORS["secret"] not in request.headers["Authorization"]
         if request.url.path == "/v1/session":
-            key = {"scopes": {"com.hashinbox": ["wallets.$read"]}}
+            key = {"scopes": {"com.hashinbox": ["wallets:read"]}}
             return httpx.Response(200, json={"key": key})
         sent.append(session)
         if len(sent) == 1:
@@ -138,11 +146,11 @@ async def test_a_secret_signs_its_own_sessions_and_re_signs_on_expiry() -> None:
     async with client(handler, secret=SECRET) as api:
         await api.send(WalletGetRequest(id="x"))
         first, second = sent
-        assert str(first.scopes) == "com.hashinbox.wallets.$read"
+        assert str(first.scopes) == "com.hashinbox.jobs:read com.hashinbox.wallets:read"
         assert first.expires_at - first.issued_at == 600
         assert api.session == second
         # Within a minute of its expiry, a new one is signed.
-        api.session = SECRET.issue("com.hashinbox.wallets.$read", ttl=30)
+        api.session = SECRET.issue("com.hashinbox.wallets:read", ttl=30)
         await api.send(WalletGetRequest(id="x"))
         assert sent[2].expires_at > time.time() + 500
 
@@ -184,7 +192,7 @@ async def test_a_stream_yields_its_events() -> None:
         assert request.headers["Accept"] == "text/event-stream"
         return httpx.Response(200, content=body)
 
-    session = SECRET.issue("com.hashinbox.*.$*")
+    session = SECRET.issue("com.hashinbox")
     async with client(handler, session=session) as api:
         raw = [event async for event in logs_stream(api, LogsStreamRequest())]
         typed = [event async for event in api.stream(LogsStreamRequest())]
@@ -258,3 +266,66 @@ async def test_a_failed_connect_backs_off_and_a_refused_one_raises() -> None:
     waits = [later - earlier for earlier, later in itertools.pairwise(at)]
     assert waits[0] >= 0.05 and waits[1] >= 0.08, waits
     assert waits[2] < 0.05, "a window's close reconnects at once"
+
+
+def test_any_error_is_an_api_error() -> None:
+    refused = ApiError(
+        "no", kind=Kind.UNAUTHENTICATED, reason="totp_required", status=401
+    )
+    assert ApiError.of(refused) is refused
+    assert ApiError.of(refused).reason == Reason.TOTP_REQUIRED
+
+    down = httpx.ConnectError("refused")
+    error = ApiError.of(down)
+    assert (error.status, error.kind, error.message) == (0, Kind.UNAVAILABLE, "refused")
+    assert error.__cause__ is down
+    assert ApiError.of(TimeoutError()).kind == Kind.UNAVAILABLE
+
+    plain = ValueError("bad")
+    error = ApiError.of(plain)
+    assert (error.status, error.kind, error.reason) == (0, Kind.UNAVAILABLE, None)
+    assert (error.message, error.__cause__) == ("bad", plain)
+
+    odd = ApiError.of("odd")
+    assert (odd.status, odd.kind, odd.reason, odd.message) == (
+        0,
+        Kind.UNAVAILABLE,
+        None,
+        "odd",
+    )
+
+    made = ApiError("made")
+    assert (made.status, made.kind, made.reason, made.metadata) == (
+        0,
+        Kind.UNAVAILABLE,
+        None,
+        {},
+    )
+
+
+def test_an_answer_not_the_apis_error_is_unavailable() -> None:
+    html = "<html>" + "x" * 2000 + "</html>"
+    other = '{"status": "down"}'
+    strange = '{"kind": "strange", "message": "no"}'
+    for status, text in [(502, html), (503, ""), (503, other), (500, strange)]:
+        error = ApiError.of(httpx.Response(status, text=text))
+        assert (error.status, error.kind, error.reason, error.message) == (
+            status,
+            Kind.UNAVAILABLE,
+            None,
+            f"could not parse the response (HTTP {status})",
+        )
+        assert error.metadata == {"response": text[:1024]}
+    body = {
+        "kind": "permission_denied",
+        "message": "no",
+        "reason": "missing_scope",
+        "metadata": {"scope": "s"},
+    }
+    error = ApiError.of(httpx.Response(403, json=body))
+    assert (error.status, error.kind, error.message) == (
+        403,
+        Kind.PERMISSION_DENIED,
+        "no",
+    )
+    assert (error.reason, error.metadata) == (Reason.MISSING_SCOPE, {"scope": "s"})

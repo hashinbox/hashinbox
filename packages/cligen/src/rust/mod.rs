@@ -25,6 +25,50 @@ const DERIVE: &str = "derive(Clone, Debug, PartialEq, Serialize, Deserialize)";
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rust;
 
+/// rustfmt's widest tuple or array on one line (`fn_call_width`,
+/// `array_width`).
+const WIDTH: usize = 60;
+
+/// `DEPENDS`: the document's `x-hashinbox-depends`, each entry as
+/// rustfmt lays it out (on one line, else its tuple, then its array, one
+/// item per line).
+fn depends(out: &mut String, spec: &Spec) {
+    let _ = write!(
+        out,
+        "\n/// What holding a scope needs beyond its subtree (`x-hashinbox-depends`):\n\
+         /// source → targets.\npub const DEPENDS: &[(&str, &[&str])] = &["
+    );
+    if spec.depends.is_empty() {
+        out.push_str("];\n");
+        return;
+    }
+    out.push('\n');
+    for (source, targets) in &spec.depends {
+        let source = RustName(source).literal();
+        let targets: Vec<String> = targets
+            .iter()
+            .map(|target| RustName(target).literal())
+            .collect();
+        let array = format!("&[{}]", targets.join(", "));
+        let tuple = format!("({source}, {array})");
+        if tuple.len() <= WIDTH {
+            let _ = writeln!(out, "    {tuple},");
+        } else if array.len() <= WIDTH {
+            let _ = writeln!(out, "    (\n        {source},\n        {array},\n    ),");
+        } else {
+            let items: String = targets
+                .iter()
+                .map(|target| format!("            {target},\n"))
+                .collect();
+            let _ = writeln!(
+                out,
+                "    (\n        {source},\n        &[\n{items}        ],\n    ),"
+            );
+        }
+    }
+    out.push_str("];\n");
+}
+
 impl Rust {
     /// `models.rs` and `operations.rs`, modules of a crate whose `client`
     /// module is hand-written.
@@ -85,6 +129,7 @@ impl Rust {
             "{marker}//! Every operation of the API.\n\n{}",
             Use(used.into_iter().collect())
         );
+        depends(&mut operations, spec);
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut operations, op));

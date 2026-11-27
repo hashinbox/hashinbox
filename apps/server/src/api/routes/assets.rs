@@ -38,25 +38,25 @@ struct ListResponse {
     assets: Vec<Listing>,
 }
 
-#[scope::utoipa(
+#[utoipa::path(
     get,
     path = "/v1/assets",
     operation_id = "assets_list",
     summary = "List every configured asset",
     description = "Every asset of every configured network, with its metadata. This is the \
-        only list of assets the wallet routes accept.",
+        only list of assets the wallet routes accept. Any session may read it: every wallet page \
+        shows its tickers, decimals and icons.",
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "Configured assets", body = ListResponse),
-        (status = 401, description = "Missing or invalid bearer token", body = Error),
-        (status = 403, description = "Missing scope", body = Error)
+        (status = 401, description = "Missing or invalid bearer token", body = Error)
     ),
     tag = "assets"
 )]
 async fn list(
-    session: Session,
+    _session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.assets.$read");
     let assets = state.container.assets().into_iter();
     Ok(Json(ListResponse {
         assets: assets.map(Listing::from).collect(),

@@ -54,8 +54,8 @@ impl Scopes {
 
     /// [`Self::compress`]ed, then grouped by their shared prefix, the
     /// shortest text for a JWT claim:
-    /// `{"com.hashinbox": ["markets.$read", "wallets[a].$read"]}`. A
-    /// prefix is the leading plain names (no ids, no `*`) every scope
+    /// `{"com.hashinbox": ["triggers", "wallets[a]:read"]}`. A
+    /// prefix is the leading plain names (no ids) every scope
     /// starting with the same step shares, each scope keeping one step at
     /// least. [`Self::unpack`] reverses it.
     #[must_use]
@@ -70,8 +70,7 @@ impl Scopes {
             let shared = shared_prefix(&scopes);
             for scope in scopes {
                 let (prefix, rest) = scope.path().split_at(shared);
-                let rest =
-                    Scope::__from_parts(rest.to_vec(), "*").with_action(scope.action().clone());
+                let rest = scope.with_path(rest.to_vec());
                 packed
                     .entry(joined(prefix))
                     .or_default()
@@ -97,6 +96,44 @@ impl Scopes {
         each.collect()
     }
 
+    /// Them and every scope `depends` adds, to a fixed point, compressed.
+    /// `depends` maps a source path (`com.hashinbox.triggers`) to the
+    /// scopes holding it needs (`com.hashinbox.wallets`). A held scope
+    /// triggers a source when it covers the source or an id of it
+    /// (`triggers`, `triggers[t1]`, `com.hashinbox`; not `triggers.runs`),
+    /// and adds each target whole: read only when the target is written
+    /// `:read` or the held scope is read only. An entry whose text does not
+    /// parse adds nothing.
+    #[must_use]
+    pub fn expand(&self, depends: &[(&str, &[&str])]) -> Self {
+        let depends: Vec<(Scope, Self)> = depends
+            .iter()
+            .filter_map(|(source, targets)| {
+                let targets: Result<Self, _> =
+                    targets.iter().map(|target| target.parse()).collect();
+                Some((source.parse().ok()?, targets.ok()?))
+            })
+            .collect();
+        let mut held = self.0.clone();
+        let mut at = 0;
+        while at < held.len() {
+            let scope = held[at].clone();
+            for (source, targets) in &depends {
+                if !triggers(&scope, source) {
+                    continue;
+                }
+                for target in targets {
+                    let target = target.read_if(scope.is_read());
+                    if !held.iter().any(|kept| kept.covers(&target)) {
+                        held.push(target);
+                    }
+                }
+            }
+            at += 1;
+        }
+        Self(held).compress()
+    }
+
     /// The fewest scopes allowing the same: one covered by another is
     /// dropped; sorted. What a JWT carries.
     #[must_use]
@@ -105,6 +142,16 @@ impl Scopes {
         scopes.sort();
         Self(scopes)
     }
+}
+
+/// Whether `held` triggers `source`'s dependencies: it covers `source`,
+/// its ids ignored.
+fn triggers(held: &Scope, source: &Scope) -> bool {
+    let path = held.path().iter().map(|step| Segment {
+        name: step.name.clone(),
+        id: None,
+    });
+    held.with_path(path.collect()).reaches(source.path())
 }
 
 /// `scopes` but each covered by another (of two equal ones, the first
@@ -132,7 +179,7 @@ fn shared_prefix(scopes: &[&Scope]) -> usize {
         .map(|scope| scope.path().len())
         .min()
         .unwrap_or(1);
-    let plain = |step: &Segment| matches!(step, Segment::Name { id: None, .. });
+    let plain = |step: &Segment| step.id.is_none();
     let first = scopes[0].path();
     (0..shortest - 1)
         .take_while(|&at| {
@@ -202,32 +249,32 @@ mod tests {
 
     #[test]
     fn a_token_only_narrows_its_key() {
-        let key = scopes("a.wallets.$* a.markets.$read");
-        assert_eq!(key.first_uncovered(&scopes("a.wallets[x].$read")), None);
-        let wider = scopes("a.wallets[x].$read a.networks.$read");
+        let key = scopes("a.wallets a.markets:read");
+        assert_eq!(key.first_uncovered(&scopes("a.wallets[x]:read")), None);
+        let wider = scopes("a.wallets[x]:read a.networks:read");
         assert_eq!(
             key.first_uncovered(&wider).map(ToString::to_string),
-            Some("a.networks.$read".to_owned())
+            Some("a.networks:read".to_owned())
         );
     }
 
     #[test]
     fn compress_drops_covered() {
         let held = scopes(
-            "a.wallets[x].$read a.wallets[y].$read a.wallets[x].$read \
-             a.markets.$read a.markets[btc].$read a.wallets[z].$write",
+            "a.wallets[x]:read a.wallets[y]:read a.wallets[x]:read a.markets:read \
+             a.markets[btc]:read a.wallets[z] a.wallets[z].tags a.networks a.networks:read",
         );
         assert_eq!(
             held.compress().to_string(),
-            "a.markets.$read a.wallets[x].$read a.wallets[y].$read a.wallets[z].$write"
+            "a.markets:read a.networks a.wallets[x]:read a.wallets[y]:read a.wallets[z]"
         );
     }
 
     #[test]
     fn pack_groups_by_the_shared_prefix_and_unpacks() {
         let held = scopes(
-            "com.hashinbox.wallets[x].$read com.hashinbox.wallets[y].$read \
-             com.hashinbox.wallets[x].legs.$read com.hashinbox.markets.$read other.thing.$write",
+            "com.hashinbox.wallets[x]:read com.hashinbox.wallets[y]:read \
+             com.hashinbox.wallets[x].tags com.hashinbox.triggers other.thing",
         );
         let packed = held.pack();
         let json: Vec<String> = packed
@@ -237,9 +284,8 @@ mod tests {
         assert_eq!(
             json,
             [
-                "com.hashinbox: markets.$read wallets[x].$read wallets[x].legs.$read \
-                 wallets[y].$read",
-                "other: thing.$write",
+                "com.hashinbox: triggers wallets[x]:read wallets[x].tags wallets[y]:read",
+                "other: thing",
             ]
         );
         assert_eq!(Scopes::unpack(&packed).unwrap(), held.compress());
@@ -247,22 +293,40 @@ mod tests {
 
     #[test]
     fn pack_keeps_one_step_per_scope() {
-        let held = scopes("a.b.c.$read a.b.$read");
+        let held = scopes("a.b.c:read a.b:read");
         let packed = held.pack();
-        assert_eq!(packed["a"], ["b.$read", "b.c.$read"]);
+        assert_eq!(packed["a"], ["b:read"]);
         assert_eq!(Scopes::unpack(&packed).unwrap(), held.compress());
     }
 
+    /// The test dependencies.
+    const DEPENDS: &[(&str, &[&str])] = &[
+        ("a.triggers", &["a.wallets"]),
+        ("a.wallets", &["a.jobs"]),
+        ("a.networks.endpoints", &["a.networks:read"]),
+    ];
+
+    fn expand(text: &str) -> String {
+        scopes(text).expand(DEPENDS).to_string()
+    }
+
     #[test]
-    fn compress_keeps_what_is_allowed() {
-        let held = scopes("a.wallets[x].$read a.wallets[y].$read a.*.$write a.wallets.$write");
-        let compressed = held.compress();
+    fn expand_adds_dependencies_to_a_fixed_point() {
+        assert_eq!(expand("a.triggers"), "a.jobs a.triggers a.wallets");
         assert_eq!(
-            compressed.to_string(),
-            "a.wallets[x].$read a.wallets[y].$read a.*.$write"
+            expand("a.triggers:read"),
+            "a.jobs:read a.triggers:read a.wallets:read"
         );
-        for scope in &held {
-            assert!(compressed.covers(scope), "{scope}");
-        }
+        assert_eq!(expand("a.triggers[t1]"), "a.jobs a.triggers[t1] a.wallets");
+        assert_eq!(expand("a.triggers.runs:read"), "a.triggers.runs:read");
+        assert_eq!(
+            expand("a.networks[x].endpoints"),
+            "a.networks:read a.networks[x].endpoints"
+        );
+        assert_eq!(expand("a.networks"), "a.networks");
+        assert_eq!(expand("a"), "a");
+        assert_eq!(expand("a:read"), "a:read");
+        assert_eq!(expand("a.wallets:read a.jobs"), "a.jobs a.wallets:read");
+        assert_eq!(expand(""), "");
     }
 }

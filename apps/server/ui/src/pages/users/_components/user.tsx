@@ -12,6 +12,7 @@ import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
 import {
   ownUserUpdate,
+  keysListOperation,
   recoveryCreateOperation,
   userUpdate,
   userUpdateOperation,
@@ -19,10 +20,9 @@ import {
   type User,
   type UserRead,
 } from '@hashinbox/client';
-import { api } from '@/api/client';
+import { ApiError, api } from '@/api/client';
 import { Confirm } from '@/_components/confirm';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { Keys } from './keys';
 import { Picker, ScopeList } from './picker';
@@ -31,6 +31,8 @@ import { Recovery } from './recovery';
 import { Row, Section } from './section';
 import { Sessions } from './sessions';
 import { TwoFactor } from './two-factor';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** What the logged-in user's own page reports back to the shell. */
 export interface Own {
@@ -46,14 +48,12 @@ export interface Own {
  * password, keys, two-factor, session and recovery too.
  */
 export function UserDetail({
-  shell,
   me,
   user,
   resources,
   onChanged,
   own,
 }: {
-  shell: Shell;
   me: UserRead;
   user: User;
   resources: Resources;
@@ -61,8 +61,10 @@ export function UserDetail({
   own?: Own;
 }) {
   const held = unpack(me.user.scopes);
-  const manages =
-    user.id !== me.user.id && api.session?.can(userUpdateOperation, { id: user.id }) === true;
+  const updates = useCan(userUpdateOperation, { id: user.id });
+  const manages = updates && user.id !== me.user.id;
+  const readsKeys = useCan(keysListOperation);
+  const recovers = useCan(recoveryCreateOperation);
   const disabled = user.disabled_at != null;
   const [password, setPassword] = useState(false);
   const [editing, setEditing] = useState(false);
@@ -71,10 +73,10 @@ export function UserDetail({
   const update = (body: UpdateUserRequest, done: string) => {
     userUpdate(api, { id: user.id, body })
       .then(() => {
-        shell.notify(done);
+        notify(done);
         onChanged();
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
 
   return (
@@ -126,22 +128,17 @@ export function UserDetail({
 
       {own && (
         <>
-          <Keys shell={shell} held={held} resources={resources} />
-          <TwoFactor
-            shell={shell}
-            state={me.two_factor}
-            onChanged={onChanged}
-            onSignedOut={own.onSignedOut}
-          />
-          <Sessions shell={shell} onLogout={own.onLogout} />
-          {api.session?.can(recoveryCreateOperation) && <Recovery shell={shell} />}
+          {readsKeys && <Keys held={held} resources={resources} />}
+          <TwoFactor state={me.two_factor} onChanged={onChanged} onSignedOut={own.onSignedOut} />
+          <Sessions onLogout={own.onLogout} />
+          {recovers && <Recovery />}
           <Password
             open={password}
             onClose={() => setPassword(false)}
             onChanged={(token) => {
               setPassword(false);
               own.onSession(token);
-              shell.notify('Password changed: your other sessions are signed out.');
+              notify('Password changed: your other sessions are signed out.');
             }}
           />
         </>
@@ -246,9 +243,7 @@ function Password({
         close();
         onChanged(session.token);
       })
-      .catch((error: unknown) =>
-        setProblem(error instanceof Error ? error.message : String(error)),
-      );
+      .catch((error: unknown) => setProblem(ApiError.from(error).message));
   };
 
   return (

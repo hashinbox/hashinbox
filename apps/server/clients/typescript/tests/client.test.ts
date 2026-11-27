@@ -9,7 +9,7 @@ import {
   HashinboxClient,
   keyRevoke,
   logsStream,
-  MissingScope,
+  Reason,
   Secret,
   Session,
   versionGet,
@@ -109,12 +109,22 @@ test("an error body is an ApiError; 401 calls onUnauthorized but for wrong input
 test("a call the session cannot make is refused locally", async () => {
   const key = Secret.parse(vectors.id, vectors.secret);
   const narrow = await key.issue({
-    scopes: "com.hashinbox.wallets[a.b.c].$read",
+    scopes: "com.hashinbox.wallets[a.b.c]:read",
   });
   const { fetch, sent } = fake(json(200, {}));
   const client = new HashinboxClient("", { session: narrow, fetch });
   await walletGet(client, { id: "a.b.c" });
-  await assert.rejects(walletGet(client, { id: "a.b.d" }), MissingScope);
+  await assert.rejects(walletGet(client, { id: "a.b.d" }), {
+    name: "ApiError",
+    status: 403,
+    kind: "permission_denied",
+    reason: Reason.MissingScope,
+    message: "wallet_get needs scope com.hashinbox.wallets[a.b.d]:read",
+    metadata: {
+      scope: "com.hashinbox.wallets[a.b.d]:read",
+      operation: "wallet_get",
+    },
+  });
   assert.equal(sent.length, 1);
   const unchecked = new HashinboxClient("", {
     session: narrow,
@@ -128,7 +138,7 @@ test("a secret signs its own sessions: the key's scopes read once, re-signed on 
   const key = Secret.parse(vectors.id, vectors.secret);
   const sessions: (Session | undefined)[] = [];
   const { fetch, sent } = fake(
-    json(200, { key: { scopes: { "com.hashinbox": ["wallets.$read"] } } }),
+    json(200, { key: { scopes: { "com.hashinbox": ["wallets:read"] } } }),
     json(200, { id: "a.b.c" }),
     json(401, {
       kind: "unauthenticated",
@@ -151,7 +161,10 @@ test("a secret signs its own sessions: the key's scopes read once, re-signed on 
   );
   assert.equal(Session.parse(sent[0].auth!.slice(7)).scopes.toString(), "");
   const signed = Session.parse(sent[1].auth!.slice(7));
-  assert.equal(signed.scopes.toString(), "com.hashinbox.wallets.$read");
+  assert.equal(
+    signed.scopes.toString(),
+    "com.hashinbox.jobs:read com.hashinbox.wallets:read",
+  );
   assert.equal(signed.expiresAt - signed.issuedAt, 600);
   assert.equal(sessions.length, 2);
   assert.ok(sessions.every((s) => s?.issuer === vectors.id));
@@ -167,7 +180,7 @@ test("a second session_expired surfaces", async () => {
   const { fetch, sent } = fake(expired, expired);
   const client = new HashinboxClient("", {
     secret: key,
-    scopes: "com.hashinbox.*.$*",
+    scopes: "com.hashinbox",
     fetch,
   });
   await assert.rejects(versionGet(client), { reason: "session_expired" });
@@ -308,4 +321,103 @@ test("a timeout aborts the call", async () => {
     )) as typeof globalThis.fetch;
   const client = new HashinboxClient("", { fetch, timeout: 10 });
   await assert.rejects(versionGet(client), { name: "TimeoutError" });
+});
+
+test("ApiError.from: an ApiError as is, anything else wrapped with its cause", async () => {
+  const { fetch } = fake(
+    json(401, {
+      kind: "unauthenticated",
+      message: "no",
+      reason: "totp_required",
+    }),
+  );
+  const client = new HashinboxClient("http://h", { fetch });
+  const answer = await versionGet(client).catch((error: unknown) => error);
+  assert.equal(ApiError.from(answer), answer);
+  assert.equal(ApiError.from(answer).reason, Reason.TotpRequired);
+
+  const network = new TypeError("fetch failed");
+  const offline = ApiError.from(network);
+  assert.deepEqual(
+    [
+      offline.status,
+      offline.kind,
+      offline.reason,
+      offline.message,
+      offline.cause,
+    ],
+    [0, "unavailable", undefined, "fetch failed", network],
+  );
+  assert.equal(
+    ApiError.from(new DOMException("timed out", "TimeoutError")).kind,
+    "unavailable",
+  );
+
+  const odd = ApiError.from("odd");
+  assert.deepEqual(
+    [odd.status, odd.kind, odd.reason, odd.message],
+    [0, "unavailable", undefined, "odd"],
+  );
+
+  const made = new ApiError({ message: "made" });
+  assert.deepEqual(
+    [made.status, made.kind, made.reason, made.metadata, made.message],
+    [0, "unavailable", undefined, {}, "made"],
+  );
+  assert.equal(ApiError.from(made), made);
+});
+
+test("an answer not in the error shape is unavailable, its status and text kept", async () => {
+  const html = `<html>${"x".repeat(2000)}</html>`;
+  const { fetch } = fake(
+    () =>
+      new Response(html, {
+        status: 502,
+        headers: { "Content-Type": "text/html" },
+      }),
+    () => new Response("", { status: 503 }),
+    json(503, { status: "down" }),
+    json(500, { kind: "nonsense", message: "?" }),
+    json(404, {
+      kind: "not_found",
+      message: "no wallet",
+      metadata: { id: "w" },
+    }),
+  );
+  const client = new HashinboxClient("http://h", { fetch });
+  const failure = () =>
+    versionGet(client).then(
+      () => assert.fail("answered"),
+      (error: unknown) => ApiError.from(error),
+    );
+  const unparsed = (status: number, response: string) => ({
+    status,
+    kind: "unavailable",
+    reason: undefined,
+    message: `could not parse the response (HTTP ${status})`,
+    metadata: { response },
+  });
+  const fields = (error: ApiError) => ({
+    status: error.status,
+    kind: error.kind,
+    reason: error.reason,
+    message: error.message,
+    metadata: error.metadata,
+  });
+
+  assert.deepEqual(fields(await failure()), unparsed(502, html.slice(0, 1024)));
+  assert.deepEqual(fields(await failure()), unparsed(503, ""));
+  assert.deepEqual(fields(await failure()), unparsed(503, '{"status":"down"}'));
+  assert.equal((await failure()).kind, "unavailable");
+  const proper = await failure();
+  assert.deepEqual(
+    [
+      proper.status,
+      proper.kind,
+      proper.message,
+      proper.reason,
+      proper.metadata,
+    ],
+    [404, "not_found", "no wallet", undefined, { id: "w" }],
+  );
 });

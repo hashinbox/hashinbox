@@ -9,6 +9,14 @@ namespace Mini;
 use Closure;
 
 /**
+ * What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+ */
+const DEPENDS = [
+    'mini.owners.with.a.rather.long.name' => ['mini.pets.with.a.long.name:read', 'mini.vets'],
+    'mini.pets' => ['mini.owners:read'],
+];
+
+/**
  * `GET /v1/animals`.
  */
 const ANIMALS_LIST = new Operation(id: 'animals_list', method: 'GET', path: '/v1/animals', templates: []);
@@ -56,7 +64,7 @@ const LOGS_STREAM = new Operation(
     id: 'logs_stream',
     method: 'GET',
     path: '/v1/logs/stream',
-    templates: ['mini.logs.$read'],
+    templates: ['mini.logs:read'],
 );
 
 /**
@@ -141,7 +149,7 @@ const PET_DELETE = new Operation(
     id: 'pet_delete',
     method: 'DELETE',
     path: '/v1/pets/{id}',
-    templates: ['mini.pets[{id}].$write'],
+    templates: ['mini.pets[{id}]'],
 );
 
 /**
@@ -187,7 +195,7 @@ const PET_EVENTS_STREAM = new Operation(
     id: 'pet_events_stream',
     method: 'GET',
     path: '/v1/pets/{id}/events',
-    templates: ['mini.pets[{id}].$read'],
+    templates: ['mini.pets[{id}]:read'],
 );
 
 /**
@@ -247,12 +255,7 @@ function petEventsStream(Client $client, PetEventsStreamRequest $request): Strea
 /**
  * `GET /v1/pets/{id}`.
  */
-const PET_GET = new Operation(
-    id: 'pet_get',
-    method: 'GET',
-    path: '/v1/pets/{id}',
-    templates: ['mini.pets[{id}].$read'],
-);
+const PET_GET = new Operation(id: 'pet_get', method: 'GET', path: '/v1/pets/{id}', templates: ['mini.pets[{id}]:read']);
 
 /**
  * The input of `petGet`.
@@ -300,7 +303,7 @@ const PETS_CREATE = new Operation(
     id: 'pets_create',
     method: 'POST',
     path: '/v1/pets',
-    templates: ['mini.pets.$write', 'mini.owners.$read'],
+    templates: ['mini.pets', 'mini.owners:read'],
 );
 
 /**
@@ -342,7 +345,7 @@ function petsCreate(Client $client, PetsCreateRequest $request): Pet
 /**
  * `GET /v1/pets`.
  */
-const PETS_LIST = new Operation(id: 'pets_list', method: 'GET', path: '/v1/pets', templates: ['mini.pets.$read']);
+const PETS_LIST = new Operation(id: 'pets_list', method: 'GET', path: '/v1/pets', templates: ['mini.pets:read']);
 
 /**
  * The input of `petsList`.

@@ -3,24 +3,18 @@ import { useEffect, useState } from 'react';
 import { sessionGet, type SessionRead } from '@hashinbox/client';
 import { api } from '@/api/client';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { ScopeList } from './picker';
 import { unpack } from './scopes';
 import { Row, Section } from './section';
+import { fail } from '@/store/app';
 
 /** This tab's session: when it was issued, when it ends, what it may do; log out. */
-export function Sessions({
-  shell,
-  onLogout,
-}: {
-  shell: Shell;
-  onLogout: (everywhere: boolean) => void;
-}) {
+export function Sessions({ onLogout }: { onLogout: (everywhere: boolean) => void }) {
   const [session, setSession] = useState<SessionRead | null>(null);
 
   useEffect(() => {
-    sessionGet(api).then(setSession).catch(shell.fail);
-  }, [shell.fail]);
+    sessionGet(api).then(setSession).catch(fail);
+  }, []);
 
   return (
     <Section

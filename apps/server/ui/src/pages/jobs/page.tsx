@@ -11,7 +11,6 @@ import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { jobsList, type Job } from '@hashinbox/client';
 import { api } from '@/api/client';
-import type { Shell } from '@/layout';
 import { Empty } from '@/_components/empty';
 import { EmptyRow } from '@/_components/table';
 import { shorten } from '@/_components/trim';
@@ -22,6 +21,7 @@ import { LogsButton } from '@/_components/logs/button';
 import { valueOf, type Tag } from '@/_components/tag';
 import { Tags } from '@/_components/tags';
 import { segments } from '@/route';
+import { fail, useApp } from '@/store/app';
 
 const BEAT_MS = 4000;
 /** Every job kind there is, as the filter names them. */
@@ -82,7 +82,8 @@ function next(job: Job): ReactNode {
 }
 
 /** The queue, latest written first, filtered by network, kind and state. */
-export function Jobs({ shell }: { shell: Shell }) {
+export function Jobs() {
+  const listings = useApp((s) => s.listings);
   const [jobs, setJobs] = useState<Job[]>([]);
   const [tags, setTags] = useState<Filter[]>([]);
   const network = valueOf(tags, 'network');
@@ -102,8 +103,8 @@ export function Jobs({ shell }: { shell: Shell }) {
       .then((list) => {
         setJobs(list.jobs);
       })
-      .catch(shell.fail);
-  }, [network, kind, state, shell.fail]);
+      .catch(fail);
+  }, [network, kind, state]);
 
   useEffect(() => {
     refresh();
@@ -112,9 +113,7 @@ export function Jobs({ shell }: { shell: Shell }) {
   }, [refresh]);
 
   const current = jobs.find((j) => j.id === selected) ?? null;
-  const networks = [
-    ...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`)),
-  ].sort();
+  const networks = [...new Set(listings.map((l) => `${l.network.chain}/${l.network.name}`))].sort();
   const options: Filter[] = [
     ...networks.map((n) => ({ group: 'network' as const, value: n, label: n })),
     ...KINDS.map((k) => ({ group: 'kind' as const, value: k.kind, label: k.label })),

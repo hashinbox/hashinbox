@@ -57,7 +57,17 @@ impl Php {
             .iter()
             .for_each(|model| self.model(&mut items, model, &json));
         let models_php = file(Vec::new(), items);
-        let mut items = Vec::new();
+        let depends = spec.depends.iter().map(|(source, targets)| {
+            let targets = targets.iter().map(|target| Value::text(quote(target)));
+            Value::array(targets.collect()).prefix(&format!("{} => ", quote(source)))
+        });
+        let mut items = vec![Item::Const(Const {
+            doc: DocBlock::new(
+                "What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.",
+            ),
+            name: "DEPENDS".to_owned(),
+            value: Value::array(depends.collect()),
+        })];
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut items, op, &json));

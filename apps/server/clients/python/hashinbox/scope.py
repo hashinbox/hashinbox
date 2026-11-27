@@ -1,5 +1,5 @@
 """Hand-written: packages/scope ported. A scope is text
-(`com.hashinbox.wallets[w1].$read`): a path of resources and an action. One
+(`com.hashinbox.wallets[w1]:read`): a path of resources, full or read only. One
 covers another, a set packs into the JWT `scopes` claim, and a template's
 `{name}` holes are filled with escaped ids. The vectors in
 `apps/server/clients/_golden/scope.json` keep this port honest."""
@@ -7,12 +7,11 @@ covers another, a set packs into the JWT `scopes` claim, and a template's
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeAlias
 
 __all__ = [
-    "ANY",
     "Packed",
     "Scope",
     "ScopeError",
@@ -25,8 +24,8 @@ __all__ = [
 # What a packed set is: each shared prefix and the scopes after it.
 Packed: TypeAlias = Mapping[str, Iterable[str]]
 
-# `*`: any resource (a segment's name) or any action.
-ANY = "*"
+# What a read-only scope's text ends with.
+_READ = ":read"
 
 _NAME = re.compile(r"[A-Za-z0-9_-]+")
 _HEX = re.compile(rb"[0-9A-Fa-f]{2}|\+[0-9A-Fa-f]")
@@ -87,16 +86,14 @@ def fill(
 
 @dataclass(frozen=True)
 class Segment:
-    """One step of a path: a resource (`wallets`), narrowed to one id
-    (`wallets[a]`), or `*` (name `ANY`)."""
+    """One step of a path: a resource (`wallets`), or narrowed to one id
+    (`wallets[a]`)."""
 
     name: str
     id: str | None = None
 
     @classmethod
     def parse(cls, text: str) -> Segment:
-        if text == ANY:
-            return cls(ANY)
         name, bracket, rest = text.partition("[")
         if not bracket:
             if not _is_name(text):
@@ -112,17 +109,11 @@ class Segment:
         return cls(name, id)
 
     def covers(self, other: Segment) -> bool:
-        if self.name == ANY:
-            return True
-        if other.name == ANY:
-            return False
         return self.name == other.name and self.id in (None, other.id)
 
     def _key(self) -> tuple[object, ...]:
-        """Rust's order: a name (then no id before an id) before `*`."""
-        if self.name == ANY:
-            return (1,)
-        return (0, self.name, (0,) if self.id is None else (1, self.id))
+        """Rust's order: its name, then no id before an id."""
+        return (self.name, (0,) if self.id is None else (1, self.id))
 
     def __str__(self) -> str:
         if self.id is None:
@@ -132,17 +123,17 @@ class Segment:
 
 @dataclass(frozen=True)
 class Scope:
-    """One scope: a path and an action (`ANY` for `$*`)."""
+    """One scope: a path, full or read only."""
 
     path: tuple[Segment, ...]
-    action: str
+    read: bool = False
 
     @classmethod
     def parse(cls, text: str) -> Scope:
-        """`text`: steps split by `.` (not inside `[` `]`), the last one the
-        action, `$name` or `$*`."""
+        """`text`: steps split by `.` (not inside `[` `]`), then `:read` when
+        read only."""
         steps: list[str] = []
-        start, inside = 0, False
+        start, inside, end = 0, False, len(text)
         for at, char in enumerate(text):
             if char == "[" and not inside:
                 inside = True
@@ -151,38 +142,33 @@ class Scope:
             elif char == "." and not inside:
                 steps.append(text[start:at])
                 start = at + 1
+            elif char == ":" and not inside:
+                end = at
+                break
         if inside:
             raise ScopeError(f"bad id in `{text}`")
-        last = text[start:]
-        if not last.startswith("$"):
-            raise ScopeError(f"`{text}` does not end with `$action`")
-        action = last[1:]
-        if action != ANY and not _is_name(action):
-            raise ScopeError(f"`{action}` is not a name")
-        path = tuple(Segment.parse(step) for step in steps)
-        if not path:
+        if text[end:] not in ("", _READ):
+            raise ScopeError(f"`{text}` does not end with `{_READ}`")
+        if not text:
             raise ScopeError("a scope needs a resource")
-        return cls(path, action)
+        steps.append(text[start:end])
+        return cls(tuple(Segment.parse(step) for step in steps), end < len(text))
 
     def covers(self, other: Scope) -> bool:
-        """Whether it allows everything `other` allows: its action the same
-        or `$*`, its path matching step by step (`*` in the middle: any one
-        step; at the end: anything below, itself included)."""
-        if self.action != ANY and self.action != other.action:
-            return False
-        for at, step in enumerate(self.path):
-            if step.name == ANY and at == len(self.path) - 1:
-                return True
-            if at >= len(other.path) or not step.covers(other.path[at]):
-                return False
-        return len(self.path) == len(other.path)
+        """Whether it allows everything `other` allows: it is full or `other`
+        read only, and its path is `other`'s or above it."""
+        return (not self.read or other.read) and self._reaches(other.path)
+
+    def _reaches(self, path: tuple[Segment, ...]) -> bool:
+        return len(self.path) <= len(path) and all(
+            ours.covers(theirs) for ours, theirs in zip(self.path, path)
+        )
 
     def _key(self) -> tuple[object, ...]:
-        action = (1,) if self.action == ANY else (0, self.action)
-        return (tuple(step._key() for step in self.path), action)
+        return (tuple(step._key() for step in self.path), self.read)
 
     def __str__(self) -> str:
-        return "".join(f"{step}." for step in self.path) + f"${self.action}"
+        return ".".join(str(step) for step in self.path) + (_READ if self.read else "")
 
 
 class Scopes:
@@ -220,6 +206,31 @@ class Scopes:
         every one."""
         return next((scope for scope in others if not self.covers(scope)), None)
 
+    def expand(self, depends: Mapping[str, Sequence[str]]) -> Scopes:
+        """Them and every scope `depends` adds, to a fixed point, compressed.
+        `depends` maps a source path (`com.hashinbox.triggers`) to the
+        scopes holding it needs. A held scope triggers a source when it
+        covers the source or an id of it, and adds each target whole: read
+        only when the target is written `:read` or the held scope is read
+        only. An entry whose text does not parse adds nothing."""
+        rules: list[tuple[Scope, list[Scope]]] = []
+        for text, texts in depends.items():
+            try:
+                rules.append((Scope.parse(text), [Scope.parse(t) for t in texts]))
+            except ScopeError:
+                continue
+        held = list(self._items)
+        # A list's iterator also yields what is appended while iterating.
+        for scope in held:
+            for source, targets in rules:
+                if not _triggers(scope, source):
+                    continue
+                for target in targets:
+                    added = Scope(target.path, target.read or scope.read)
+                    if not any(kept.covers(added) for kept in held):
+                        held.append(added)
+        return Scopes(held).compress()
+
     def compress(self) -> Scopes:
         """The fewest scopes allowing the same, sorted."""
         items = self._items
@@ -248,7 +259,7 @@ class Scopes:
             shared = _shared_prefix(scopes)
             for scope in scopes:
                 prefix = ".".join(str(step) for step in scope.path[:shared])
-                rest = Scope(scope.path[shared:], scope.action)
+                rest = Scope(scope.path[shared:], scope.read)
                 packed.setdefault(prefix, []).append(str(rest))
         return dict(sorted(packed.items()))
 
@@ -271,6 +282,13 @@ class Scopes:
         return f"Scopes.parse({str(self)!r})"
 
 
+def _triggers(held: Scope, source: Scope) -> bool:
+    """Whether `held` triggers `source`'s dependencies: it covers `source`,
+    its ids ignored."""
+    path = tuple(Segment(step.name) for step in held.path)
+    return Scope(path)._reaches(source.path)
+
+
 def _shared_prefix(scopes: list[Scope]) -> int:
     """How many leading steps of `scopes` are the same plain name in each,
     each scope keeping one step at least."""
@@ -279,8 +297,7 @@ def _shared_prefix(scopes: list[Scope]) -> int:
     count = 0
     for at in range(shortest - 1):
         step = first[at]
-        plain = step.name != ANY and step.id is None
-        if not plain or any(scope.path[at] != step for scope in scopes):
+        if step.id is not None or any(scope.path[at] != step for scope in scopes):
             break
         count += 1
     return count

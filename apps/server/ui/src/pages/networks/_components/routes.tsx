@@ -8,29 +8,30 @@ import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import {
   networkRoutesReplace,
+  networkRoutesReplaceOperation,
   type ConfiguredNetwork,
   type RpcRoute as Route,
 } from '@hashinbox/client';
 import { api } from '@/api/client';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
+import { fail, notify } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /**
  * A network's routed methods: each goes round robin over its own nodes;
  * every other method goes to all of them. Add one, or remove one.
  */
 export function Routes({
-  shell,
   network,
   onChanged,
 }: {
-  shell: Shell;
   network: ConfiguredNetwork;
   onChanged: () => void;
 }) {
   const [method, setMethod] = useState('');
   const [picked, setPicked] = useState<number[]>([]);
   const [busy, setBusy] = useState(false);
+  const edits = useCan(networkRoutesReplaceOperation, network);
   const label = (id: number) => {
     const index = network.endpoints.findIndex((e) => e.id === id);
     const node = network.endpoints[index];
@@ -41,12 +42,12 @@ export function Routes({
     setBusy(true);
     networkRoutesReplace(api, { chain: network.chain, network: network.network, body: { routes } })
       .then(() => {
-        shell.notify(done);
+        notify(done);
         setMethod('');
         setPicked([]);
         onChanged();
       })
-      .catch(shell.fail)
+      .catch(fail)
       .finally(() => setBusy(false));
   };
 
@@ -67,19 +68,21 @@ export function Routes({
                 <Chip key={id} size="small" label={label(id)} />
               ))}
             </Stack>
-            <Button
-              color="error"
-              size="small"
-              disabled={busy}
-              onClick={() =>
-                save(
-                  network.routes.filter((r) => r.method !== route.method),
-                  `${route.method} is no longer routed.`,
-                )
-              }
-            >
-              Remove
-            </Button>
+            {edits && (
+              <Button
+                color="error"
+                size="small"
+                disabled={busy}
+                onClick={() =>
+                  save(
+                    network.routes.filter((r) => r.method !== route.method),
+                    `${route.method} is no longer routed.`,
+                  )
+                }
+              >
+                Remove
+              </Button>
+            )}
           </Stack>
         ))}
         {network.routes.length === 0 && (
@@ -88,50 +91,52 @@ export function Routes({
           </Typography>
         )}
       </Stack>
-      <Stack direction={{ sm: 'row' }} spacing={1} sx={{ mt: 2, alignItems: { sm: 'center' } }}>
-        <TextField
-          size="small"
-          label="Method"
-          placeholder="getBlock"
-          value={method}
-          sx={{ flexGrow: 1 }}
-          onChange={(e) => setMethod(e.target.value)}
-          slotProps={{ htmlInput: { spellCheck: false, sx: { fontFamily: mono, fontSize: 13 } } }}
-        />
-        <TextField
-          select
-          size="small"
-          label="Nodes"
-          value={picked}
-          onChange={(e) => setPicked(e.target.value as unknown as number[])}
-          slotProps={{ select: { multiple: true } }}
-          sx={{ flexGrow: 1, minWidth: 240 }}
-        >
-          {network.endpoints.map((e) => (
-            <MenuItem key={e.id} value={e.id}>
-              {label(e.id)}
-            </MenuItem>
-          ))}
-        </TextField>
-        <Button
-          variant="contained"
-          disableElevation
-          loading={busy}
-          sx={{ whiteSpace: 'nowrap', flexShrink: 0, height: 40 }}
-          disabled={method.trim() === '' || picked.length === 0}
-          onClick={() =>
-            save(
-              [
-                ...network.routes.filter((r) => r.method !== method.trim()),
-                { method: method.trim(), endpoint_ids: picked },
-              ],
-              `${method.trim()} routed over ${String(picked.length)} node${picked.length === 1 ? '' : 's'}.`,
-            )
-          }
-        >
-          Add route
-        </Button>
-      </Stack>
+      {edits && (
+        <Stack direction={{ sm: 'row' }} spacing={1} sx={{ mt: 2, alignItems: { sm: 'center' } }}>
+          <TextField
+            size="small"
+            label="Method"
+            placeholder="getBlock"
+            value={method}
+            sx={{ flexGrow: 1 }}
+            onChange={(e) => setMethod(e.target.value)}
+            slotProps={{ htmlInput: { spellCheck: false, sx: { fontFamily: mono, fontSize: 13 } } }}
+          />
+          <TextField
+            select
+            size="small"
+            label="Nodes"
+            value={picked}
+            onChange={(e) => setPicked(e.target.value as unknown as number[])}
+            slotProps={{ select: { multiple: true } }}
+            sx={{ flexGrow: 1, minWidth: 240 }}
+          >
+            {network.endpoints.map((e) => (
+              <MenuItem key={e.id} value={e.id}>
+                {label(e.id)}
+              </MenuItem>
+            ))}
+          </TextField>
+          <Button
+            variant="contained"
+            disableElevation
+            loading={busy}
+            sx={{ whiteSpace: 'nowrap', flexShrink: 0, height: 40 }}
+            disabled={method.trim() === '' || picked.length === 0}
+            onClick={() =>
+              save(
+                [
+                  ...network.routes.filter((r) => r.method !== method.trim()),
+                  { method: method.trim(), endpoint_ids: picked },
+                ],
+                `${method.trim()} routed over ${String(picked.length)} node${picked.length === 1 ? '' : 's'}.`,
+              )
+            }
+          >
+            Add route
+          </Button>
+        </Stack>
+      )}
     </Box>
   );
 }

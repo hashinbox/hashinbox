@@ -12,11 +12,11 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
 import { usersCreate, type User } from '@hashinbox/client';
-import { ApiError, api } from '@/api/client';
-import type { Shell } from '@/layout';
+import { ApiError, Reason, api } from '@/api/client';
 import { mono } from '@/theme';
 import { Picker } from './picker';
 import { pack, short, type Resources } from './scopes';
+import { notify } from '@/store/app';
 
 /** 64 symbols: a byte's low 6 bits pick one without bias. */
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
@@ -29,12 +29,11 @@ function generated(): string {
 
 /** What the create answer's failure means to the admin. */
 function problemOf(error: unknown): string {
-  if (!(error instanceof ApiError)) return error instanceof Error ? error.message : String(error);
-  if (error.status === 409) return 'A user with this email already exists.';
-  const scope = error.metadata.scope;
-  if (error.status === 403 && error.reason === 'missing_scope' && scope)
-    return `You can't grant ${short(scope)}.`;
-  return error.message;
+  const failure = ApiError.from(error);
+  if (failure.kind === 'already_exists') return 'A user with this email already exists.';
+  const scope = failure.metadata.scope;
+  if (failure.reason === Reason.MissingScope && scope) return `You can't grant ${short(scope)}.`;
+  return failure.message;
 }
 
 /**
@@ -43,14 +42,12 @@ function problemOf(error: unknown): string {
  */
 export function AddUser({
   open,
-  shell,
   held,
   resources,
   onClose,
   onCreated,
 }: {
   open: boolean;
-  shell: Shell;
   held: string[];
   resources: Resources;
   onClose: () => void;
@@ -67,7 +64,7 @@ export function AddUser({
           onCreated={(user, password) => {
             onCreated(user);
             if (password) setShown({ user, password });
-            else shell.notify(`${user.name} added.`);
+            else notify(`${user.name} added.`);
           }}
         />
       </Dialog>
@@ -97,8 +94,8 @@ export function AddUser({
           <Button
             onClick={() => {
               navigator.clipboard.writeText(shown?.password ?? '').then(
-                () => shell.notify('Password copied.'),
-                () => shell.notify('Copy failed: select the password and copy it by hand.', true),
+                () => notify('Password copied.'),
+                () => notify('Copy failed: select the password and copy it by hand.', true),
               );
             }}
           >

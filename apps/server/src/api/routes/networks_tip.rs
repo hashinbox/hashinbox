@@ -117,7 +117,7 @@ async fn search(
     Path(path): Path<NetworkPath>,
     query: Result<Query<SearchQuery>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
-    scope::require!(session, "com.hashinbox.networks.$read");
+    scope::require!(session, "com.hashinbox.networks:read");
     let Query(query) = query?;
     let time = seconds(&query.at)?;
     let seen = query.cursor.as_deref().map(str::parse::<usize>).transpose();

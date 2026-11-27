@@ -28,6 +28,9 @@ pub struct Document {
     pub security: Option<Vec<Requirement>>,
     /// Its tags, unread.
     pub tags: Option<Value>,
+    /// What holding a scope needs beyond its subtree, source → targets.
+    #[serde(rename = "x-hashinbox-depends")]
+    pub depends: Option<BTreeMap<String, Vec<String>>>,
 }
 
 /// `info`.

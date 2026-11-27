@@ -9,11 +9,12 @@ import { api, openapi } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import { Side, SideItem } from '@/_components/side';
 import { Split } from '@/_components/split';
-import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
 import { AddUser } from './_components/add';
 import { resourcesOf, unpack, type Resources } from './_components/scopes';
 import { UserDetail } from './_components/user';
+import { fail } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** Every user, page by page. */
 async function allUsers(): Promise<User[]> {
@@ -34,25 +35,26 @@ function dotOf(user: User): { color: string; label: string } {
   return { color: 'success.main', label: 'Active' };
 }
 
-/** Every user beside the one open (`users/{id}`); the caller holds `users.$read`. */
-export function Users({ shell, me, onMe }: { shell: Shell; me: UserRead; onMe: () => void }) {
+/** Every user beside the one open (`users/{id}`); the caller holds `users:read`. */
+export function Users({ me, onMe }: { me: UserRead; onMe: () => void }) {
   const [users, setUsers] = useState<User[] | null>(null);
   const [resources, setResources] = useState<Resources>([]);
   const [adding, setAdding] = useState(false);
   const [, id] = useSegments();
   const held = unpack(me.user.scopes);
+  const creates = useCan(usersCreateOperation);
 
   const refresh = useCallback(() => {
-    allUsers().then(setUsers).catch(shell.fail);
-  }, [shell.fail]);
+    allUsers().then(setUsers).catch(fail);
+  }, []);
 
   useEffect(refresh, [refresh]);
 
   useEffect(() => {
     openapi()
       .then((document) => setResources(resourcesOf(document)))
-      .catch(shell.fail);
-  }, [shell.fail]);
+      .catch(fail);
+  }, []);
 
   const current = users?.find((u) => u.id === id) ?? null;
 
@@ -67,7 +69,7 @@ export function Users({ shell, me, onMe }: { shell: Shell; me: UserRead; onMe: (
           {...(users && { count: String(users.length) })}
           empty={users?.length === 0 && 'No user.'}
           actions={
-            api.session?.can(usersCreateOperation) && (
+            creates && (
               <Tooltip title="Add user">
                 <IconButton
                   size="small"
@@ -95,7 +97,6 @@ export function Users({ shell, me, onMe }: { shell: Shell; me: UserRead; onMe: (
           ))}
           <AddUser
             open={adding}
-            shell={shell}
             held={held}
             resources={resources}
             onClose={() => setAdding(false)}
@@ -112,7 +113,6 @@ export function Users({ shell, me, onMe }: { shell: Shell; me: UserRead; onMe: (
           {current ? (
             <UserDetail
               key={current.id}
-              shell={shell}
               me={me}
               user={current}
               resources={resources}

@@ -2,38 +2,35 @@ import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useEffect, useState } from 'react';
-import type { Shell } from '@/layout';
 import { Tags } from '@/_components/tags';
 import type { LogSource } from './entries';
 import { levelTags, tagOf, type Filter } from './filter';
+import { fail, useApp } from '@/store/app';
 
 /**
  * The log view's filter: one tag per level, event, network, wallet, job,
  * transaction or trigger; and a time jump, a local date and time to read back from.
  */
 export function Filters({
-  shell,
   source,
   tags,
   onTags,
   jump,
   onJump,
 }: {
-  shell: Shell;
   source: LogSource;
   tags: Filter[];
   onTags: (tags: Filter[]) => void;
   jump: string;
   onJump: (jump: string) => void;
 }) {
+  const listings = useApp((s) => s.listings);
   // The events kept so far, as the server lists them.
   const [targets, setTargets] = useState<string[]>([]);
   useEffect(() => {
-    source.targets().then(setTargets).catch(shell.fail);
-  }, [source, shell.fail]);
-  const networks = [
-    ...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`)),
-  ].sort();
+    source.targets().then(setTargets).catch(fail);
+  }, [source]);
+  const networks = [...new Set(listings.map((l) => `${l.network.chain}/${l.network.name}`))].sort();
   const options = [
     ...levelTags(),
     ...targets.map((t) => tagOf('target', t)),

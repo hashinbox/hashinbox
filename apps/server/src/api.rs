@@ -50,7 +50,7 @@ pub(crate) use state::AppState;
         (name = "settings", description = "The instance's settings"),
         (name = "openapi", description = "This document")
     ),
-    modifiers(&Bearer)
+    modifiers(&Bearer, &Depends)
 )]
 struct Contract;
 
@@ -71,6 +71,25 @@ impl utoipa::Modify for Bearer {
             .build();
         let components = document.components.get_or_insert_with(Default::default);
         components.add_security_scheme("bearer", SecurityScheme::Http(scheme));
+    }
+}
+
+/// `x-hashinbox-depends`: the scope dependencies (`auth::DEPENDS`), source
+/// → targets, for the clients to expand a session's scopes as the server
+/// does.
+struct Depends;
+
+impl utoipa::Modify for Depends {
+    fn modify(&self, document: &mut utoipa::openapi::OpenApi) {
+        let depends: serde_json::Map<String, serde_json::Value> = crate::auth::DEPENDS
+            .iter()
+            .map(|(source, targets)| ((*source).to_owned(), serde_json::json!(targets)))
+            .collect();
+        let extensions = document.extensions.get_or_insert_with(Default::default);
+        extensions.merge(utoipa::openapi::extensions::Extensions::from_iter([(
+            "x-hashinbox-depends",
+            depends,
+        )]));
     }
 }
 

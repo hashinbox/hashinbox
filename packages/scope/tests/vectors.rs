@@ -7,89 +7,125 @@ use serde_json::{Value, json};
 
 /// Texts that parse, with odd ids and every kind of step.
 const PARSED: &[&str] = &[
-    "com.hashinbox.wallets.$read",
-    "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read",
-    "com.hashinbox.wallets[a].legs[b].legs.$read",
-    "com.hashinbox.*.$read",
-    "com.hashinbox.wallets.*.$*",
-    "com.hashinbox.wallets[a,b%5D%20c%25d].$*",
-    "wallets[%61%62].$read",
-    "wallets[%+5].$read",
-    "wallets[a]b[c].$read",
-    "wallets[a[b].$read",
-    "wallets[%C3%A9].$read",
-    "wallets[é ü].$read",
-    "a-b_c.$x-y_z",
+    "com.hashinbox",
+    "com.hashinbox:read",
+    "com.hashinbox.wallets:read",
+    "com.hashinbox.wallets[ethereum.mainnet.0xabc]:read",
+    "com.hashinbox.wallets[a].indexes[b].legs:read",
+    "com.hashinbox.wallets[a,b%5D%20c%25d]",
+    "wallets[%61%62]:read",
+    "wallets[%+5]:read",
+    "wallets[a]b[c]:read",
+    "wallets[a[b]:read",
+    "wallets[a:read]",
+    "wallets[a:b]:read",
+    "wallets[%C3%A9]:read",
+    "wallets[é ü]:read",
+    "a-b_c",
 ];
 
 /// Texts that do not parse.
 const REFUSED: &[&str] = &[
     "",
-    "$read",
-    "wallets",
-    "wallets.read",
-    "wallets[].$read",
-    "wallets[a.$read",
-    "wal lets.$read",
-    "wallets.$re ad",
-    "wallets[%zz].$read",
-    "wallets[%4].$read",
-    "wallets[%-5].$read",
-    "wallets[%C3].$read",
-    "wallets[a]x.$read",
-    ".wallets.$read",
-    "wallets..$read",
-    "wallets.$",
-    "wallets.$**",
-    "*[a].$read",
+    ":read",
+    "wallets:",
+    "wallets:write",
+    "wallets:read:read",
+    "wallets:read.tags",
+    "wallets.$read",
+    "wallets.$*",
+    "wallets.*",
+    "*",
+    "wallets[]",
+    "wallets[a",
+    "wal lets",
+    "wallets[%zz]",
+    "wallets[%4]",
+    "wallets[%-5]",
+    "wallets[%C3]",
+    "wallets[a]x",
+    ".wallets",
+    "wallets.",
+    "wallets..tags",
 ];
 
 /// `(ours, theirs)` pairs for `covers`.
 const COVERS: &[(&str, &str)] = &[
-    ("a.wallets.$read", "a.wallets[x].$read"),
-    ("a.wallets[x].$read", "a.wallets[x].$read"),
-    ("a.wallets[x].$read", "a.wallets.$read"),
-    ("a.wallets[x].$read", "a.wallets[y].$read"),
-    ("a.wallets[x].$read", "a.wallets[x].legs.$read"),
-    ("a.*.$read", "a.wallets[x].legs.$read"),
-    ("a.wallets.*.$read", "a.wallets.$read"),
-    ("a.*.legs.$read", "a.wallets.legs.$read"),
-    ("a.*.legs.$read", "a.wallets.x.legs.$read"),
-    ("a.wallets.$*", "a.wallets.$write"),
-    ("a.wallets.$read", "a.wallets.$*"),
-    ("a.wallets.$read", "a.wallets.$write"),
-    ("a.wallets.legs.$read", "a.wallets.*.$read"),
-    ("*.$*", "a.b[c].d.$read"),
-    ("a.*.$read", "a.$read"),
-    ("a.$read", "a.b.$read"),
+    ("a.wallets:read", "a.wallets[x]:read"),
+    ("a.wallets[x]:read", "a.wallets[x]:read"),
+    ("a.wallets[x]:read", "a.wallets:read"),
+    ("a.wallets[x]:read", "a.wallets[y]:read"),
+    ("a.wallets[x]", "a.wallets[x].tags"),
+    ("a.wallets[x]", "a.wallets[x].indexes[b].legs:read"),
+    ("a.wallets:read", "a.wallets[x].tags:read"),
+    ("a.wallets:read", "a.wallets[x].tags"),
+    ("a.wallets.tags", "a.wallets"),
+    ("a.wallets.tags:read", "a.wallets:read"),
+    ("a.wallets", "a.wallets:read"),
+    ("a.wallets:read", "a.wallets"),
+    ("a", "a.b[c].d"),
+    ("a:read", "a.b[c].d:read"),
+    ("a:read", "a.b"),
+    ("a.b", "a"),
+    ("a.b", "b"),
 ];
 
 /// Sets of scopes (space-separated) to compress and pack.
 const SETS: &[&str] = &[
     "",
-    "a.wallets[x].$read a.wallets[y].$read a.wallets[x].$read a.markets.$read \
-     a.markets[btc].$read a.wallets[z].$write",
-    "com.hashinbox.wallets[x].$read com.hashinbox.wallets[y].$read \
-     com.hashinbox.wallets[x].legs.$read com.hashinbox.markets.$read other.thing.$write",
-    "a.b.c.$read a.b.$read",
-    "a.wallets[x].$read a.wallets[y].$read a.*.$write a.wallets.$write",
-    "com.hashinbox.wallets.*.$* com.hashinbox.markets.$read",
-    "*.$read a[x].b.$read b.$* *.c.$write",
-    "a.b[x].$read a.b[y].$read a.b.c.$read",
-    "x[é].$read x[z].$read x[ä].$read x[%F0%9F%98%80].$read x[%EF%BC%A1].$read",
-    "123.a.$read 123.b.$read 9.a.$read",
-    "a.$read a.$* a.$write",
+    "a.wallets[x]:read a.wallets[y]:read a.wallets[x]:read a.markets:read \
+     a.markets[btc]:read a.wallets[z] a.wallets[z].tags",
+    "com.hashinbox.wallets[x]:read com.hashinbox.wallets[y]:read \
+     com.hashinbox.wallets[x].tags com.hashinbox.triggers other.thing",
+    "a.b.c:read a.b:read",
+    "a.b.c a.b:read",
+    "com.hashinbox com.hashinbox.wallets:read",
+    "com.hashinbox:read com.hashinbox.wallets",
+    "a.b[x]:read a.b[y]:read a.b.c:read",
+    "x[é]:read x[z]:read x[ä]:read x[%F0%9F%98%80]:read x[%EF%BC%A1]:read",
+    "123.a:read 123.b:read 9.a:read",
+    "a:read a a.b",
 ];
 
 /// `(granted, asked)` pairs for `first_uncovered`.
 const NARROWS: &[(&str, &str)] = &[
-    ("a.wallets.$* a.markets.$read", "a.wallets[x].$read"),
+    ("a.wallets a.markets:read", "a.wallets[x]:read"),
     (
-        "a.wallets.$* a.markets.$read",
-        "a.wallets[x].$read a.networks.$read",
+        "a.wallets a.markets:read",
+        "a.wallets[x]:read a.networks:read",
     ),
-    ("", "a.$read"),
-    ("a.$read", ""),
+    ("", "a:read"),
+    ("a:read", ""),
+];
+
+/// What holding a scope implies beyond its subtree, for `expand`.
+const DEPENDS: &[(&str, &[&str])] = &[
+    ("a.triggers", &["a.wallets"]),
+    ("a.wallets", &["a.jobs"]),
+    ("a.networks.endpoints", &["a.networks:read"]),
+    (
+        "a.networks.routes",
+        &["a.networks.endpoints:read", "a.logs"],
+    ),
+];
+
+/// Sets of scopes to `expand` with [`DEPENDS`].
+const EXPANDS: &[&str] = &[
+    "",
+    "a.triggers",
+    "a.triggers:read",
+    "a.triggers[t1]",
+    "a.triggers[t1].runs:read",
+    "a.wallets[w1]:read",
+    "a.networks[x].endpoints[y]",
+    "a.networks.routes",
+    "a.networks.routes:read",
+    "a.networks",
+    "a",
+    "a:read",
+    "a.wallets:read a.jobs",
+    "a.triggers:read a.wallets",
+    "b.triggers",
 ];
 
 /// Ids to escape.
@@ -148,6 +184,14 @@ fn vectors() -> Value {
             json!({ "granted": granted, "asked": asked.to_string(), "first_uncovered": first })
         })
         .collect();
+    let depends: serde_json::Map<String, Value> = DEPENDS
+        .iter()
+        .map(|(source, targets)| ((*source).to_owned(), json!(targets)))
+        .collect();
+    let expands: Vec<Value> = EXPANDS
+        .iter()
+        .map(|text| json!({ "scopes": text, "expanded": scopes(text).expand(DEPENDS).to_string() }))
+        .collect();
     let escape: Vec<Value> = IDS
         .iter()
         .map(|id| json!({ "id": id, "text": scope::__escape_id(id) }))
@@ -158,6 +202,7 @@ fn vectors() -> Value {
         "covers": covers,
         "sets": sets,
         "first_uncovered": narrows,
+        "expand": { "depends": depends, "cases": expands },
         "escape": escape,
     })
 }

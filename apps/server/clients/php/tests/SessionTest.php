@@ -13,6 +13,7 @@ use InvalidArgumentException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 
+use const Hashinbox\DEPENDS;
 use const Hashinbox\WALLET_GET;
 
 final class SessionTest extends TestCase
@@ -40,7 +41,7 @@ final class SessionTest extends TestCase
         self::assertSame(Json::string($case['token']), $session->token);
         self::assertSame(self::secret()->id, $session->issuer);
         self::assertSame($subject, $session->subject);
-        self::assertSame((string) $scopes->compress(), (string) $session->scopes);
+        self::assertSame((string) $scopes->expand(DEPENDS), (string) $session->scopes);
     }
 
     public function testAServerMadeTokenParses(): void
@@ -58,7 +59,7 @@ final class SessionTest extends TestCase
 
     public function testASessionChecksItsScopes(): void
     {
-        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets[x].$read'));
+        $session = self::secret()->issue(Scopes::parse('com.hashinbox.wallets[x]:read'));
         self::assertTrue($session->can(WALLET_GET, ['id' => 'x']));
         self::assertFalse($session->can(WALLET_GET, ['id' => 'y']));
         self::assertSame(600, $session->expiresAt - $session->issuedAt);

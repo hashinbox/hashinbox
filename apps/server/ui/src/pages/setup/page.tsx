@@ -4,13 +4,13 @@ import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import { useState, type ReactNode, type SubmitEvent } from 'react';
 import { settingUpdate, usersCreate } from '@hashinbox/client';
-import { api } from '@/api/client';
+import { ApiError, api } from '@/api/client';
 import { Welcome } from '@/_components/welcome';
 
 const MIN = 8;
 
 function problemOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return ApiError.from(error).message;
 }
 
 /**

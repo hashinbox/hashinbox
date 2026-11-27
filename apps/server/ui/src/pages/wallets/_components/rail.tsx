@@ -19,19 +19,25 @@ import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Decimal from 'decimal.js';
 import { useState, type SubmitEvent } from 'react';
-import { walletsCreate, walletTagAdd, type Wallet } from '@hashinbox/client';
+import {
+  walletsCreate,
+  walletsCreateOperation,
+  walletTagAdd,
+  type Listing,
+  type Wallet,
+} from '@hashinbox/client';
 import { api } from '@/api/client';
 import { Currencies } from '@/_components/currency';
-import type { Shell } from '@/layout';
 import { assetOf, decimalsOf, networkChoices, tickersOf, unitOf } from '@/money';
 import { mono } from '@/theme';
 import { WatchFields } from './watch';
 import { WATCH_NOTHING, haltOf, watch, type Watching } from './watching';
 import { NetworkSelect } from '@/_components/network-select';
 import { Side, SideItem } from '@/_components/side';
+import { fail, notify, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 interface Props {
-  shell: Shell;
   wallets: Wallet[];
   selected: string | null;
   onSelect: (id: string) => void;
@@ -70,8 +76,11 @@ function middle(text: string): string {
   return text.length > 22 ? `${text.slice(0, 10)}…${text.slice(-8)}` : text;
 }
 
-export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Props) {
+export function Rail({ wallets, selected, onSelect, onAdded, tags }: Props) {
+  const listings = useApp((s) => s.listings);
   const [creating, setCreating] = useState(false);
+  // A wallet is made in one of the listed assets: their listing too.
+  const creates = useCan(walletsCreateOperation);
   const [filtering, setFiltering] = useState(false);
   const [filters, setFilters] = useState<Filter[]>([]);
 
@@ -81,7 +90,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
       case 'network':
         return `${w.chain}/${w.network}` === f.value;
       case 'currency':
-        return unitOf(w, shell.listings) === f.value;
+        return unitOf(w, listings) === f.value;
       case 'kind':
         return w.keyed === (f.value === 'keyed');
       case 'tag':
@@ -91,7 +100,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
         // indexed reads as zero.
         return passes(
           new Decimal(w.indexes[assetOf(w)]?.balance_confirmed ?? '0').div(
-            new Decimal(10).pow(decimalsOf(w, shell.listings)),
+            new Decimal(10).pow(decimalsOf(w, listings)),
           ),
           f.value,
         );
@@ -116,7 +125,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
       label: n,
     })),
     // By currency (ETH, USDC…), whatever network it is on.
-    ...sorted(wallets.map((w) => unitOf(w, shell.listings))).map((a) => ({
+    ...sorted(wallets.map((w) => unitOf(w, listings))).map((a) => ({
       group: 'currency' as const,
       value: a,
       label: a,
@@ -155,18 +164,20 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
                 <FilterList fontSize="small" />
               </IconButton>
             </Tooltip>
-            <Tooltip title="New wallet">
-              <IconButton
-                size="small"
-                aria-label="New wallet"
-                onClick={(e) => {
-                  e.currentTarget.blur();
-                  setCreating(true);
-                }}
-              >
-                <Add fontSize="small" />
-              </IconButton>
-            </Tooltip>
+            {creates && (
+              <Tooltip title="New wallet">
+                <IconButton
+                  size="small"
+                  aria-label="New wallet"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setCreating(true);
+                  }}
+                >
+                  <Add fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            )}
           </>
         }
         tools={
@@ -263,7 +274,7 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
         {shown.map((w) => (
           <SideItem
             key={w.id}
-            icon={<Currencies chain={w.chain} tickers={tickersOf(w, shell.listings)} />}
+            icon={<Currencies chain={w.chain} tickers={tickersOf(w, listings)} />}
             name={middle(w.address)}
             dot={dotOf(w)}
             selected={w.id === selected}
@@ -274,13 +285,12 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
       </Side>
 
       <CreateDialog
-        shell={shell}
         open={creating}
         onClose={() => setCreating(false)}
         onDone={(wallet) => {
           setCreating(false);
           onAdded(wallet);
-          shell.notify('Wallet added.');
+          notify('Wallet added.');
         }}
       />
     </>
@@ -288,15 +298,14 @@ export function Rail({ shell, wallets, selected, onSelect, onAdded, tags }: Prop
 }
 
 interface DialogProps {
-  shell: Shell;
   open: boolean;
   onClose: () => void;
   onDone: (wallet: Wallet) => void;
 }
 
 /** The networks the configured assets live in, as `chain/network`. */
-function networksOf(shell: Shell): string[] {
-  return [...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`))];
+function networksOf(listings: Listing[]): string[] {
+  return [...new Set(listings.map((l) => `${l.network.chain}/${l.network.name}`))];
 }
 
 /** How the wallet of step 1 is made. */
@@ -309,7 +318,8 @@ const ABOUT: Record<Kind, string> = {
 };
 
 /** Adds a wallet in two steps: (1) the wallet, (2) what it is indexed in, from when. */
-function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
+function CreateDialog({ open, onClose, onDone }: DialogProps) {
+  const listings = useApp((s) => s.listings);
   const [kind, setKind] = useState<Kind>('generate');
   const [network, setNetwork] = useState('');
   const [text, setText] = useState('');
@@ -319,11 +329,9 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
   const [made, setMade] = useState<Wallet | null>(null);
   const [watching, setWatching] = useState<Watching>({ ...WATCH_NOTHING, assets: ['native'] });
   const [busy, setBusy] = useState(false);
-  const chosen = network || (networksOf(shell)[0] ?? '');
+  const chosen = network || (networksOf(listings)[0] ?? '');
   const [chain = '', name = ''] = chosen.split('/');
-  const offered = shell.listings.filter(
-    (l) => l.network.chain === chain && l.network.name === name,
-  );
+  const offered = listings.filter((l) => l.network.chain === chain && l.network.name === name);
   const ready = made ? watching.assets.length > 0 : kind === 'generate' || text.trim() !== '';
 
   const finish = (wallet: Wallet) => {
@@ -366,7 +374,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
         onSubmit={(event: SubmitEvent<HTMLFormElement>) => {
           event.preventDefault();
           setBusy(true);
-          (made ? index(made) : make()).catch(shell.fail).finally(() => setBusy(false));
+          (made ? index(made) : make()).catch(fail).finally(() => setBusy(false));
         }}
       >
         <DialogTitle variant="h3">
@@ -395,7 +403,7 @@ function CreateDialog({ shell, open, onClose, onDone }: DialogProps) {
             <Stack spacing={2} sx={{ mt: 1 }}>
               <NetworkSelect
                 value={chosen}
-                networks={networkChoices(shell.listings)}
+                networks={networkChoices(listings)}
                 onChange={(value) => {
                   setNetwork(value);
                   setWatching({ ...watching, assets: ['native'] });

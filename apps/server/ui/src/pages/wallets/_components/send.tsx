@@ -14,6 +14,7 @@ import Typography from '@mui/material/Typography';
 import { useEffect, useState, type ReactNode, type SubmitEvent } from 'react';
 import {
   jobGet,
+  jobGetOperation,
   walletGet,
   walletIndexLegsList,
   walletPaymentSend,
@@ -22,8 +23,9 @@ import {
 } from '@hashinbox/client';
 import { api } from '@/api/client';
 import { Transaction } from '@/_components/transaction';
-import type { Shell } from '@/layout';
 import { assetName, networkOf } from '@/money';
+import { fail, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** How often a sent transaction is looked up again. */
 const POLL_MS = 3000;
@@ -46,14 +48,12 @@ type Stage =
 
 /** Sends `asset` of `wallet`, then follows it until its block is final. */
 export function Send({
-  shell,
   wallet,
   asset,
   open,
   onClose,
   onSent,
 }: {
-  shell: Shell;
   wallet: Wallet;
   asset: string;
   open: boolean;
@@ -61,12 +61,15 @@ export function Send({
   /** Called once the send is mined, and again once it is final. */
   onSent: () => void;
 }) {
-  const ticker = assetName(shell.listings, wallet.chain, wallet.network, asset);
+  const listings = useApp((s) => s.listings);
+  const ticker = assetName(listings, wallet.chain, wallet.network, asset);
   const [destination, setDestination] = useState('');
   const [amount, setAmount] = useState('');
   const [fee, setFee] = useState<Fee>('normal');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<Stage>({ at: 'form' });
+  // Following the send reads its job: without `jobs:read` it stays queued here.
+  const follows = useCan(jobGetOperation);
 
   const submit = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -74,13 +77,14 @@ export function Send({
     const body = { asset, destination: destination.trim(), amount: amount.trim(), fee };
     walletPaymentSend(api, { id: wallet.id, body })
       .then((queued) => setStage({ at: 'queued', job: queued.job }))
-      .catch(shell.fail)
+      .catch(fail)
       .finally(() => setBusy(false));
   };
 
   // Each stage looks up what ends it, until the send is final or failed.
   useEffect(() => {
     if (stage.at === 'form' || stage.at === 'final' || stage.at === 'failed') return;
+    if (stage.at === 'queued' && !follows) return;
     const look = async (): Promise<Stage | null> => {
       if (stage.at === 'queued') {
         const job = await jobGet(api, { id: stage.job });
@@ -107,13 +111,13 @@ export function Send({
         .then((next) => {
           if (!stopped && next) setStage(next);
         })
-        .catch(shell.fail);
+        .catch(fail);
     }, POLL_MS);
     return () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [stage, wallet.id, asset, onSent, shell.fail]);
+  }, [stage, wallet.id, asset, onSent, follows]);
 
   const close = () => {
     onClose();

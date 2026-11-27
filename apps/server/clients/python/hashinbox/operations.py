@@ -79,13 +79,18 @@ from .models import (
     WriteSettingRequest,
 )
 
+# What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+DEPENDS: dict[str, tuple[str, ...]] = {
+    "com.hashinbox.networks.endpoints": ("com.hashinbox.networks:read",),
+    "com.hashinbox.networks.routes": ("com.hashinbox.networks.endpoints:read",),
+    "com.hashinbox.networks.transactions": ("com.hashinbox.networks:read",),
+    "com.hashinbox.triggers": ("com.hashinbox.wallets",),
+    "com.hashinbox.wallets": ("com.hashinbox.jobs",),
+}
+
+
 # `GET /v1/assets`.
-ASSETS_LIST = Operation(
-    id="assets_list",
-    method="GET",
-    path="/v1/assets",
-    templates=("com.hashinbox.assets.$read",),
-)
+ASSETS_LIST = Operation(id="assets_list", method="GET", path="/v1/assets", templates=())
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -106,7 +111,7 @@ async def assets_list(
 ) -> AssetsListResponse:
     """List every configured asset: `GET /v1/assets`.
 
-    Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
+    Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.
     """
     return AssetList.from_json(await client.send(request))
 
@@ -116,7 +121,7 @@ KEY_REVOKE = Operation(
     id="key_revoke",
     method="DELETE",
     path="/v1/user/keys/{id}",
-    templates=("com.hashinbox.keys.$write",),
+    templates=("com.hashinbox.users.keys",),
 )
 
 
@@ -151,7 +156,7 @@ KEY_ROTATE = Operation(
     id="key_rotate",
     method="POST",
     path="/v1/user/keys/{id}/rotate",
-    templates=("com.hashinbox.keys.$write",),
+    templates=("com.hashinbox.users.keys",),
 )
 
 
@@ -186,7 +191,7 @@ KEYS_CREATE = Operation(
     id="keys_create",
     method="POST",
     path="/v1/user/keys",
-    templates=("com.hashinbox.keys.$write",),
+    templates=("com.hashinbox.users.keys",),
 )
 
 
@@ -220,7 +225,7 @@ KEYS_LIST = Operation(
     id="keys_list",
     method="GET",
     path="/v1/user/keys",
-    templates=("com.hashinbox.keys.$read",),
+    templates=("com.hashinbox.users.keys:read",),
 )
 
 
@@ -329,7 +334,7 @@ RECOVERY_CREATE = Operation(
     id="recovery_create",
     method="POST",
     path="/v1/recovery",
-    templates=("com.hashinbox.recovery.$write",),
+    templates=("com.hashinbox.recovery",),
 )
 
 
@@ -361,7 +366,7 @@ RECOVERY_DELETE = Operation(
     id="recovery_delete",
     method="DELETE",
     path="/v1/recovery",
-    templates=("com.hashinbox.recovery.$write",),
+    templates=("com.hashinbox.recovery",),
 )
 
 
@@ -393,7 +398,7 @@ RECOVERY_GET = Operation(
     id="recovery_get",
     method="GET",
     path="/v1/recovery",
-    templates=("com.hashinbox.recovery.$write",),
+    templates=("com.hashinbox.recovery",),
 )
 
 
@@ -415,7 +420,7 @@ async def recovery_get(
 ) -> RecoveryGetResponse:
     """Read whether the recovery passphrase is set: `GET /v1/recovery`.
 
-    Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+    Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.
     """
     return Recovery.from_json(await client.send(request))
 
@@ -526,7 +531,7 @@ async def session_get(
 ) -> SessionGetResponse:
     """Read the caller's session: `GET /v1/session`.
 
-    The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+    The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.
     """
     return SessionRead.from_json(await client.send(request))
 
@@ -642,7 +647,7 @@ USER_UPDATE = Operation(
     id="user_update",
     method="PATCH",
     path="/v1/users/{id}",
-    templates=("com.hashinbox.users.$write",),
+    templates=("com.hashinbox.users",),
 )
 
 
@@ -681,7 +686,7 @@ USERS_CREATE = Operation(
     id="users_create",
     method="POST",
     path="/v1/users",
-    templates=("com.hashinbox.users.$write",),
+    templates=("com.hashinbox.users",),
 )
 
 
@@ -708,7 +713,7 @@ async def users_create(
 ) -> UsersCreateResponse:
     """Create a user, or the root user on a fresh install: `POST /v1/users`.
 
-    With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+    With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.
     """
     return CreatedUser.from_json(await client.send(request))
 
@@ -718,7 +723,7 @@ USERS_LIST = Operation(
     id="users_list",
     method="GET",
     path="/v1/users",
-    templates=("com.hashinbox.users.$read",),
+    templates=("com.hashinbox.users:read",),
 )
 
 
@@ -822,7 +827,7 @@ JOB_GET = Operation(
     id="job_get",
     method="GET",
     path="/v1/jobs/{id}",
-    templates=("com.hashinbox.jobs.$read",),
+    templates=("com.hashinbox.jobs:read",),
 )
 
 
@@ -857,7 +862,7 @@ JOBS_LIST = Operation(
     id="jobs_list",
     method="GET",
     path="/v1/jobs",
-    templates=("com.hashinbox.jobs.$read",),
+    templates=("com.hashinbox.jobs:read",),
 )
 
 
@@ -915,7 +920,7 @@ LOG_MESSAGES_LIST = Operation(
     id="log_messages_list",
     method="GET",
     path="/v1/logs/messages",
-    templates=("com.hashinbox.logs.$read",),
+    templates=("com.hashinbox.logs:read",),
 )
 
 
@@ -947,7 +952,7 @@ LOG_TARGETS_LIST = Operation(
     id="log_targets_list",
     method="GET",
     path="/v1/logs/targets",
-    templates=("com.hashinbox.logs.$read",),
+    templates=("com.hashinbox.logs:read",),
 )
 
 
@@ -979,7 +984,7 @@ LOGS_LIST = Operation(
     id="logs_list",
     method="GET",
     path="/v1/logs",
-    templates=("com.hashinbox.logs.$read",),
+    templates=("com.hashinbox.logs:read",),
 )
 
 
@@ -1069,7 +1074,7 @@ LOGS_STREAM = Operation(
     id="logs_stream",
     method="GET",
     path="/v1/logs/stream",
-    templates=("com.hashinbox.logs.$read",),
+    templates=("com.hashinbox.logs:read",),
 )
 
 
@@ -1152,7 +1157,7 @@ MARKET_CANDLES_LIST = Operation(
     id="market_candles_list",
     method="GET",
     path="/v1/markets/{name}/candles",
-    templates=("com.hashinbox.markets.$read",),
+    templates=(),
 )
 
 
@@ -1192,7 +1197,7 @@ async def market_candles_list(
 ) -> MarketCandlesListResponse:
     """List a market's hourly candles of an asset: `GET /v1/markets/{name}/candles`.
 
-    The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+    The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.
     """
     return MarketCandles.from_json(await client.send(request))
 
@@ -1202,7 +1207,7 @@ MARKET_UPDATE = Operation(
     id="market_update",
     method="PATCH",
     path="/v1/markets/{name}",
-    templates=("com.hashinbox.markets.$write",),
+    templates=("com.hashinbox.markets",),
 )
 
 
@@ -1244,7 +1249,7 @@ MARKETS_LIST = Operation(
     id="markets_list",
     method="GET",
     path="/v1/markets",
-    templates=("com.hashinbox.markets.$read",),
+    templates=(),
 )
 
 
@@ -1266,7 +1271,7 @@ async def markets_list(
 ) -> MarketsListResponse:
     """List the markets and the latest prices: `GET /v1/markets`.
 
-    Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+    Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.
     """
     return MarketList.from_json(await client.send(request))
 
@@ -1276,7 +1281,7 @@ ENDPOINTS_CREATE = Operation(
     id="endpoints_create",
     method="POST",
     path="/v1/networks/endpoints",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1313,7 +1318,7 @@ NETWORK_BLOCK_GET = Operation(
     id="network_block_get",
     method="GET",
     path="/v1/networks/{chain}/{network}/blocks/{position}",
-    templates=("com.hashinbox.networks.$read",),
+    templates=("com.hashinbox.networks:read",),
 )
 
 
@@ -1356,7 +1361,7 @@ NETWORK_BLOCK_TRANSACTIONS_LIST = Operation(
     id="network_block_transactions_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/blocks/{position}/transactions",
-    templates=("com.hashinbox.transactions.$read",),
+    templates=("com.hashinbox.networks.transactions:read",),
 )
 
 
@@ -1411,7 +1416,7 @@ NETWORK_BLOCKS_LIST = Operation(
     id="network_blocks_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/blocks",
-    templates=("com.hashinbox.networks.$read",),
+    templates=("com.hashinbox.networks:read",),
 )
 
 
@@ -1463,7 +1468,7 @@ NETWORK_ENDPOINT_DELETE = Operation(
     id="network_endpoint_delete",
     method="DELETE",
     path="/v1/networks/{chain}/{network}/endpoints/{id}",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1503,7 +1508,7 @@ NETWORK_ENDPOINT_FAILURES_LIST = Operation(
     id="network_endpoint_failures_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/endpoints/{id}/failures",
-    templates=("com.hashinbox.endpoints.$read",),
+    templates=("com.hashinbox.networks.endpoints:read",),
 )
 
 
@@ -1555,7 +1560,7 @@ NETWORK_ENDPOINT_STATE_UPDATE = Operation(
     id="network_endpoint_state_update",
     method="PUT",
     path="/v1/networks/{chain}/{network}/endpoints/{id}/state",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1599,7 +1604,7 @@ NETWORK_ENDPOINT_TEST = Operation(
     id="network_endpoint_test",
     method="POST",
     path="/v1/networks/{chain}/{network}/endpoints/test",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1643,7 +1648,7 @@ NETWORK_ENDPOINTS_CREATE = Operation(
     id="network_endpoints_create",
     method="POST",
     path="/v1/networks/{chain}/{network}/endpoints",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1687,7 +1692,7 @@ NETWORK_ENDPOINTS_LIST = Operation(
     id="network_endpoints_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/endpoints",
-    templates=("com.hashinbox.endpoints.$read",),
+    templates=("com.hashinbox.networks.endpoints:read",),
 )
 
 
@@ -1727,7 +1732,7 @@ NETWORK_ENDPOINTS_REPLACE = Operation(
     id="network_endpoints_replace",
     method="PUT",
     path="/v1/networks/{chain}/{network}/endpoints",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.endpoints",),
 )
 
 
@@ -1771,7 +1776,7 @@ NETWORK_ROUTES_LIST = Operation(
     id="network_routes_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/routes",
-    templates=("com.hashinbox.endpoints.$read",),
+    templates=("com.hashinbox.networks.routes:read",),
 )
 
 
@@ -1811,7 +1816,7 @@ NETWORK_ROUTES_REPLACE = Operation(
     id="network_routes_replace",
     method="PUT",
     path="/v1/networks/{chain}/{network}/routes",
-    templates=("com.hashinbox.endpoints.$write",),
+    templates=("com.hashinbox.networks.routes",),
 )
 
 
@@ -1855,7 +1860,7 @@ NETWORK_TIP_SEARCH = Operation(
     id="network_tip_search",
     method="GET",
     path="/v1/networks/{chain}/{network}/tip/search",
-    templates=("com.hashinbox.networks.$read",),
+    templates=("com.hashinbox.networks:read",),
 )
 
 
@@ -1904,7 +1909,7 @@ NETWORK_TRANSACTIONS_LIST = Operation(
     id="network_transactions_list",
     method="GET",
     path="/v1/networks/{chain}/{network}/transactions",
-    templates=("com.hashinbox.transactions.$read",),
+    templates=("com.hashinbox.networks.transactions:read",),
 )
 
 
@@ -1958,7 +1963,7 @@ NETWORKS_CREATE = Operation(
     id="networks_create",
     method="POST",
     path="/v1/networks",
-    templates=("com.hashinbox.networks.$write",),
+    templates=("com.hashinbox.networks",),
 )
 
 
@@ -1995,7 +2000,7 @@ NETWORKS_LIST = Operation(
     id="networks_list",
     method="GET",
     path="/v1/networks",
-    templates=("com.hashinbox.networks.$read",),
+    templates=("com.hashinbox.networks:read",),
 )
 
 
@@ -2060,7 +2065,7 @@ SETTING_UPDATE = Operation(
     id="setting_update",
     method="PUT",
     path="/v1/settings/{key}",
-    templates=("com.hashinbox.settings.$write",),
+    templates=("com.hashinbox.settings",),
 )
 
 
@@ -2102,7 +2107,7 @@ SETTINGS_LIST = Operation(
     id="settings_list",
     method="GET",
     path="/v1/settings",
-    templates=("com.hashinbox.settings.$read",),
+    templates=("com.hashinbox.settings:read",),
 )
 
 
@@ -2134,7 +2139,7 @@ STATS_GET = Operation(
     id="stats_get",
     method="GET",
     path="/v1/stats",
-    templates=("com.hashinbox.stats.$read",),
+    templates=("com.hashinbox.stats:read",),
 )
 
 
@@ -2166,7 +2171,7 @@ WALLET_PAYMENT_SEND = Operation(
     id="wallet_payment_send",
     method="POST",
     path="/v1/wallets/{id}/transactions",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].transactions",),
 )
 
 
@@ -2208,7 +2213,7 @@ TAGS_LIST = Operation(
     id="tags_list",
     method="GET",
     path="/v1/wallets/tags",
-    templates=("com.hashinbox.wallets.$read",),
+    templates=("com.hashinbox.wallets.tags:read",),
 )
 
 
@@ -2250,7 +2255,7 @@ TRIGGER_DELETE = Operation(
     id="trigger_delete",
     method="DELETE",
     path="/v1/triggers/{id}",
-    templates=("com.hashinbox.triggers.$write",),
+    templates=("com.hashinbox.triggers",),
 )
 
 
@@ -2285,7 +2290,7 @@ TRIGGER_GET = Operation(
     id="trigger_get",
     method="GET",
     path="/v1/triggers/{id}",
-    templates=("com.hashinbox.triggers.$read",),
+    templates=("com.hashinbox.triggers:read",),
 )
 
 
@@ -2317,7 +2322,7 @@ TRIGGER_REPLACE = Operation(
     id="trigger_replace",
     method="PUT",
     path="/v1/triggers/{id}",
-    templates=("com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"),
+    templates=("com.hashinbox.triggers",),
 )
 
 
@@ -2359,7 +2364,7 @@ TRIGGER_RUNS_LIST = Operation(
     id="trigger_runs_list",
     method="GET",
     path="/v1/triggers/{id}/runs",
-    templates=("com.hashinbox.triggers.$read",),
+    templates=("com.hashinbox.triggers.runs:read",),
 )
 
 
@@ -2406,7 +2411,7 @@ TRIGGERS_CREATE = Operation(
     id="triggers_create",
     method="POST",
     path="/v1/triggers",
-    templates=("com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"),
+    templates=("com.hashinbox.triggers",),
 )
 
 
@@ -2443,7 +2448,7 @@ TRIGGERS_LIST = Operation(
     id="triggers_list",
     method="GET",
     path="/v1/triggers",
-    templates=("com.hashinbox.triggers.$read",),
+    templates=("com.hashinbox.triggers:read",),
 )
 
 
@@ -2485,7 +2490,7 @@ WALLET_TAG_ADD = Operation(
     id="wallet_tag_add",
     method="PUT",
     path="/v1/wallets/{id}/tags/{tag}",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].tags",),
 )
 
 
@@ -2525,7 +2530,7 @@ WALLET_TAG_REMOVE = Operation(
     id="wallet_tag_remove",
     method="DELETE",
     path="/v1/wallets/{id}/tags/{tag}",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].tags",),
 )
 
 
@@ -2565,7 +2570,7 @@ WALLET_GET = Operation(
     id="wallet_get",
     method="GET",
     path="/v1/wallets/{id}",
-    templates=("com.hashinbox.wallets[{id}].$read",),
+    templates=("com.hashinbox.wallets[{id}]:read",),
 )
 
 
@@ -2600,7 +2605,7 @@ WALLET_INDEX_DELETE = Operation(
     id="wallet_index_delete",
     method="DELETE",
     path="/v1/wallets/{id}/indexes/{asset}",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].indexes",),
 )
 
 
@@ -2640,7 +2645,7 @@ WALLET_INDEX_LEGS_LIST = Operation(
     id="wallet_index_legs_list",
     method="GET",
     path="/v1/wallets/{id}/indexes/{asset}/legs",
-    templates=("com.hashinbox.wallets[{id}].$read",),
+    templates=("com.hashinbox.wallets[{id}].indexes:read",),
 )
 
 
@@ -2692,7 +2697,7 @@ WALLET_INDEX_RECONCILE = Operation(
     id="wallet_index_reconcile",
     method="POST",
     path="/v1/wallets/{id}/indexes/{asset}/reconcile",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].indexes",),
 )
 
 
@@ -2732,7 +2737,7 @@ WALLET_INDEX_UPDATE = Operation(
     id="wallet_index_update",
     method="PATCH",
     path="/v1/wallets/{id}/indexes/{asset}",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].indexes",),
 )
 
 
@@ -2776,7 +2781,7 @@ WALLET_INDEXES_CREATE = Operation(
     id="wallet_indexes_create",
     method="POST",
     path="/v1/wallets/{id}/indexes",
-    templates=("com.hashinbox.wallets[{id}].$write",),
+    templates=("com.hashinbox.wallets[{id}].indexes",),
 )
 
 
@@ -2818,7 +2823,7 @@ WALLETS_CREATE = Operation(
     id="wallets_create",
     method="POST",
     path="/v1/wallets",
-    templates=("com.hashinbox.wallets.$write",),
+    templates=("com.hashinbox.wallets",),
 )
 
 
@@ -2855,7 +2860,7 @@ WALLETS_LIST = Operation(
     id="wallets_list",
     method="GET",
     path="/v1/wallets",
-    templates=("com.hashinbox.wallets.$read",),
+    templates=("com.hashinbox.wallets:read",),
 )
 
 

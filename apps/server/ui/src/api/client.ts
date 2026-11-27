@@ -1,53 +1,27 @@
 // The API: one HashinboxClient (@hashinbox/client) for the whole app. Pages
 // call its generated operations (`walletGet(api, { id })`) and take their
-// types from its models; this tab's session is kept in sessionStorage.
-import { HashinboxClient, Session } from '@hashinbox/client';
+// types from its models; it sends the session `useSession` holds.
+import { HashinboxClient } from '@hashinbox/client';
 import { settings } from '@/settings';
+import { useSession } from '@/store/session';
 
-export { ApiError } from '@hashinbox/client';
+export { ApiError, Reason } from '@hashinbox/client';
 
-/** Where this tab keeps its session's JWT. */
-const KEY = 'hashinbox.session';
-
-/** The session this tab kept, if any (and readable). */
-function stored(): Session | undefined {
-  try {
-    const token = sessionStorage.getItem(KEY);
-    return token === null ? undefined : Session.parse(token);
-  } catch {
-    return undefined;
-  }
-}
-
-function store(session: Session | undefined): void {
-  try {
-    if (session) sessionStorage.setItem(KEY, session.token);
-    else sessionStorage.removeItem(KEY);
-  } catch {
-    /* private window */
-  }
-}
-
-let unauthorized: (() => void) | undefined;
-
-const restored = stored();
+const kept = useSession.getState().session;
 
 export const api = new HashinboxClient(settings.apiBase, {
-  ...(restored && { session: restored }),
-  onSession: store,
+  ...(kept && { session: kept }),
+  onSession: (session) => useSession.getState().setSession(session),
   // A 401 for a session sent (not a wrong password or code): it is gone.
-  onUnauthorized: () => {
-    api.session = undefined;
-    unauthorized?.();
-  },
+  onUnauthorized: () => useSession.getState().logout(true),
   // The server decides; a missing scope is its 403, shown as it words it.
   checkScopes: false,
 });
 
-/** Called once the server refuses this tab's session. */
-export function whenUnauthorized(handler: () => void): void {
-  unauthorized = handler;
-}
+// The store's session is the one sent: a login or a logout there reaches here.
+useSession.subscribe(({ session }) => {
+  if (api.session !== session) api.session = session;
+});
 
 /** A key's id as its routes take it: without `hip/`. */
 export function keyPath(id: string): string {

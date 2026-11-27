@@ -62,6 +62,25 @@ fn scope_vectors() {
         assert_eq!(set.pack(), packed, "{case}");
         assert_eq!(Scopes::unpack(&packed).unwrap(), set.compress(), "{case}");
     }
+    let depends: BTreeMap<String, Vec<String>> =
+        serde_json::from_value(all["expand"]["depends"].clone()).unwrap();
+    let depends: Vec<(&str, Vec<&str>)> = depends
+        .iter()
+        .map(|(source, targets)| {
+            (
+                source.as_str(),
+                targets.iter().map(String::as_str).collect(),
+            )
+        })
+        .collect();
+    let depends: Vec<(&str, &[&str])> = depends
+        .iter()
+        .map(|(source, targets)| (*source, targets.as_slice()))
+        .collect();
+    for case in all["expand"]["cases"].as_array().unwrap() {
+        let expanded = scopes(&case["scopes"]).expand(&depends).to_string();
+        assert_eq!(expanded, text(&case["expanded"]), "{case}");
+    }
 }
 
 #[test]
@@ -84,7 +103,8 @@ fn key_sessions_are_signed_byte_for_byte() {
         assert_eq!((session.issued_at, session.expires_at), (iat, exp));
         assert_eq!(session.issuer, text(&all["id"]));
         assert_eq!(session.subject.as_deref(), case["sub"].as_str());
-        assert_eq!(session.scopes, scopes(&case["scopes"]).compress());
+        let expanded = scopes(&case["scopes"]).expand(hashinbox_client::operations::DEPENDS);
+        assert_eq!(session.scopes, expanded, "expanded as the server does");
     }
 }
 
@@ -134,7 +154,7 @@ fn a_session_can_an_operation_with_its_holes_filled() {
     let secret = vectors("session.json");
     let secret = Secret::parse(text(&secret["id"]), text(&secret["secret"])).unwrap();
     let issue = Issue::new()
-        .scope("com.hashinbox.wallets[a b].$read")
+        .scope("com.hashinbox.wallets[a b]:read")
         .unwrap();
     let session = secret.issue(issue).unwrap();
     assert!(session.can(&WALLET_GET, &[("id", "a b")]));

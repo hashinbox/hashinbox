@@ -1,5 +1,5 @@
 //! Keys (design 096): created by their user (a session, or a key holding
-//! `keys.$write`), their scopes covered by the creator's, the secret shown
+//! `users.keys`), their scopes covered by the creator's, the secret shown
 //! once; listed without secrets; revoked; rotated (every session it signed
 //! until now refused).
 

@@ -65,7 +65,7 @@ struct ListResponse {
     prices: BTreeMap<String, String>,
 }
 
-#[scope::utoipa(
+#[utoipa::path(
     get,
     path = "/v1/markets",
     operation_id = "markets_list",
@@ -73,20 +73,19 @@ struct ListResponse {
     description = "Every market data source: its name, whether it is asked for quotes \
         (`feed`), when it was last changed and when its last quote answered (`last_at`); \
         and, by ticker, each asset's latest USD price: the median close of the current \
-        hour's candles.",
+        hour's candles. Any session may read it.",
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "The markets", body = ListResponse),
         (status = 401, description = "Missing or invalid bearer token", body = Error),
-        (status = 403, description = "Missing scope", body = Error),
         (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "markets"
 )]
 async fn list(
-    session: Session,
+    _session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.markets.$read");
     let markets = markets::list(&state.db).await?.into_iter();
     let prices = markets::prices(&state.candles).into_iter();
     Ok(Json(ListResponse {
@@ -139,7 +138,7 @@ async fn set_feed(
     Path(path): Path<MarketPath>,
     request: Result<Json<SetRequest>, JsonRejection>,
 ) -> Result<Json<MarketResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.markets.$write");
+    scope::require!(caller, "com.hashinbox.markets");
     let Json(request) = request?;
     let quoted = markets::set_feed(&state.db, &path.name, request.feed).await?;
     Ok(Json(quoted.into()))
@@ -164,32 +163,31 @@ struct CandlesResponse {
     candles: Vec<MarketCandle1h>,
 }
 
-#[scope::utoipa(
+#[utoipa::path(
     get,
     path = "/v1/markets/{name}/candles",
     operation_id = "market_candles_list",
     summary = "List a market's hourly candles of an asset",
     description = "The market's own hourly USD candles of the asset (open, high, low and \
         close of its quotes) from `after` on, at most the last 7 days, oldest first; the \
-        current hour's moves until the hour ends.",
+        current hour's moves until the hour ends. Any session may read them.",
     params(MarketPath, CandlesQuery),
+    security(("bearer" = [])),
     responses(
         (status = 200, description = "The candles", body = CandlesResponse),
         (status = 400, description = "Malformed query", body = Error),
         (status = 401, description = "Missing or invalid bearer token", body = Error),
-        (status = 403, description = "Missing scope", body = Error),
         (status = 404, description = "No such market", body = Error),
         (status = 503, description = "The store is unavailable", body = Error)
     ),
     tag = "markets"
 )]
 async fn list_candles(
-    session: Session,
+    _session: Session,
     State(state): State<Arc<AppState>>,
     Path(path): Path<MarketPath>,
     query: Result<Query<CandlesQuery>, QueryRejection>,
 ) -> Result<Json<CandlesResponse>, Error> {
-    scope::require!(session, "com.hashinbox.markets.$read");
     let Query(query) = query?;
     let candles = markets::candles(&state.db, &path.name, &query.asset, query.after).await?;
     Ok(Json(CandlesResponse {

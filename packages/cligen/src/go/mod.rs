@@ -48,6 +48,21 @@ impl Go {
         }
         imports.push("net/url".to_owned());
         let mut operations = head(imports);
+        let depends = spec.depends.iter().map(|(source, targets)| {
+            let targets: Vec<String> = targets.iter().map(|target| quote(target)).collect();
+            (quote(source), format!("{{{}}}", targets.join(", ")))
+        });
+        write_items(
+            &mut operations,
+            vec![Item::Var(Var {
+                doc: "Depends is what holding a scope needs beyond its subtree \
+                      (`x-hashinbox-depends`): source → targets."
+                    .into(),
+                name: "Depends".into(),
+                ty: "map[string][]string".into(),
+                fields: depends.collect(),
+            })],
+        );
         spec.operations
             .iter()
             .for_each(|op| self.operation(&mut operations, op));

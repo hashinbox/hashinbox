@@ -23,14 +23,16 @@ import {
   networkEndpointsCreate,
   networkEndpointTest,
   networksCreate,
+  networksCreateOperation,
   type ConfiguredNetwork,
   type NetworkEndpoints,
 } from '@hashinbox/client';
 import { ApiError, api } from '@/api/client';
-import type { Shell } from '@/layout';
 import { NetworkSelect } from '@/_components/network-select';
 import { PROVIDERS, asksKey, baseFor, urlOf } from '@/providers';
 import { mono } from '@/theme';
+import { fail } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** `text` trimmed; null when empty or absent. */
 function typed(text: string | undefined): string | null {
@@ -43,10 +45,11 @@ function name(n: ConfiguredNetwork): string {
 }
 
 /** What the server said, shown in the dialog; anything else is the shell's. */
-function failed(shell: Shell, setProblem: (problem: string) => void) {
+function failed(setProblem: (problem: string) => void) {
   return (error: unknown) => {
-    if (error instanceof ApiError && error.status !== 401) setProblem(error.message);
-    else shell.fail(error);
+    const failure = ApiError.from(error);
+    if (failure.kind !== 'unauthenticated') setProblem(failure.message);
+    else fail(error);
   };
 }
 
@@ -55,7 +58,6 @@ function failed(shell: Shell, setProblem: (problem: string) => void) {
  * networks fast), or one's own node, to a network or to a new one.
  */
 export function AddNodes({
-  shell,
   networks,
   chains,
   open,
@@ -63,7 +65,6 @@ export function AddNodes({
   onAdded,
   onCreated,
 }: {
-  shell: Shell;
   networks: ConfiguredNetwork[];
   /** Every chain the server runs: what a new network may be. */
   chains: string[];
@@ -82,10 +83,9 @@ export function AddNodes({
         <Tab label="Own node" />
       </Tabs>
       {tab === 0 ? (
-        <FromProvider shell={shell} networks={networks} onClose={onClose} onAdded={onAdded} />
+        <FromProvider networks={networks} onClose={onClose} onAdded={onAdded} />
       ) : (
         <OwnNode
-          shell={shell}
           networks={networks}
           chains={chains}
           onClose={onClose}
@@ -103,12 +103,10 @@ export function AddNodes({
  * it should serve (all by default), and every node is added at once.
  */
 function FromProvider({
-  shell,
   networks,
   onClose,
   onAdded,
 }: {
-  shell: Shell;
   networks: ConfiguredNetwork[];
   onClose: () => void;
   onAdded: (changed: NetworkEndpoints[]) => void;
@@ -155,7 +153,7 @@ function FromProvider({
     setProblem(null);
     endpointsCreate(api, { body })
       .then((answer) => onAdded(answer.networks))
-      .catch(failed(shell, setProblem))
+      .catch(failed(setProblem))
       .finally(() => setBusy(false));
   };
 
@@ -357,21 +355,21 @@ function httpUrl(text: string): URL | null {
  * before it is added; the network picked, or a new one created first.
  */
 function OwnNode({
-  shell,
   networks,
   chains,
   onClose,
   onAdded,
   onCreated,
 }: {
-  shell: Shell;
   networks: ConfiguredNetwork[];
   chains: string[];
   onClose: () => void;
   onAdded: (changed: NetworkEndpoints[]) => void;
   onCreated: () => void;
 }) {
-  const [picked, setPicked] = useState(networks[0] ? name(networks[0]) : NEW);
+  // A new network needs full `networks`, more than the nodes' `networks.endpoints`.
+  const creates = useCan(networksCreateOperation);
+  const [picked, setPicked] = useState(networks[0] ? name(networks[0]) : creates ? NEW : '');
   const [url, setUrl] = useState('');
   const [headers, setHeaders] = useState<{ name: string; value: string }[]>([]);
   const [chain, setChain] = useState(chains[0] ?? '');
@@ -431,7 +429,7 @@ function OwnNode({
     setTold(null);
     networkEndpointTest(api, { ...path, body: { url: endpoint } })
       .then((info) => setTold(`Serves ${info.chain_id}, this network; tip #${String(info.tip)}.`))
-      .catch(failed(shell, setProblem))
+      .catch(failed(setProblem))
       .finally(() => setBusy(false));
   };
 
@@ -450,7 +448,7 @@ function OwnNode({
       const added = await networkEndpointsCreate(api, { ...path, body: { endpoints: [endpoint] } });
       onAdded([added]);
     } catch (error) {
-      failed(shell, setProblem)(error);
+      failed(setProblem)(error);
     } finally {
       setBusy(false);
     }
@@ -474,7 +472,7 @@ function OwnNode({
               value: name(n),
               ticker: n.assets.find((a) => a.kind === 'native')?.ticker ?? null,
             }))}
-            extra={{ value: NEW, label: 'New network…' }}
+            {...(creates && { extra: { value: NEW, label: 'New network…' } })}
             onChange={(next) => {
               setPicked(next);
               setTold(null);
@@ -656,13 +654,11 @@ function OwnNode({
  * writes the URL from its keys; the URL can be edited after.
  */
 export function AddNode({
-  shell,
   network,
   open,
   onClose,
   onAdded,
 }: {
-  shell: Shell;
   network: ConfiguredNetwork;
   open: boolean;
   onClose: () => void;
@@ -689,10 +685,7 @@ export function AddNode({
         close();
         onAdded();
       })
-      .catch((error: unknown) => {
-        if (error instanceof ApiError && error.status !== 401) setProblem(error.message);
-        else shell.fail(error);
-      })
+      .catch(failed(setProblem))
       .finally(() => setBusy(false));
   };
 

@@ -5,7 +5,6 @@ import { test } from "node:test";
 
 import {
   HashinboxClient,
-  MissingScope,
   networksList,
   sessionCreate,
   Session,
@@ -32,13 +31,16 @@ test(
         email,
         password,
         totp,
-        scopes: { "com.hashinbox": ["wallets.$read"] },
+        scopes: { "com.hashinbox": ["wallets:read"] },
       },
     });
     const narrow = Session.parse(issued.token);
     const checked = new HashinboxClient(url, { session: narrow });
     assert.ok(Array.isArray((await walletsList(checked)).wallets));
-    await assert.rejects(networksList(checked), MissingScope);
+    await assert.rejects(networksList(checked), {
+      status: 403,
+      reason: "missing_scope",
+    });
     const unchecked = new HashinboxClient(url, {
       session: narrow,
       checkScopes: false,

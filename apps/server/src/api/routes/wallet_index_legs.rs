@@ -62,7 +62,11 @@ async fn legs(
     Path(path): Path<IndexPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<LegsResponse>, Error> {
-    scope::require!(session, "com.hashinbox.wallets[{id}].$read", id = path.id);
+    scope::require!(
+        session,
+        "com.hashinbox.wallets[{id}].indexes:read",
+        id = path.id
+    );
     let Query(index) = index?;
     let page = index.page("legs", leg::parse_key)?;
     let limit = page.limit;

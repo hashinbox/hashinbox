@@ -618,8 +618,8 @@ mod tests {
         let expected = "impl Request for PetGetRequest {\n    type Response = Pet;\n\n    fn param(&self, name: &str) -> Option<String> {\n        match name {\n            \"id\" => Some(self.id.to_string()),\n            _ => None,\n        }\n    }\n}\n";
         assert_eq!(text, expected);
         let templates = vec![
-            "\"a.pets.$read\"".into(),
-            "\"a.wallets.$read.and.a.much.longer.tail.xyzw\"".into(),
+            "\"a.pets:read\"".into(),
+            "\"a.wallets.and.a.much.longer.tail.xyzw01:read\"".into(),
         ];
         let fields = vec![
             ("id".into(), Value::Text("\"pet_get\"".into())),
@@ -632,7 +632,7 @@ mod tests {
             fields,
         }
         .to_string();
-        let expected = "pub const PET_GET: Operation = Operation {\n    id: \"pet_get\",\n    templates: &[\n        \"a.pets.$read\",\n        \"a.wallets.$read.and.a.much.longer.tail.xyzw\",\n    ],\n};\n";
+        let expected = "pub const PET_GET: Operation = Operation {\n    id: \"pet_get\",\n    templates: &[\n        \"a.pets:read\",\n        \"a.wallets.and.a.much.longer.tail.xyzw01:read\",\n    ],\n};\n";
         assert_eq!(text, expected);
         let mut call = Fn::new(
             "pet_get<C: Client>",

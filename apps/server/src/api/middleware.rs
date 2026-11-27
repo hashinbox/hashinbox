@@ -18,13 +18,15 @@ use axum::{
 
 use crate::{
     api::AppState,
+    auth,
     error::Error,
     models::{Caller, Session},
     usecase::{self, sessions::bearer_required},
 };
 
 /// The middleware: the request's token checked, its [`Caller`] put in the
-/// request.
+/// request, its session's scopes expanded once (`auth::DEPENDS`): what
+/// every `require!` checks and `GET /v1/session` answers.
 ///
 /// # Errors
 ///
@@ -35,7 +37,8 @@ pub(crate) async fn authenticate(
     next: Next,
 ) -> Result<Response, Error> {
     if let Some(token) = token_of(&request)? {
-        let caller = usecase::sessions::authenticate(&state.db, &token, usecase::now()).await?;
+        let mut caller = usecase::sessions::authenticate(&state.db, &token, usecase::now()).await?;
+        caller.session.scopes = auth::expanded(&caller.session.scopes);
         request.extensions_mut().insert(caller);
     }
     Ok(next.run(request).await)

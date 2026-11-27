@@ -38,7 +38,7 @@ impl<T: DeserializeOwned> FromSql<Text, Sqlite> for Json<T> {
 }
 
 /// [`scope::Scopes`] stored as the JSON [`scope::Scopes::pack`] makes
-/// (`{"com.hashinbox": ["wallets.$read"]}`): a `scopes` column, read into
+/// (`{"com.hashinbox": ["wallets:read"]}`): a `scopes` column, read into
 /// the model's `Scopes` (`deserialize_as`).
 #[derive(Clone, Debug, PartialEq, Eq, AsExpression, FromSqlRow)]
 #[diesel(sql_type = Text)]

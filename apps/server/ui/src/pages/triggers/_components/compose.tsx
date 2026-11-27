@@ -10,17 +10,16 @@ import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import { triggersCreate, type Trigger, type Wallet } from '@hashinbox/client';
 import { api } from '@/api/client';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
 import { blank, validId, type Definition } from './forms';
+import { fail } from '@/store/app';
 
 /**
  * New triggers, one tab each, created together: all or none. A template
  * opens this with its triggers filled in; a blank one starts with one.
  */
 export function Compose({
-  shell,
   wallets,
   tags,
   title,
@@ -28,7 +27,6 @@ export function Compose({
   onCreated,
   onCancel,
 }: {
-  shell: Shell;
   wallets: Wallet[];
   tags: string[];
   /** What these triggers are for: the template's name, or "New trigger". */
@@ -62,7 +60,7 @@ export function Compose({
     setBusy(true);
     triggersCreate(api, { body: { triggers: drafts } })
       .then((list) => onCreated(list.triggers))
-      .catch(shell.fail)
+      .catch(fail)
       .finally(() => setBusy(false));
   };
 
@@ -116,7 +114,6 @@ export function Compose({
       {current && (
         <TriggerForm
           key={tab}
-          shell={shell}
           wallets={wallets}
           tags={tags}
           value={current}

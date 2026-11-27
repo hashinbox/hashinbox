@@ -17,6 +17,15 @@ import type {
   PetList,
 } from "./models";
 
+/** What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets. */
+export const DEPENDS: Readonly<Record<string, readonly string[]>> = {
+  "mini.owners.with.a.rather.long.name": [
+    "mini.pets.with.a.long.name:read",
+    "mini.vets",
+  ],
+  "mini.pets": ["mini.owners:read"],
+};
+
 /** `GET /v1/animals`. */
 export const animalsListOperation: Operation = {
   id: "animals_list",
@@ -49,7 +58,7 @@ export const logsStreamOperation: Operation = {
   id: "logs_stream",
   method: "GET",
   path: "/v1/logs/stream",
-  templates: ["mini.logs.$read"],
+  templates: ["mini.logs:read"],
 };
 
 /** The input of `logsStream`. */
@@ -92,7 +101,7 @@ export const petDeleteOperation: Operation = {
   id: "pet_delete",
   method: "DELETE",
   path: "/v1/pets/{id}",
-  templates: ["mini.pets[{id}].$write"],
+  templates: ["mini.pets[{id}]"],
 };
 
 /** The input of `petDelete`. */
@@ -118,7 +127,7 @@ export const petEventsStreamOperation: Operation = {
   method: "GET",
   path: "/v1/pets/{id}/events",
   query: ["since"],
-  templates: ["mini.pets[{id}].$read"],
+  templates: ["mini.pets[{id}]:read"],
   events: ["bark", "missed"],
 };
 
@@ -152,7 +161,7 @@ export const petGetOperation: Operation = {
   id: "pet_get",
   method: "GET",
   path: "/v1/pets/{id}",
-  templates: ["mini.pets[{id}].$read"],
+  templates: ["mini.pets[{id}]:read"],
 };
 
 /** The input of `petGet`. */
@@ -178,7 +187,7 @@ export const petsCreateOperation: Operation = {
   id: "pets_create",
   method: "POST",
   path: "/v1/pets",
-  templates: ["mini.pets.$write", "mini.owners.$read"],
+  templates: ["mini.pets", "mini.owners:read"],
 };
 
 /** The input of `petsCreate`. */
@@ -204,7 +213,7 @@ export const petsListOperation: Operation = {
   method: "GET",
   path: "/v1/pets",
   query: ["cursor", "limit", "kind"],
-  templates: ["mini.pets.$read"],
+  templates: ["mini.pets:read"],
 };
 
 /** The input of `petsList`. */

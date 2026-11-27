@@ -8,12 +8,20 @@ import (
 	"net/url"
 )
 
+// Depends is what holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets.
+var Depends = map[string][]string{
+	"com.hashinbox.networks.endpoints":    {"com.hashinbox.networks:read"},
+	"com.hashinbox.networks.routes":       {"com.hashinbox.networks.endpoints:read"},
+	"com.hashinbox.networks.transactions": {"com.hashinbox.networks:read"},
+	"com.hashinbox.triggers":              {"com.hashinbox.wallets"},
+	"com.hashinbox.wallets":               {"com.hashinbox.jobs"},
+}
+
 // assetsList is GET /v1/assets.
 var assetsList = Operation{
-	ID:        "assets_list",
-	Method:    "GET",
-	Path:      "/v1/assets",
-	Templates: []string{"com.hashinbox.assets.$read"},
+	ID:     "assets_list",
+	Method: "GET",
+	Path:   "/v1/assets",
 }
 
 // AssetsListRequest is AssetsList's input: its path and query parameters, and its body.
@@ -46,7 +54,7 @@ type AssetsListResponse struct {
 
 // AssetsList lists every configured asset.
 //
-// Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
+// Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.
 func AssetsList(ctx context.Context, client Client, request AssetsListRequest) (AssetsListResponse, error) {
 	var response AssetsListResponse
 	err := client.Do(ctx, request, &response)
@@ -58,7 +66,7 @@ var keyRevoke = Operation{
 	ID:        "key_revoke",
 	Method:    "DELETE",
 	Path:      "/v1/user/keys/{id}",
-	Templates: []string{"com.hashinbox.keys.$write"},
+	Templates: []string{"com.hashinbox.users.keys"},
 }
 
 // KeyRevokeRequest is KeyRevoke's input: its path and query parameters, and its body.
@@ -104,7 +112,7 @@ var keyRotate = Operation{
 	ID:        "key_rotate",
 	Method:    "POST",
 	Path:      "/v1/user/keys/{id}/rotate",
-	Templates: []string{"com.hashinbox.keys.$write"},
+	Templates: []string{"com.hashinbox.users.keys"},
 }
 
 // KeyRotateRequest is KeyRotate's input: its path and query parameters, and its body.
@@ -152,7 +160,7 @@ var keysCreate = Operation{
 	ID:        "keys_create",
 	Method:    "POST",
 	Path:      "/v1/user/keys",
-	Templates: []string{"com.hashinbox.keys.$write"},
+	Templates: []string{"com.hashinbox.users.keys"},
 }
 
 // KeysCreateRequest is KeysCreate's input: its path and query parameters, and its body.
@@ -199,7 +207,7 @@ var keysList = Operation{
 	ID:        "keys_list",
 	Method:    "GET",
 	Path:      "/v1/user/keys",
-	Templates: []string{"com.hashinbox.keys.$read"},
+	Templates: []string{"com.hashinbox.users.keys:read"},
 }
 
 // KeysListRequest is KeysList's input: its path and query parameters, and its body.
@@ -346,7 +354,7 @@ var recoveryCreate = Operation{
 	ID:        "recovery_create",
 	Method:    "POST",
 	Path:      "/v1/recovery",
-	Templates: []string{"com.hashinbox.recovery.$write"},
+	Templates: []string{"com.hashinbox.recovery"},
 }
 
 // RecoveryCreateRequest is RecoveryCreate's input: its path and query parameters, and its body.
@@ -391,7 +399,7 @@ var recoveryDelete = Operation{
 	ID:        "recovery_delete",
 	Method:    "DELETE",
 	Path:      "/v1/recovery",
-	Templates: []string{"com.hashinbox.recovery.$write"},
+	Templates: []string{"com.hashinbox.recovery"},
 }
 
 // RecoveryDeleteRequest is RecoveryDelete's input: its path and query parameters, and its body.
@@ -434,7 +442,7 @@ var recoveryGet = Operation{
 	ID:        "recovery_get",
 	Method:    "GET",
 	Path:      "/v1/recovery",
-	Templates: []string{"com.hashinbox.recovery.$write"},
+	Templates: []string{"com.hashinbox.recovery"},
 }
 
 // RecoveryGetRequest is RecoveryGet's input: its path and query parameters, and its body.
@@ -467,7 +475,7 @@ type RecoveryGetResponse struct {
 
 // RecoveryGet reads whether the recovery passphrase is set.
 //
-// Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+// Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.
 func RecoveryGet(ctx context.Context, client Client, request RecoveryGetRequest) (RecoveryGetResponse, error) {
 	var response RecoveryGetResponse
 	err := client.Do(ctx, request, &response)
@@ -607,7 +615,7 @@ type SessionGetResponse struct {
 
 // SessionGet reads the caller's session.
 //
-// The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+// The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.
 func SessionGet(ctx context.Context, client Client, request SessionGetRequest) (SessionGetResponse, error) {
 	var response SessionGetResponse
 	err := client.Do(ctx, request, &response)
@@ -751,7 +759,7 @@ var userUpdate = Operation{
 	ID:        "user_update",
 	Method:    "PATCH",
 	Path:      "/v1/users/{id}",
-	Templates: []string{"com.hashinbox.users.$write"},
+	Templates: []string{"com.hashinbox.users"},
 }
 
 // UserUpdateRequest is UserUpdate's input: its path and query parameters, and its body.
@@ -800,7 +808,7 @@ var usersCreate = Operation{
 	ID:        "users_create",
 	Method:    "POST",
 	Path:      "/v1/users",
-	Templates: []string{"com.hashinbox.users.$write"},
+	Templates: []string{"com.hashinbox.users"},
 }
 
 // UsersCreateRequest is UsersCreate's input: its path and query parameters, and its body.
@@ -835,7 +843,7 @@ type UsersCreateResponse struct {
 
 // UsersCreate creates a user, or the root user on a fresh install.
 //
-// With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+// With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.
 func UsersCreate(ctx context.Context, client Client, request UsersCreateRequest) (UsersCreateResponse, error) {
 	var response UsersCreateResponse
 	err := client.Do(ctx, request, &response)
@@ -847,7 +855,7 @@ var usersList = Operation{
 	ID:        "users_list",
 	Method:    "GET",
 	Path:      "/v1/users",
-	Templates: []string{"com.hashinbox.users.$read"},
+	Templates: []string{"com.hashinbox.users:read"},
 }
 
 // UsersListRequest is UsersList's input: its path and query parameters, and its body.
@@ -992,7 +1000,7 @@ var jobGet = Operation{
 	ID:        "job_get",
 	Method:    "GET",
 	Path:      "/v1/jobs/{id}",
-	Templates: []string{"com.hashinbox.jobs.$read"},
+	Templates: []string{"com.hashinbox.jobs:read"},
 }
 
 // JobGetRequest is JobGet's input: its path and query parameters, and its body.
@@ -1040,7 +1048,7 @@ var jobsList = Operation{
 	ID:        "jobs_list",
 	Method:    "GET",
 	Path:      "/v1/jobs",
-	Templates: []string{"com.hashinbox.jobs.$read"},
+	Templates: []string{"com.hashinbox.jobs:read"},
 }
 
 // JobsListRequest is JobsList's input: its path and query parameters, and its body.
@@ -1115,7 +1123,7 @@ var logMessagesList = Operation{
 	ID:        "log_messages_list",
 	Method:    "GET",
 	Path:      "/v1/logs/messages",
-	Templates: []string{"com.hashinbox.logs.$read"},
+	Templates: []string{"com.hashinbox.logs:read"},
 }
 
 // LogMessagesListRequest is LogMessagesList's input: its path and query parameters, and its body.
@@ -1160,7 +1168,7 @@ var logTargetsList = Operation{
 	ID:        "log_targets_list",
 	Method:    "GET",
 	Path:      "/v1/logs/targets",
-	Templates: []string{"com.hashinbox.logs.$read"},
+	Templates: []string{"com.hashinbox.logs:read"},
 }
 
 // LogTargetsListRequest is LogTargetsList's input: its path and query parameters, and its body.
@@ -1205,7 +1213,7 @@ var logsList = Operation{
 	ID:        "logs_list",
 	Method:    "GET",
 	Path:      "/v1/logs",
-	Templates: []string{"com.hashinbox.logs.$read"},
+	Templates: []string{"com.hashinbox.logs:read"},
 }
 
 // LogsListRequest is LogsList's input: its path and query parameters, and its body.
@@ -1318,7 +1326,7 @@ var logsStream = Operation{
 	ID:        "logs_stream",
 	Method:    "GET",
 	Path:      "/v1/logs/stream",
-	Templates: []string{"com.hashinbox.logs.$read"},
+	Templates: []string{"com.hashinbox.logs:read"},
 }
 
 // LogsStreamRequest is LogsStream's input: its path and query parameters, and its body.
@@ -1417,10 +1425,9 @@ func LogsStream(ctx context.Context, streamer Streamer, request LogsStreamReques
 
 // marketCandlesList is GET /v1/markets/{name}/candles.
 var marketCandlesList = Operation{
-	ID:        "market_candles_list",
-	Method:    "GET",
-	Path:      "/v1/markets/{name}/candles",
-	Templates: []string{"com.hashinbox.markets.$read"},
+	ID:     "market_candles_list",
+	Method: "GET",
+	Path:   "/v1/markets/{name}/candles",
 }
 
 // MarketCandlesListRequest is MarketCandlesList's input: its path and query parameters, and its body.
@@ -1466,7 +1473,7 @@ type MarketCandlesListResponse struct {
 
 // MarketCandlesList lists a market's hourly candles of an asset.
 //
-// The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+// The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.
 func MarketCandlesList(ctx context.Context, client Client, request MarketCandlesListRequest) (MarketCandlesListResponse, error) {
 	var response MarketCandlesListResponse
 	err := client.Do(ctx, request, &response)
@@ -1478,7 +1485,7 @@ var marketUpdate = Operation{
 	ID:        "market_update",
 	Method:    "PATCH",
 	Path:      "/v1/markets/{name}",
-	Templates: []string{"com.hashinbox.markets.$write"},
+	Templates: []string{"com.hashinbox.markets"},
 }
 
 // MarketUpdateRequest is MarketUpdate's input: its path and query parameters, and its body.
@@ -1524,10 +1531,9 @@ func MarketUpdate(ctx context.Context, client Client, request MarketUpdateReques
 
 // marketsList is GET /v1/markets.
 var marketsList = Operation{
-	ID:        "markets_list",
-	Method:    "GET",
-	Path:      "/v1/markets",
-	Templates: []string{"com.hashinbox.markets.$read"},
+	ID:     "markets_list",
+	Method: "GET",
+	Path:   "/v1/markets",
 }
 
 // MarketsListRequest is MarketsList's input: its path and query parameters, and its body.
@@ -1560,7 +1566,7 @@ type MarketsListResponse struct {
 
 // MarketsList lists the markets and the latest prices.
 //
-// Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+// Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.
 func MarketsList(ctx context.Context, client Client, request MarketsListRequest) (MarketsListResponse, error) {
 	var response MarketsListResponse
 	err := client.Do(ctx, request, &response)
@@ -1572,7 +1578,7 @@ var endpointsCreate = Operation{
 	ID:        "endpoints_create",
 	Method:    "POST",
 	Path:      "/v1/networks/endpoints",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // EndpointsCreateRequest is EndpointsCreate's input: its path and query parameters, and its body.
@@ -1619,7 +1625,7 @@ var networkBlockGet = Operation{
 	ID:        "network_block_get",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/blocks/{position}",
-	Templates: []string{"com.hashinbox.networks.$read"},
+	Templates: []string{"com.hashinbox.networks:read"},
 }
 
 // NetworkBlockGetRequest is NetworkBlockGet's input: its path and query parameters, and its body.
@@ -1669,7 +1675,7 @@ var networkBlockTransactionsList = Operation{
 	ID:        "network_block_transactions_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/blocks/{position}/transactions",
-	Templates: []string{"com.hashinbox.transactions.$read"},
+	Templates: []string{"com.hashinbox.networks.transactions:read"},
 }
 
 // NetworkBlockTransactionsListRequest is NetworkBlockTransactionsList's input: its path and query parameters, and its body.
@@ -1730,7 +1736,7 @@ var networkBlocksList = Operation{
 	ID:        "network_blocks_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/blocks",
-	Templates: []string{"com.hashinbox.networks.$read"},
+	Templates: []string{"com.hashinbox.networks:read"},
 }
 
 // NetworkBlocksListRequest is NetworkBlocksList's input: its path and query parameters, and its body.
@@ -1791,7 +1797,7 @@ var networkEndpointDelete = Operation{
 	ID:        "network_endpoint_delete",
 	Method:    "DELETE",
 	Path:      "/v1/networks/{chain}/{network}/endpoints/{id}",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // NetworkEndpointDeleteRequest is NetworkEndpointDelete's input: its path and query parameters, and its body.
@@ -1841,7 +1847,7 @@ var networkEndpointFailuresList = Operation{
 	ID:        "network_endpoint_failures_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
-	Templates: []string{"com.hashinbox.endpoints.$read"},
+	Templates: []string{"com.hashinbox.networks.endpoints:read"},
 }
 
 // NetworkEndpointFailuresListRequest is NetworkEndpointFailuresList's input: its path and query parameters, and its body.
@@ -1902,7 +1908,7 @@ var networkEndpointStateUpdate = Operation{
 	ID:        "network_endpoint_state_update",
 	Method:    "PUT",
 	Path:      "/v1/networks/{chain}/{network}/endpoints/{id}/state",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // NetworkEndpointStateUpdateRequest is NetworkEndpointStateUpdate's input: its path and query parameters, and its body.
@@ -1953,7 +1959,7 @@ var networkEndpointTest = Operation{
 	ID:        "network_endpoint_test",
 	Method:    "POST",
 	Path:      "/v1/networks/{chain}/{network}/endpoints/test",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // NetworkEndpointTestRequest is NetworkEndpointTest's input: its path and query parameters, and its body.
@@ -2004,7 +2010,7 @@ var networkEndpointsCreate = Operation{
 	ID:        "network_endpoints_create",
 	Method:    "POST",
 	Path:      "/v1/networks/{chain}/{network}/endpoints",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // NetworkEndpointsCreateRequest is NetworkEndpointsCreate's input: its path and query parameters, and its body.
@@ -2055,7 +2061,7 @@ var networkEndpointsList = Operation{
 	ID:        "network_endpoints_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/endpoints",
-	Templates: []string{"com.hashinbox.endpoints.$read"},
+	Templates: []string{"com.hashinbox.networks.endpoints:read"},
 }
 
 // NetworkEndpointsListRequest is NetworkEndpointsList's input: its path and query parameters, and its body.
@@ -2105,7 +2111,7 @@ var networkEndpointsReplace = Operation{
 	ID:        "network_endpoints_replace",
 	Method:    "PUT",
 	Path:      "/v1/networks/{chain}/{network}/endpoints",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.endpoints"},
 }
 
 // NetworkEndpointsReplaceRequest is NetworkEndpointsReplace's input: its path and query parameters, and its body.
@@ -2156,7 +2162,7 @@ var networkRoutesList = Operation{
 	ID:        "network_routes_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/routes",
-	Templates: []string{"com.hashinbox.endpoints.$read"},
+	Templates: []string{"com.hashinbox.networks.routes:read"},
 }
 
 // NetworkRoutesListRequest is NetworkRoutesList's input: its path and query parameters, and its body.
@@ -2206,7 +2212,7 @@ var networkRoutesReplace = Operation{
 	ID:        "network_routes_replace",
 	Method:    "PUT",
 	Path:      "/v1/networks/{chain}/{network}/routes",
-	Templates: []string{"com.hashinbox.endpoints.$write"},
+	Templates: []string{"com.hashinbox.networks.routes"},
 }
 
 // NetworkRoutesReplaceRequest is NetworkRoutesReplace's input: its path and query parameters, and its body.
@@ -2257,7 +2263,7 @@ var networkTipSearch = Operation{
 	ID:        "network_tip_search",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/tip/search",
-	Templates: []string{"com.hashinbox.networks.$read"},
+	Templates: []string{"com.hashinbox.networks:read"},
 }
 
 // NetworkTipSearchRequest is NetworkTipSearch's input: its path and query parameters, and its body.
@@ -2311,7 +2317,7 @@ var networkTransactionsList = Operation{
 	ID:        "network_transactions_list",
 	Method:    "GET",
 	Path:      "/v1/networks/{chain}/{network}/transactions",
-	Templates: []string{"com.hashinbox.transactions.$read"},
+	Templates: []string{"com.hashinbox.networks.transactions:read"},
 }
 
 // NetworkTransactionsListRequest is NetworkTransactionsList's input: its path and query parameters, and its body.
@@ -2376,7 +2382,7 @@ var networksCreate = Operation{
 	ID:        "networks_create",
 	Method:    "POST",
 	Path:      "/v1/networks",
-	Templates: []string{"com.hashinbox.networks.$write"},
+	Templates: []string{"com.hashinbox.networks"},
 }
 
 // NetworksCreateRequest is NetworksCreate's input: its path and query parameters, and its body.
@@ -2423,7 +2429,7 @@ var networksList = Operation{
 	ID:        "networks_list",
 	Method:    "GET",
 	Path:      "/v1/networks",
-	Templates: []string{"com.hashinbox.networks.$read"},
+	Templates: []string{"com.hashinbox.networks:read"},
 }
 
 // NetworksListRequest is NetworksList's input: its path and query parameters, and its body.
@@ -2512,7 +2518,7 @@ var settingUpdate = Operation{
 	ID:        "setting_update",
 	Method:    "PUT",
 	Path:      "/v1/settings/{key}",
-	Templates: []string{"com.hashinbox.settings.$write"},
+	Templates: []string{"com.hashinbox.settings"},
 }
 
 // SettingUpdateRequest is SettingUpdate's input: its path and query parameters, and its body.
@@ -2561,7 +2567,7 @@ var settingsList = Operation{
 	ID:        "settings_list",
 	Method:    "GET",
 	Path:      "/v1/settings",
-	Templates: []string{"com.hashinbox.settings.$read"},
+	Templates: []string{"com.hashinbox.settings:read"},
 }
 
 // SettingsListRequest is SettingsList's input: its path and query parameters, and its body.
@@ -2606,7 +2612,7 @@ var statsGet = Operation{
 	ID:        "stats_get",
 	Method:    "GET",
 	Path:      "/v1/stats",
-	Templates: []string{"com.hashinbox.stats.$read"},
+	Templates: []string{"com.hashinbox.stats:read"},
 }
 
 // StatsGetRequest is StatsGet's input: its path and query parameters, and its body.
@@ -2651,7 +2657,7 @@ var walletPaymentSend = Operation{
 	ID:        "wallet_payment_send",
 	Method:    "POST",
 	Path:      "/v1/wallets/{id}/transactions",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].transactions"},
 }
 
 // WalletPaymentSendRequest is WalletPaymentSend's input: its path and query parameters, and its body.
@@ -2700,7 +2706,7 @@ var tagsList = Operation{
 	ID:        "tags_list",
 	Method:    "GET",
 	Path:      "/v1/wallets/tags",
-	Templates: []string{"com.hashinbox.wallets.$read"},
+	Templates: []string{"com.hashinbox.wallets.tags:read"},
 }
 
 // TagsListRequest is TagsList's input: its path and query parameters, and its body.
@@ -2755,7 +2761,7 @@ var triggerDelete = Operation{
 	ID:        "trigger_delete",
 	Method:    "DELETE",
 	Path:      "/v1/triggers/{id}",
-	Templates: []string{"com.hashinbox.triggers.$write"},
+	Templates: []string{"com.hashinbox.triggers"},
 }
 
 // TriggerDeleteRequest is TriggerDelete's input: its path and query parameters, and its body.
@@ -2799,7 +2805,7 @@ var triggerGet = Operation{
 	ID:        "trigger_get",
 	Method:    "GET",
 	Path:      "/v1/triggers/{id}",
-	Templates: []string{"com.hashinbox.triggers.$read"},
+	Templates: []string{"com.hashinbox.triggers:read"},
 }
 
 // TriggerGetRequest is TriggerGet's input: its path and query parameters, and its body.
@@ -2845,7 +2851,7 @@ var triggerReplace = Operation{
 	ID:        "trigger_replace",
 	Method:    "PUT",
 	Path:      "/v1/triggers/{id}",
-	Templates: []string{"com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"},
+	Templates: []string{"com.hashinbox.triggers"},
 }
 
 // TriggerReplaceRequest is TriggerReplace's input: its path and query parameters, and its body.
@@ -2894,7 +2900,7 @@ var triggerRunsList = Operation{
 	ID:        "trigger_runs_list",
 	Method:    "GET",
 	Path:      "/v1/triggers/{id}/runs",
-	Templates: []string{"com.hashinbox.triggers.$read"},
+	Templates: []string{"com.hashinbox.triggers.runs:read"},
 }
 
 // TriggerRunsListRequest is TriggerRunsList's input: its path and query parameters, and its body.
@@ -2951,7 +2957,7 @@ var triggersCreate = Operation{
 	ID:        "triggers_create",
 	Method:    "POST",
 	Path:      "/v1/triggers",
-	Templates: []string{"com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"},
+	Templates: []string{"com.hashinbox.triggers"},
 }
 
 // TriggersCreateRequest is TriggersCreate's input: its path and query parameters, and its body.
@@ -2998,7 +3004,7 @@ var triggersList = Operation{
 	ID:        "triggers_list",
 	Method:    "GET",
 	Path:      "/v1/triggers",
-	Templates: []string{"com.hashinbox.triggers.$read"},
+	Templates: []string{"com.hashinbox.triggers:read"},
 }
 
 // TriggersListRequest is TriggersList's input: its path and query parameters, and its body.
@@ -3053,7 +3059,7 @@ var walletTagAdd = Operation{
 	ID:        "wallet_tag_add",
 	Method:    "PUT",
 	Path:      "/v1/wallets/{id}/tags/{tag}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].tags"},
 }
 
 // WalletTagAddRequest is WalletTagAdd's input: its path and query parameters, and its body.
@@ -3101,7 +3107,7 @@ var walletTagRemove = Operation{
 	ID:        "wallet_tag_remove",
 	Method:    "DELETE",
 	Path:      "/v1/wallets/{id}/tags/{tag}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].tags"},
 }
 
 // WalletTagRemoveRequest is WalletTagRemove's input: its path and query parameters, and its body.
@@ -3149,7 +3155,7 @@ var walletGet = Operation{
 	ID:        "wallet_get",
 	Method:    "GET",
 	Path:      "/v1/wallets/{id}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$read"},
+	Templates: []string{"com.hashinbox.wallets[{id}]:read"},
 }
 
 // WalletGetRequest is WalletGet's input: its path and query parameters, and its body.
@@ -3197,7 +3203,7 @@ var walletIndexDelete = Operation{
 	ID:        "wallet_index_delete",
 	Method:    "DELETE",
 	Path:      "/v1/wallets/{id}/indexes/{asset}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].indexes"},
 }
 
 // WalletIndexDeleteRequest is WalletIndexDelete's input: its path and query parameters, and its body.
@@ -3245,7 +3251,7 @@ var walletIndexLegsList = Operation{
 	ID:        "wallet_index_legs_list",
 	Method:    "GET",
 	Path:      "/v1/wallets/{id}/indexes/{asset}/legs",
-	Templates: []string{"com.hashinbox.wallets[{id}].$read"},
+	Templates: []string{"com.hashinbox.wallets[{id}].indexes:read"},
 }
 
 // WalletIndexLegsListRequest is WalletIndexLegsList's input: its path and query parameters, and its body.
@@ -3306,7 +3312,7 @@ var walletIndexReconcile = Operation{
 	ID:        "wallet_index_reconcile",
 	Method:    "POST",
 	Path:      "/v1/wallets/{id}/indexes/{asset}/reconcile",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].indexes"},
 }
 
 // WalletIndexReconcileRequest is WalletIndexReconcile's input: its path and query parameters, and its body.
@@ -3356,7 +3362,7 @@ var walletIndexUpdate = Operation{
 	ID:        "wallet_index_update",
 	Method:    "PATCH",
 	Path:      "/v1/wallets/{id}/indexes/{asset}",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].indexes"},
 }
 
 // WalletIndexUpdateRequest is WalletIndexUpdate's input: its path and query parameters, and its body.
@@ -3407,7 +3413,7 @@ var walletIndexesCreate = Operation{
 	ID:        "wallet_indexes_create",
 	Method:    "POST",
 	Path:      "/v1/wallets/{id}/indexes",
-	Templates: []string{"com.hashinbox.wallets[{id}].$write"},
+	Templates: []string{"com.hashinbox.wallets[{id}].indexes"},
 }
 
 // WalletIndexesCreateRequest is WalletIndexesCreate's input: its path and query parameters, and its body.
@@ -3456,7 +3462,7 @@ var walletsCreate = Operation{
 	ID:        "wallets_create",
 	Method:    "POST",
 	Path:      "/v1/wallets",
-	Templates: []string{"com.hashinbox.wallets.$write"},
+	Templates: []string{"com.hashinbox.wallets"},
 }
 
 // WalletsCreateRequest is WalletsCreate's input: its path and query parameters, and its body.
@@ -3503,7 +3509,7 @@ var walletsList = Operation{
 	ID:        "wallets_list",
 	Method:    "GET",
 	Path:      "/v1/wallets",
-	Templates: []string{"com.hashinbox.wallets.$read"},
+	Templates: []string{"com.hashinbox.wallets:read"},
 }
 
 // WalletsListRequest is WalletsList's input: its path and query parameters, and its body.

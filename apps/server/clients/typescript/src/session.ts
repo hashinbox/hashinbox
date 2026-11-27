@@ -3,6 +3,7 @@
 
 import { can, type Operation } from "./client";
 import type { Amr } from "./models";
+import { DEPENDS } from "./operations";
 import { Scopes, type Packed } from "./scope";
 
 /** A session: a JWT and the claims it carries. */
@@ -13,7 +14,7 @@ export class Session {
   readonly issuer: string;
   /** `sub`: a user's id, or who a key's session is for. */
   readonly subject: string | undefined;
-  /** What it may do, unpacked. */
+  /** What it may do: unpacked and expanded with `DEPENDS`, as the server checks it. */
   readonly scopes: Scopes;
   /** `iat`, Unix seconds. */
   readonly issuedAt: number;
@@ -26,7 +27,7 @@ export class Session {
     this.token = token;
     this.issuer = claims.iss;
     this.subject = claims.sub;
-    this.scopes = Scopes.parse(claims.scopes);
+    this.scopes = Scopes.parse(claims.scopes).expand(DEPENDS);
     this.issuedAt = claims.iat;
     this.expiresAt = claims.exp;
     this.amr = claims.amr ?? [];

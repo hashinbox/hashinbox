@@ -58,7 +58,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     Path(path): Path<NetworkPath>,
 ) -> Result<Json<RoutesResponse>, Error> {
-    scope::require!(session, "com.hashinbox.endpoints.$read");
+    scope::require!(session, "com.hashinbox.networks.routes:read");
     let network = path.network();
     let routes = networks::routes(&state.container, &state.db, &network).await?;
     Ok(Json(RoutesResponse {
@@ -105,7 +105,7 @@ async fn replace(
     Path(path): Path<NetworkPath>,
     request: Result<Json<RoutesRequest>, JsonRejection>,
 ) -> Result<Json<RoutesResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.endpoints.$write");
+    scope::require!(caller, "com.hashinbox.networks.routes");
     let Json(request) = request?;
     let network = path.network();
     let routes = networks::replace_routes(&state.container, &state.db, &network, request.routes);

@@ -2,7 +2,7 @@ from typing import Any
 
 import pytest
 
-from hashinbox import WALLET_GET, Amr, Scopes, Secret, Session
+from hashinbox import DEPENDS, WALLET_GET, Amr, Scopes, Secret, Session
 
 from .golden import load
 
@@ -24,7 +24,7 @@ def test_signing_is_byte_identical(case: dict[str, Any]) -> None:
     assert session.token == case["token"]
     assert session.issuer == VECTORS["id"]
     assert session.subject == case["sub"]
-    assert session.scopes == Scopes.parse(case["scopes"]).compress()
+    assert session.scopes == Scopes.parse(case["scopes"]).expand(DEPENDS)
 
 
 def test_a_server_made_token_parses() -> None:
@@ -40,7 +40,7 @@ def test_a_server_made_token_parses() -> None:
 
 
 def test_a_session_checks_its_scopes() -> None:
-    session = secret().issue("com.hashinbox.wallets[x].$read")
+    session = secret().issue("com.hashinbox.wallets[x]:read")
     assert session.can(WALLET_GET, {"id": "x"})
     assert not session.can(WALLET_GET, {"id": "y"})
     assert 0 < session.expires_at - session.issued_at <= 600

@@ -57,10 +57,14 @@ func TestScopeVectors(t *testing.T) {
 			Scopes, Display, Compressed string
 			Packed                      map[string][]string
 		}
+		Expand struct {
+			Depends map[string][]string
+			Cases   []struct{ Scopes, Expanded string }
+		}
 	}
 	read(t, "scope.json", &v)
 	if len(v.Parse) == 0 || len(v.Refuse) == 0 || len(v.Covers) == 0 || len(v.Escape) == 0 ||
-		len(v.FirstUncovered) == 0 || len(v.Sets) == 0 {
+		len(v.FirstUncovered) == 0 || len(v.Sets) == 0 || len(v.Expand.Depends) == 0 || len(v.Expand.Cases) == 0 {
 		t.Fatal("a vector section is empty or renamed")
 	}
 	for _, c := range v.Parse {
@@ -106,6 +110,11 @@ func TestScopeVectors(t *testing.T) {
 		unpacked, err := ParseScopes(packed)
 		if err != nil || unpacked.compress().String() != c.Compressed {
 			t.Errorf("unpack %q: %v %q, want %q", c.Scopes, err, unpacked, c.Compressed)
+		}
+	}
+	for _, c := range v.Expand.Cases {
+		if got := scopesText(t, c.Scopes).Expand(v.Expand.Depends).String(); got != c.Expanded {
+			t.Errorf("expand %q: %q, want %q", c.Scopes, got, c.Expanded)
 		}
 	}
 }
@@ -162,7 +171,7 @@ func TestSecretSignsTheServersBytes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := scopesText(t, c.Scopes).Pack()
+		want := scopesText(t, c.Scopes).Expand(Depends).Pack()
 		if parsed.Issuer != v.ID || !reflect.DeepEqual(parsed.Scopes.Pack(), want) || parsed.IssuedAt.Unix() != c.Iat ||
 			parsed.ExpiresAt.Unix() != c.Exp {
 			t.Errorf("parsed %q: %+v", c.Token, parsed)
@@ -215,7 +224,7 @@ func TestParseSessionReadsAServerToken(t *testing.T) {
 		t.Error("expiry is exp")
 	}
 	if !session.Can(walletGet, map[string]string{"id": "x"}) {
-		t.Error("com.hashinbox.*.$* cannot read a wallet")
+		t.Error("com.hashinbox cannot read a wallet")
 	}
 	if _, err := ParseSession("a.b"); err == nil {
 		t.Error("two parts parsed")
@@ -223,11 +232,11 @@ func TestParseSessionReadsAServerToken(t *testing.T) {
 }
 
 func TestFillEscapesInOnePass(t *testing.T) {
-	got := Fill("a.w[{id}].x[{other}].$read", map[string]string{"id": "{other}] %", "other": "y"})
-	if got != "a.w[{other}%5D%20%25].x[y].$read" {
+	got := Fill("a.w[{id}].x[{other}]:read", map[string]string{"id": "{other}] %", "other": "y"})
+	if got != "a.w[{other}%5D%20%25].x[y]:read" {
 		t.Error(got)
 	}
-	if got := Fill("a[{missing}].$read", nil); got != "a[{missing}].$read" {
+	if got := Fill("a[{missing}]:read", nil); got != "a[{missing}]:read" {
 		t.Error(got)
 	}
 }

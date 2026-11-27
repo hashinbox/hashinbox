@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -68,7 +69,7 @@ func TestDoFillsThePathQueryBodyAndBearer(t *testing.T) {
 			answer(w, 201, `{"asset":"native"}`)
 		}
 	})
-	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[a%20b/c].$write", "com.hashinbox.wallets.$read")}
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[a%20b/c]", "com.hashinbox.wallets:read")}
 	client := NewClient(server.URL+"/", WithSession(session))
 	ctx := context.Background()
 
@@ -106,7 +107,7 @@ func TestDoFillsThePathQueryBodyAndBearer(t *testing.T) {
 func TestDoMapsTheErrorBody(t *testing.T) {
 	server, _ := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if n == 1 {
-			answer(w, 403, `{"kind":"permission_denied","message":"no","reason":"missing_scope","metadata":{"scope":"com.hashinbox.wallets.$read"}}`)
+			answer(w, 403, `{"kind":"permission_denied","message":"no","reason":"missing_scope","metadata":{"scope":"com.hashinbox.wallets:read"}}`)
 			return
 		}
 		answer(w, 503, `{"status":"down"}`)
@@ -115,11 +116,11 @@ func TestDoMapsTheErrorBody(t *testing.T) {
 	_, err := WalletsList(context.Background(), client, WalletsListRequest{})
 	var api *APIError
 	if !errors.As(err, &api) || api.Status != 403 || api.Kind != KindPermissionDenied || api.Message != "no" ||
-		api.Metadata["scope"] != "com.hashinbox.wallets.$read" || !errors.Is(err, ErrMissingScope) {
+		api.Metadata["scope"] != "com.hashinbox.wallets:read" || !errors.Is(err, ErrMissingScope) {
 		t.Fatalf("%#v", err)
 	}
 	_, err = WalletsList(context.Background(), client, WalletsListRequest{})
-	if !errors.As(err, &api) || api.Status != 503 || api.Kind != "" || string(api.Raw) != `{"status":"down"}` {
+	if !errors.As(err, &api) || api.Status != 503 || api.Kind != KindUnavailable || api.Metadata["response"] != `{"status":"down"}` {
 		t.Fatalf("%#v", err)
 	}
 }
@@ -128,11 +129,15 @@ func TestDoRefusesAMissingScopeLocally(t *testing.T) {
 	server, seen := serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		answer(w, 200, `{}`)
 	})
-	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[x].$read")}
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.wallets[x]:read")}
 	client := NewClient(server.URL, WithSession(session))
 	_, err := WalletGet(context.Background(), client, WalletGetRequest{ID: "y"})
-	if !errors.Is(err, ErrMissingScope) || !strings.Contains(err.Error(), "com.hashinbox.wallets[y].$read") {
-		t.Fatal(err)
+	var api *APIError
+	if !errors.As(err, &api) || api.Status != 403 || api.Kind != KindPermissionDenied ||
+		api.Reason != ReasonMissingScope || api.Message != "wallet_get needs scope com.hashinbox.wallets[y]:read" ||
+		api.Metadata["scope"] != "com.hashinbox.wallets[y]:read" || api.Metadata["operation"] != "wallet_get" ||
+		!errors.Is(err, ErrMissingScope) {
+		t.Fatalf("%#v", err)
 	}
 	if _, err := WalletGet(context.Background(), client, WalletGetRequest{ID: "x"}); err != nil {
 		t.Fatal(err)
@@ -160,7 +165,7 @@ func keyServer(t *testing.T, call func(w http.ResponseWriter, n int)) (*httptest
 	calls := 0
 	return serve(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if r.URL.Path == "/v1/session" {
-			answer(w, 200, `{"kind":"key","key":{"id":"hip/x","scopes":{"com.hashinbox":["wallets.$*"]}},"scopes":{}}`)
+			answer(w, 200, `{"kind":"key","key":{"id":"hip/x","scopes":{"com.hashinbox":["wallets"]}},"scopes":{}}`)
 			return
 		}
 		calls++
@@ -194,7 +199,7 @@ func TestWithSecretSignsItsOwnSessions(t *testing.T) {
 		t.Fatal("the probe holds scopes", probe, err)
 	}
 	first, err := ParseSession(seen.bearers[1])
-	if err != nil || first.Scopes.String() != "com.hashinbox.wallets.$*" || first.ExpiresAt.Sub(first.IssuedAt) != defaultTTL {
+	if err != nil || first.Scopes.String() != "com.hashinbox.jobs com.hashinbox.wallets" || first.ExpiresAt.Sub(first.IssuedAt) != defaultTTL {
 		t.Fatal(first, err)
 	}
 	if seen.bearers[2] != seen.bearers[1] || seen.bearers[3] == seen.bearers[1] {
@@ -217,7 +222,7 @@ func TestWithSecretRenewsOnceAfterSessionExpired(t *testing.T) {
 		}
 		answer(w, 200, `{"wallets":[],"next_cursor":null}`)
 	})
-	client := NewClient(server.URL, WithSecret(secret), WithSecretScopes(MustScopes("com.hashinbox.wallets.$read")))
+	client := NewClient(server.URL, WithSecret(secret), WithSecretScopes(MustScopes("com.hashinbox.wallets:read")))
 	ctx := context.Background()
 	if _, err := WalletsList(ctx, client, WalletsListRequest{}); err != nil {
 		t.Fatal("not retried:", err)
@@ -289,7 +294,7 @@ func TestStreamReadsEventsUntilCancelled(t *testing.T) {
 		case <-time.After(10 * time.Second):
 		}
 	})
-	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs.$read")}
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs:read")}
 	client := NewClient(server.URL, WithSession(session))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -337,7 +342,7 @@ func windows(t *testing.T, answers ...string) (*HTTPClient, *[]string, *sync.Mut
 			io.WriteString(w, body)
 		}
 	})
-	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs.$read")}
+	session := Session{Token: "jwt", Scopes: MustScopes("com.hashinbox.logs:read")}
 	client := NewClient(server.URL, WithSession(session), WithStreamBackoff(time.Millisecond, 4*time.Millisecond))
 	return client, &ids, &mu
 }
@@ -433,5 +438,57 @@ func TestStreamBacksOffOnErrorsAndEndsOnARefusal(t *testing.T) {
 	defer mu.Unlock()
 	if strings.Join(*ids, ",") != ",1,1,1,2" {
 		t.Fatal(*ids)
+	}
+}
+
+func TestAPIErrorFrom(t *testing.T) {
+	api := &APIError{Status: 401, Kind: KindUnauthenticated, Reason: ReasonTOTPRequired}
+	if APIErrorFrom(api) != api || APIErrorFrom(fmt.Errorf("login: %w", api)) != api {
+		t.Fatal("not as is")
+	}
+	if APIErrorFrom(api).Reason != ReasonTOTPRequired || !errors.Is(api, ErrTOTPRequired) {
+		t.Fatal(api)
+	}
+	transport := &url.Error{Op: "Get", URL: "http://x", Err: errors.New("refused")}
+	if got := APIErrorFrom(transport); got.Status != 0 || got.Kind != KindUnavailable || got.Reason != "" ||
+		got.Message != transport.Error() || !errors.Is(got, transport) {
+		t.Fatalf("%#v", got)
+	}
+	if got := APIErrorFrom(context.DeadlineExceeded); got.Kind != KindUnavailable {
+		t.Fatalf("%#v", got)
+	}
+	plain := errors.New("boom")
+	if got := APIErrorFrom(plain); got.Kind != KindUnavailable || got.Message != "boom" || errors.Unwrap(got) != plain {
+		t.Fatalf("%#v", got)
+	}
+	if got := APIErrorFrom("odd"); got.Status != 0 || got.Kind != KindUnavailable || got.Message != "odd" || got.Cause != nil {
+		t.Fatalf("%#v", got)
+	}
+	if got := APIErrorFrom(nil); got == nil || got.Kind != KindUnavailable || got.Cause != nil {
+		t.Fatalf("%#v", got)
+	}
+}
+
+func TestAPIErrorFromAnAnswerReadsOnlyAnErrorBody(t *testing.T) {
+	unparsed := func(status int, raw, response string) {
+		t.Helper()
+		got := APIErrorFrom(httpAnswer{status, []byte(raw)})
+		want := fmt.Sprintf("could not parse the response (HTTP %d)", status)
+		if got.Status != status || got.Kind != KindUnavailable || got.Reason != "" || got.Message != want ||
+			len(got.Metadata) != 1 || got.Metadata["response"] != response {
+			t.Fatalf("%s: %#v", raw, got)
+		}
+	}
+	html := "<html>" + strings.Repeat("x", 2000) + "</html>"
+	unparsed(502, html, html[:1024])
+	unparsed(503, "", "")
+	for _, raw := range []string{`{"status":"down"}`, `{"kind":"nope","message":"x"}`, `{"kind":"internal"}`} {
+		unparsed(503, raw, raw)
+	}
+	raw := `{"kind":"unauthenticated","message":"code","reason":"totp_required","metadata":{"a":"b"}}`
+	got := APIErrorFrom(httpAnswer{401, []byte(raw)})
+	if got.Status != 401 || got.Kind != KindUnauthenticated || got.Message != "code" || got.Reason != ReasonTOTPRequired ||
+		got.Metadata["a"] != "b" || !errors.Is(got, ErrTOTPRequired) {
+		t.Fatalf("%#v", got)
 	}
 }

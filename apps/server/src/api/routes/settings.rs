@@ -59,7 +59,7 @@ async fn list(
     session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.settings.$read");
+    scope::require!(session, "com.hashinbox.settings:read");
     Ok(Json(ListResponse {
         settings: settings::list(&state.db).await?,
     }))
@@ -108,7 +108,7 @@ async fn write(
     Path(path): Path<SettingPath>,
     request: Result<Json<WriteRequest>, JsonRejection>,
 ) -> Result<Json<Setting>, Error> {
-    scope::require!(caller, "com.hashinbox.settings.$write");
+    scope::require!(caller, "com.hashinbox.settings");
     let Json(request) = request?;
     Ok(Json(
         settings::write(&state.db, &path.key, request.value).await?,

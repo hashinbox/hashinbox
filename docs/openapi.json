@@ -85,7 +85,7 @@
           "assets"
         ],
         "summary": "List every configured asset",
-        "description": "Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.",
+        "description": "Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.",
         "operationId": "assets_list",
         "responses": {
           "200": {
@@ -107,23 +107,11 @@
                 }
               }
             }
-          },
-          "403": {
-            "description": "Missing scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
           }
         },
         "security": [
           {
-            "bearer": [
-              "com.hashinbox.assets.$read"
-            ]
+            "bearer": []
           }
         ]
       }
@@ -250,7 +238,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.jobs.$read"
+              "com.hashinbox.jobs:read"
             ]
           }
         ]
@@ -330,7 +318,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.jobs.$read"
+              "com.hashinbox.jobs:read"
             ]
           }
         ]
@@ -525,7 +513,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.logs.$read"
+              "com.hashinbox.logs:read"
             ]
           }
         ]
@@ -574,7 +562,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.logs.$read"
+              "com.hashinbox.logs:read"
             ]
           }
         ]
@@ -746,7 +734,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.logs.$read"
+              "com.hashinbox.logs:read"
             ]
           }
         ]
@@ -805,7 +793,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.logs.$read"
+              "com.hashinbox.logs:read"
             ]
           }
         ]
@@ -817,7 +805,7 @@
           "markets"
         ],
         "summary": "List the markets and the latest prices",
-        "description": "Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.",
+        "description": "Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.",
         "operationId": "markets_list",
         "responses": {
           "200": {
@@ -840,16 +828,6 @@
               }
             }
           },
-          "403": {
-            "description": "Missing scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "503": {
             "description": "The store is unavailable",
             "content": {
@@ -863,9 +841,7 @@
         },
         "security": [
           {
-            "bearer": [
-              "com.hashinbox.markets.$read"
-            ]
+            "bearer": []
           }
         ]
       }
@@ -964,7 +940,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.markets.$write"
+              "com.hashinbox.markets"
             ]
           }
         ]
@@ -976,7 +952,7 @@
           "markets"
         ],
         "summary": "List a market's hourly candles of an asset",
-        "description": "The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.",
+        "description": "The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.",
         "operationId": "market_candles_list",
         "parameters": [
           {
@@ -1039,16 +1015,6 @@
               }
             }
           },
-          "403": {
-            "description": "Missing scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "404": {
             "description": "No such market",
             "content": {
@@ -1072,9 +1038,7 @@
         },
         "security": [
           {
-            "bearer": [
-              "com.hashinbox.markets.$read"
-            ]
+            "bearer": []
           }
         ]
       }
@@ -1132,7 +1096,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.networks.$read"
+              "com.hashinbox.networks:read"
             ]
           }
         ]
@@ -1219,7 +1183,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.networks.$write"
+              "com.hashinbox.networks"
             ]
           }
         ]
@@ -1308,7 +1272,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -1429,7 +1393,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.networks.$read"
+              "com.hashinbox.networks:read"
             ]
           }
         ]
@@ -1528,7 +1492,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.networks.$read"
+              "com.hashinbox.networks:read"
             ]
           }
         ]
@@ -1659,7 +1623,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.transactions.$read"
+              "com.hashinbox.networks.transactions:read"
             ]
           }
         ]
@@ -1748,7 +1712,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$read"
+              "com.hashinbox.networks.endpoints:read"
             ]
           }
         ]
@@ -1855,7 +1819,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -1962,7 +1926,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -2061,7 +2025,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -2168,7 +2132,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -2297,7 +2261,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$read"
+              "com.hashinbox.networks.endpoints:read"
             ]
           }
         ]
@@ -2414,7 +2378,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.endpoints"
             ]
           }
         ]
@@ -2503,7 +2467,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$read"
+              "com.hashinbox.networks.routes:read"
             ]
           }
         ]
@@ -2610,7 +2574,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.endpoints.$write"
+              "com.hashinbox.networks.routes"
             ]
           }
         ]
@@ -2717,7 +2681,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.networks.$read"
+              "com.hashinbox.networks:read"
             ]
           }
         ]
@@ -2846,7 +2810,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.transactions.$read"
+              "com.hashinbox.networks.transactions:read"
             ]
           }
         ]
@@ -2858,7 +2822,7 @@
           "auth"
         ],
         "summary": "Read whether the recovery passphrase is set",
-        "description": "Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.",
+        "description": "Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.",
         "operationId": "recovery_get",
         "responses": {
           "200": {
@@ -2905,7 +2869,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.recovery.$write"
+              "com.hashinbox.recovery"
             ]
           }
         ]
@@ -2962,7 +2926,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.recovery.$write"
+              "com.hashinbox.recovery"
             ]
           }
         ]
@@ -3012,7 +2976,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.recovery.$write"
+              "com.hashinbox.recovery"
             ]
           }
         ]
@@ -3024,7 +2988,7 @@
           "auth"
         ],
         "summary": "Read the caller's session",
-        "description": "The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.",
+        "description": "The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.",
         "operationId": "session_get",
         "responses": {
           "200": {
@@ -3237,7 +3201,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.settings.$read"
+              "com.hashinbox.settings:read"
             ]
           }
         ]
@@ -3327,7 +3291,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.settings.$write"
+              "com.hashinbox.settings"
             ]
           }
         ]
@@ -3386,7 +3350,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.stats.$read"
+              "com.hashinbox.stats:read"
             ]
           }
         ]
@@ -3478,7 +3442,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$read"
+              "com.hashinbox.triggers:read"
             ]
           }
         ]
@@ -3575,8 +3539,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$write",
-              "com.hashinbox.wallets.$write"
+              "com.hashinbox.triggers"
             ]
           }
         ]
@@ -3655,7 +3618,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$read"
+              "com.hashinbox.triggers:read"
             ]
           }
         ]
@@ -3753,8 +3716,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$write",
-              "com.hashinbox.wallets.$write"
+              "com.hashinbox.triggers"
             ]
           }
         ]
@@ -3824,7 +3786,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$write"
+              "com.hashinbox.triggers"
             ]
           }
         ]
@@ -3925,7 +3887,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.triggers.$read"
+              "com.hashinbox.triggers.runs:read"
             ]
           }
         ]
@@ -4365,7 +4327,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.keys.$read"
+              "com.hashinbox.users.keys:read"
             ]
           }
         ]
@@ -4442,7 +4404,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.keys.$write"
+              "com.hashinbox.users.keys"
             ]
           }
         ]
@@ -4515,7 +4477,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.keys.$write"
+              "com.hashinbox.users.keys"
             ]
           }
         ]
@@ -4595,7 +4557,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.keys.$write"
+              "com.hashinbox.users.keys"
             ]
           }
         ]
@@ -4688,7 +4650,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.users.$read"
+              "com.hashinbox.users:read"
             ]
           }
         ]
@@ -4698,7 +4660,7 @@
           "auth"
         ],
         "summary": "Create a user, or the root user on a fresh install",
-        "description": "With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.",
+        "description": "With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.",
         "operationId": "users_create",
         "requestBody": {
           "content": {
@@ -4775,7 +4737,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.users.$write"
+              "com.hashinbox.users"
             ]
           }
         ]
@@ -4875,7 +4837,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.users.$write"
+              "com.hashinbox.users"
             ]
           }
         ]
@@ -5000,7 +4962,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets.$read"
+              "com.hashinbox.wallets:read"
             ]
           }
         ]
@@ -5107,7 +5069,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets.$write"
+              "com.hashinbox.wallets"
             ]
           }
         ]
@@ -5199,7 +5161,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets.$read"
+              "com.hashinbox.wallets.tags:read"
             ]
           }
         ]
@@ -5289,7 +5251,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$read"
+              "com.hashinbox.wallets[{id}]:read"
             ]
           }
         ]
@@ -5399,7 +5361,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].indexes"
             ]
           }
         ]
@@ -5491,7 +5453,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].indexes"
             ]
           }
         ]
@@ -5598,7 +5560,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].indexes"
             ]
           }
         ]
@@ -5709,7 +5671,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$read"
+              "com.hashinbox.wallets[{id}].indexes:read"
             ]
           }
         ]
@@ -5818,7 +5780,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].indexes"
             ]
           }
         ]
@@ -5910,7 +5872,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].tags"
             ]
           }
         ]
@@ -6000,7 +5962,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].tags"
             ]
           }
         ]
@@ -6110,7 +6072,7 @@
         "security": [
           {
             "bearer": [
-              "com.hashinbox.wallets[{id}].$write"
+              "com.hashinbox.wallets[{id}].transactions"
             ]
           }
         ]
@@ -6401,7 +6363,7 @@
           },
           "scopes": {
             "type": "object",
-            "description": "Fewer scopes than the issuer's, packed\n(`{\"com.hashinbox\": [\"wallets[x].$read\"]}`); the issuer's when\nabsent.",
+            "description": "Fewer scopes than the issuer's, packed\n(`{\"com.hashinbox\": [\"wallets[x]:read\"]}`); the issuer's when\nabsent.",
             "additionalProperties": {
               "type": "array",
               "items": {
@@ -9177,7 +9139,7 @@
           },
           "scopes": {
             "type": "object",
-            "description": "The widest scopes it may issue, packed in JSON\n(`{\"com.hashinbox\": [\"wallets.$read\"]}`).",
+            "description": "The widest scopes it may issue, packed in JSON\n(`{\"com.hashinbox\": [\"wallets:read\"]}`).",
             "additionalProperties": {
               "type": "array",
               "items": {
@@ -9624,5 +9586,22 @@
       "name": "openapi",
       "description": "This document"
     }
-  ]
+  ],
+  "x-hashinbox-depends": {
+    "com.hashinbox.networks.endpoints": [
+      "com.hashinbox.networks:read"
+    ],
+    "com.hashinbox.networks.routes": [
+      "com.hashinbox.networks.endpoints:read"
+    ],
+    "com.hashinbox.networks.transactions": [
+      "com.hashinbox.networks:read"
+    ],
+    "com.hashinbox.triggers": [
+      "com.hashinbox.wallets"
+    ],
+    "com.hashinbox.wallets": [
+      "com.hashinbox.jobs"
+    ]
+  }
 }

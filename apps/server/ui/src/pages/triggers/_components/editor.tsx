@@ -5,21 +5,19 @@ import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import { triggerReplace, type Trigger, type Wallet } from '@hashinbox/client';
 import { api } from '@/api/client';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { TriggerForm } from './form';
 import type { Definition } from './forms';
+import { fail, notify } from '@/store/app';
 
 /** A stored trigger's form: saving it, or going back without. */
 export function Editor({
-  shell,
   wallets,
   tags,
   initial,
   onSaved,
   onCancel,
 }: {
-  shell: Shell;
   wallets: Wallet[];
   tags: string[];
   initial: Definition;
@@ -34,10 +32,10 @@ export function Editor({
     const { id, ...body } = def;
     triggerReplace(api, { id, body })
       .then((saved) => {
-        shell.notify('Trigger saved.');
+        notify('Trigger saved.');
         onSaved(saved);
       })
-      .catch(shell.fail)
+      .catch(fail)
       .finally(() => setBusy(false));
   };
 
@@ -54,7 +52,7 @@ export function Editor({
           Save
         </Button>
       </Stack>
-      <TriggerForm shell={shell} wallets={wallets} tags={tags} value={def} onChange={setDef} kept />
+      <TriggerForm wallets={wallets} tags={tags} value={def} onChange={setDef} kept />
     </Box>
   );
 }

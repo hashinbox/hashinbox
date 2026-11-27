@@ -19,25 +19,113 @@ end.
 | **User** | A person or team owner. Holds the widest scopes anything they issue may have. |
 | **Key** | Issued by a user: public client id `hip/…` and secret `his/…`. Its scopes are covered by its user's. |
 | **Session** | An HS256 JWT, issued by a user (the server signs it at login) or by a key (its secret signs it, offline, with any JWT library). Its scopes are covered by its issuer's. |
-| **Scope** | `com.hashinbox.wallets[<id>].$read`, as `packages/scope` defines and checks it. |
+| **Scope** | `com.hashinbox.wallets[<id>]:read`, as `packages/scope` defines and checks it. |
 
-**Scope chain:** user ⊇ key ⊇ session. Each step is checked with `Scopes::first_uncovered`. It is
+**Scope chain:** user ⊇ key ⊇ session. Each step is checked with `Scopes::first_uncovered`, both
+sides expanded (Dependencies, below). It is
 checked when something is issued, and again on every request, so narrowing a user narrows their
 keys and tokens at once.
 
 ### Scope text
 
 ```text
-scope   = step *("." step) ".$" action
-step    = name [ "[" id "]" ] | "*"
-action  = name | "*"
+scope   = step *("." step) [":read"]
+step    = name [ "[" id "]" ]
+name    = 1*(ALPHA / DIGIT / "_" / "-")
 id      = any text; "%", "[", "]", whitespace and controls written as %XX
 ```
 
-- **One id per step.** Several wallets are several scopes: `wallets[a].$read wallets[b].$read`.
-- **Coverage:** `wallets` covers `wallets[x]`; `wallets[x]` covers only `wallets[x]`; `*` in the
-  middle covers one step, at the end anything below; `$*` covers any action.
+- **Two levels.** `com.hashinbox.triggers` is **full** (read and write);
+  `com.hashinbox.triggers:read` is **read only**. Full covers `:read` of the same path.
+- **One id per step.** `wallets[w1]`, `wallets[w1]:read`; several wallets are several scopes.
+- **A scope covers its whole subtree.** `networks` covers `networks.endpoints`,
+  `networks[x].endpoints[y]` and so on; the level carries (`networks:read` covers
+  `networks.endpoints:read`, not `networks.endpoints`). A child never covers its parent; ids
+  narrow (`wallets` covers `wallets[x]`, `wallets[x]` only `wallets[x]`). `com.hashinbox` is
+  everything.
+- **No wildcards.** The subtree rule gives what a trailing `*` gave, and nothing needs a
+  wildcard in the middle of a path.
 - **Compress** drops each scope another covers, then sorts. It merges nothing.
+- **Pack** compresses, then factors out the shared prefix: `{"com.hashinbox": ["triggers",
+  "wallets[w1]:read"]}`. Each scope keeps one step at least, so the root alone packs as
+  `{"com": ["hashinbox"]}`. **Unpack** joins each prefix and its scopes with `.`.
+
+### The scope tree
+
+`auth::HASHINBOX` declares it (`scope::schema!`); `HASHINBOX.knows` refuses a scope outside it.
+Every route requires exactly one scope (`require!`), the most specific. A list route needs the
+collection's `:read` (`wallets:read`); a per-id scope gives per-id routes only. Assets and market
+reads (`/v1/assets`, `/v1/markets`, `/v1/markets/{name}/candles`) need only a session.
+
+| Scope | Allows | Routes |
+|---|---|---|
+| `com.hashinbox` | everything | every route |
+| `wallets` | create wallets; with `:read` list them | `POST /v1/wallets`; `GET /v1/wallets` |
+| `wallets[id]` | one wallet and its subtree; `:read` reads it | `GET /v1/wallets/{id}` (`:read`) |
+| `wallets[id].indexes` | its indexes: create, change, remove, reconcile; `:read`: their legs | `POST /v1/wallets/{id}/indexes`, `PATCH`/`DELETE /v1/wallets/{id}/indexes/{asset}`, `POST …/{asset}/reconcile`; `GET …/{asset}/legs` (`:read`) |
+| `wallets[id].tags` | tag and untag it | `PUT`/`DELETE /v1/wallets/{id}/tags/{tag}` |
+| `wallets.tags:read` | list every tag in use | `GET /v1/wallets/tags` |
+| `wallets[id].transactions` | send from it | `POST /v1/wallets/{id}/transactions` |
+| `networks` | create networks; `:read`: list them, their blocks and tip | `POST /v1/networks`; `GET /v1/networks`, `GET /v1/networks/{chain}/{network}/blocks`, `…/blocks/{position}`, `POST …/tip/search` (`:read`) |
+| `networks.transactions:read` | a network's and a block's transactions | `GET /v1/networks/{chain}/{network}/transactions`, `…/blocks/{position}/transactions` |
+| `networks.endpoints` | RPC nodes (their URLs carry API keys): add, replace, test, remove, switch; `:read`: list them, their failures | `POST`/`PUT /v1/networks/{chain}/{network}/endpoints`, `POST …/endpoints/test`, `POST /v1/networks/endpoints`, `DELETE …/endpoints/{id}`, `PUT …/endpoints/{id}/state`; `GET …/endpoints`, `GET …/endpoints/{id}/failures` (`:read`) |
+| `networks.routes` | which node serves which call; `:read` reads it | `PUT`; `GET /v1/networks/{chain}/{network}/routes` |
+| `triggers` | create, replace, delete triggers; `:read` reads them | `POST /v1/triggers`, `PUT`/`DELETE /v1/triggers/{id}`; `GET /v1/triggers`, `GET /v1/triggers/{id}` |
+| `triggers.runs:read` | a trigger's runs | `GET /v1/triggers/{id}/runs` |
+| `jobs:read` | the job queue | `GET /v1/jobs`, `GET /v1/jobs/{id}` |
+| `logs:read` | the kept log entries | `GET /v1/logs`, `…/targets`, `…/messages`, `…/stream` |
+| `markets` | turn a market's feed on or off | `PATCH /v1/markets/{name}` |
+| `stats:read` | what the store holds | `GET /v1/stats` |
+| `users` | create users, change their scopes, disable them; `:read` lists them | `POST /v1/users`, `PATCH /v1/users/{id}`; `GET /v1/users` |
+| `users.keys` | the caller's keys: create, revoke, rotate; `:read` lists them | `POST /v1/user/keys`, `DELETE /v1/user/keys/{id}`, `POST …/{id}/rotate`; `GET /v1/user/keys` |
+| `settings` | write a setting; `:read` lists them | `PUT /v1/settings/{key}`; `GET /v1/settings` |
+| `recovery` | the recovery passphrase: read whether it is set, set, remove | `GET`/`POST`/`DELETE /v1/recovery` |
+
+Scopes are written in full (`com.hashinbox.wallets`); the table leaves out `com.hashinbox.`.
+
+### Dependencies
+
+Some scopes need others outside their subtree. `auth::DEPENDS` lists them, source → targets;
+the hierarchy needs no entry (a parent covers its children).
+
+| Source | Targets | Why |
+|---|---|---|
+| `triggers` | `wallets` | a trigger's send broadcasts from the wallets its selector picks |
+| `wallets` | `jobs` | a send is followed as its broadcast job |
+| `networks.endpoints` | `networks:read` | nodes are added to a network: it must be seen |
+| `networks.transactions` | `networks:read` | transactions are browsed by network and block |
+| `networks.routes` | `networks.endpoints:read` | a route picks among the network's nodes |
+
+- **The level carries.** A source held full gives a bare target full; held `:read`, the target
+  `:read`. A target written `:read` is always read only. So `triggers:read` reads wallets and
+  jobs; `triggers` writes them.
+- **Ids.** A scope covering the source or an id of it triggers it (`triggers[t1]`,
+  `networks[x].endpoints`, `networks`); a child (`triggers.runs`) does not. The target is
+  granted whole.
+- **Transitive**, to a fixed point: `triggers` gives `wallets`, which gives `jobs`.
+
+### Expansion
+
+`Scopes::expand(DEPENDS)` adds every target, compressed.
+
+- **Stored scopes stay as granted.** The middleware expands the session's scopes once, before
+  any `require!`; `GET /v1/session` answers the expanded ones.
+- **Narrowing compares expanded against expanded:** a session asked of a user or key, a key or
+  user created, and every request's chain check (`User::accepts`, `UserKey::accepts`).
+- **Clients expand the same.** The OpenAPI document carries the table as the top-level
+  extension `x-hashinbox-depends` (source → targets); cligen generates it as `DEPENDS` (Go:
+  `Depends`) into each client's operations file, and `Session.parse` expands with it, so `can()`
+  matches the server. `_golden/scope.json` holds the coverage, packing and expansion cases each
+  client port passes.
+
+### Migration
+
+`docs/design/096-migrate-2.sql` rewrites the stored scopes (`user.scopes`, `user_key.scopes`)
+once: `X.$read` → `X:read`; `X.$write`, `X.$*`, `X.*` → `X`; `endpoints` → `networks.endpoints`
+and `networks.routes`; `transactions` → `networks.transactions`; `keys` → `users.keys`;
+`assets` and `markets:read` are dropped (no scope needed), as is anything else it cannot map,
+each listed. The root user holds `com.hashinbox`. A session issued before it no longer parses:
+401, log in again.
 
 ## Tables
 
@@ -78,7 +166,7 @@ CREATE TABLE user_2fa (
 );
 ```
 
-- Scopes are stored as the JSON `Scopes::pack` makes (`{"com.hashinbox": ["wallets.$*"]}`),
+- Scopes are stored as the JSON `Scopes::pack` makes (`{"com.hashinbox": ["wallets"]}`),
   the same shape the token carries. `Scopes::unpack` reads them, and `HASHINBOX.knows` refuses
   an unknown scope when one is written.
 - The server keeps `his/…` readable in `secret` (plain, like the TOTP secret; decided), because
@@ -104,7 +192,7 @@ his/3xT9…Kq2x7Hq2W                         secret: base58 of 32 random bytes �
 - The secret is one base-58 number of 36 bytes: the 32 random bytes, then their CRC32 (4 bytes,
   big-endian). The CRC is our server's typo check only: it refuses a mistyped secret before any
   lookup. A third party never computes it; it signs with the secret as given.
-- A key is created by its user (a session, or a key holding `keys.$write`). Its scopes must be
+- A key is created by its user (a session, or a key holding `users.keys`). Its scopes must be
   covered by the creator's, and the secret is shown once.
 - `Authorization: Bearer his/…` authenticates as the key: a session with the key's scopes, still
   covered by its user's.
@@ -132,8 +220,7 @@ issuer by a **public client id** in `kid` and `iss`:
   "iat": 1795600000,
   "exp": 1795600900,
   "jti": "0193…",                 // optional
-  "scopes": { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc].$read",
-                                "wallets[ethereum.mainnet.0xabc].events.$read"] }
+  "scopes": { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc]:read"] }
 }
 ```
 
@@ -164,7 +251,7 @@ import jwt from "jsonwebtoken";
 
 const keyId = "hip/7Hq2Wk9xR4mLpZ3vN8cT1a";
 const secret = process.env.HASHINBOX_SECRET; // "his/…", as shown when the key was created
-const scopes = { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc].$read"] };
+const scopes = { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc]:read"] };
 
 const token = jwt.sign({ sub: "customer-1832", scopes }, secret, {
   algorithm: "HS256",
@@ -190,7 +277,7 @@ const claims = part({
   sub: "customer-1832",
   iat: now,
   exp: now + 15 * 60,
-  scopes: { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc].$read"] },
+  scopes: { "com.hashinbox": ["wallets[ethereum.mainnet.0xabc]:read"] },
 });
 const signature = createHmac("sha256", secret).update(`${header}.${claims}`).digest("base64url");
 const token = `${header}.${claims}.${signature}`;
@@ -283,7 +370,7 @@ further by the session when the session asks for less:
 | a user session (dashboard) | what the login asked for, checked ⊆ user | at most the user's; less when narrowed |
 
 - Using `key.scopes` directly would be wrong for the pay form: a token narrowed to
-  `wallets[x].$read` would get everything its key holds.
+  `wallets[x]:read` would get everything its key holds.
 - `authenticate` has already checked session ⊆ key ⊆ user, so `session.scopes` is always the
   narrowest of the three, and the only one a handler compares.
 - The middleware only parses and checks. Whether a route needs authentication is the route's
@@ -351,11 +438,11 @@ in `AppState` (see Bootstrap).
 | `GET /v1/user` | any session | the logged-in user and their scopes (singular: always the caller, like `/v1/session`) |
 | `PUT /v1/user` | any session of the user (a key: `403`) | `{password}`: sets a new password, checked as at signup (8 characters at least); the current one is not asked. Sets `invalidated_at` (every other session ends) and answers `200` with a fresh session (the caller's scopes and `amr`). It replaces `PUT /v1/user/password` |
 | `GET /v1/version` | public | `{version}`, plus `missing_root: true` on a fresh install (no user yet); also the health check |
-| `GET /v1/recovery` | `recovery.$write` (`Caller`) | `200 {set, created_at}` (`created_at` Unix ms, `null` when none is set); never the words or the hash |
-| `POST /v1/recovery` | `recovery.$write` (`Caller`) | `201 {passphrase: "w1 … w12"}`, shown once; replaces any passphrase set and ends its sessions |
-| `DELETE /v1/recovery` | `recovery.$write` (`Caller`) | `204`: removes it (none set: `204` too); passphrase logins are off and its sessions end |
-| `GET /v1/users`, `POST /v1/users`, `PATCH /v1/users/{id}` | `users.$read` / `users.$write` (`POST` with no user yet: public, creates root) | list, create (scopes covered by the creator's), change scopes, disable |
-| `GET /v1/user/keys`, `POST /v1/user/keys`, `DELETE /v1/user/keys/{id}`, `POST /v1/user/keys/{id}/rotate` | `keys.$read` / `keys.$write` | the logged-in user's own keys: list (never secrets), create (secret shown once), revoke, rotate |
+| `GET /v1/recovery` | `recovery` (`Caller`) | `200 {set, created_at}` (`created_at` Unix ms, `null` when none is set); never the words or the hash |
+| `POST /v1/recovery` | `recovery` (`Caller`) | `201 {passphrase: "w1 … w12"}`, shown once; replaces any passphrase set and ends its sessions |
+| `DELETE /v1/recovery` | `recovery` (`Caller`) | `204`: removes it (none set: `204` too); passphrase logins are off and its sessions end |
+| `GET /v1/users`, `POST /v1/users`, `PATCH /v1/users/{id}` | `users:read` / `users` (`POST` with no user yet: public, creates root) | list, create (scopes covered by the creator's), change scopes, disable |
+| `GET /v1/user/keys`, `POST /v1/user/keys`, `DELETE /v1/user/keys/{id}`, `POST /v1/user/keys/{id}/rotate` | `users.keys:read` / `users.keys` | the logged-in user's own keys: list (never secrets), create (secret shown once), revoke, rotate |
 | `POST /v1/user/2fa` | session | start: answers the `otpauth://` URI for the QR code (unconfirmed) |
 | `POST /v1/user/2fa/confirm` | session | `{code}`: sets `confirmed_at` |
 | `DELETE /v1/user/2fa` | session plus `{code}` | turns 2FA off |
@@ -390,7 +477,7 @@ Whether a route needs authentication is the route's own business, stated by what
 ```rust
 #[scope::utoipa(get, path = "/v1/wallets/{id}", responses((status = 200, body = Wallet)))]
 async fn read(session: Session, Path(path): Path<WalletPath>, …) -> Result<Json<Wallet>, Error> {
-    scope::require!(session, "com.hashinbox.wallets[{id}].$read", id = path.id);
+    scope::require!(session, "com.hashinbox.wallets[{id}]:read", id = path.id);
     …
 }
 ```
@@ -399,7 +486,7 @@ A check needs two inputs:
 
 | Input | Comes from |
 |---|---|
-| **needs** (required) | the template, a string literal: `"com.hashinbox.wallets[{id}].$read"` |
+| **needs** (required) | the template, a string literal: `"com.hashinbox.wallets[{id}]:read"` |
 | **has** (granted) | the first argument: any type implementing `scope::Granted` (`Session`, `Caller`) |
 
 `scope::require!(granted, "template", name = expr, …)` (a proc macro in crate `scope-macros`, folder `packages/scope/macro`,
@@ -413,13 +500,13 @@ re-exported by `scope`):
   is denied, never a panic.
 - When `granted` does not cover it, it returns `Err(Denied.into())`. `Denied` converts to
   `403 {"kind": "permission_denied", "reason": "missing_scope", "metadata": {"scope": "…"}}`.
-- It works anywhere: several in one handler, in loops and branches. A route that touches several
-  resources checks each one: a trigger's `send` also needs `wallets.$write`. Two wallets are two
-  `require!`s; a template holds one id per step.
+- Every route writes exactly one, its most specific scope. What a scope needs beyond its
+  subtree is a dependency (`auth::DEPENDS`), not a second `require!`: `POST /v1/triggers` needs
+  only `com.hashinbox.triggers`, which brings `wallets`. A template holds one id per step.
 
 `#[scope::utoipa(<utoipa::path args>)]` reads the handler's body. It writes every `require!`
 template, in order, deduplicated, exactly as written, into `#[utoipa::path(…,
-security(("bearer" = ["com.hashinbox.wallets[{id}].$read", …])))]`. It fails to compile when the
+security(("bearer" = ["com.hashinbox.wallets[{id}]:read", …])))]`. It fails to compile when the
 body has no `require!`, when `security(…)` is given, or when a template is not a string literal.
 
 - **Write `require!` in the handler itself.** The attribute only sees the handler's own body: a
@@ -441,13 +528,13 @@ A list route requires the unnarrowed scope. It does not narrow its query to gran
 ```rust
 #[scope::utoipa(get, path = "/v1/wallets", …)]
 async fn list(session: Session, …) {
-    scope::require!(session, "com.hashinbox.wallets.$read");
+    scope::require!(session, "com.hashinbox.wallets:read");
     …
 }
 ```
 
-- `GET /v1/wallets` needs `com.hashinbox.wallets.$read`.
-- A caller granted only `wallets[x].$read` is refused the list; it reads `GET /v1/wallets/x`.
+- `GET /v1/wallets` needs `com.hashinbox.wallets:read`.
+- A caller granted only `wallets[x]:read` is refused the list; it reads `GET /v1/wallets/x`.
 
 ### What is checked where
 
@@ -460,8 +547,8 @@ async fn list(session: Session, …) {
 | the caller holds each scope the handler requires | every request (`require!`) |
 
 - Public routes (health, `openapi.json`) take no `Caller` and have no attribute.
-- The server's schema (`scope::schema!`, `HASHINBOX`) lists every resource and action. It is
-  the source for `knows`, for the dashboard's scope picker and for the OpenAPI document.
+- The server's schema (`scope::schema!`, `HASHINBOX`) is the scope tree. It is the source for
+  `knows`; the dashboard's picker reads the tree from the OpenAPI document's `security`.
 
 ## API layout
 
@@ -529,8 +616,8 @@ checksum, `crypto::mnemonic`). It signs in as any user when a password is lost.
 - **Hash only:** the secret setting `recovery_passphrase` keeps the argon2id hash of the
   normalised words (lower case, single spaces), never the words.
 - **Optional, the root's:** none is set after setup. The root creates, replaces or removes it at
-  any time (`/v1/recovery`, all three on `recovery.$write`, which only the root holds, through
-  `*`; reading whether it is set needs it too, so the scope keeps its one action).
+  any time (`/v1/recovery`, all three on full `recovery`, which only the root holds, through
+  `com.hashinbox`; reading whether it is set needs it too, so the scope has no `:read` use).
   - `POST` makes 12 new words, keeps their hash in place of any one set (`setting::put`) and
     answers them this once. `GET` says `{set, created_at}`, never the words. `DELETE` drops the
     row (`setting::db::delete`).
@@ -563,7 +650,7 @@ checksum, `crypto::mnemonic`). It signs in as any user when a password is lost.
 
 - is never returned by any route: `GET /v1/settings` lists it as `{key, set, description}` only;
 - is never writable through `PUT /v1/settings/{key}`: `403 permission_denied` (a caller holding
-  `settings.$write` is refused by the declaration, not by a missing scope);
+  `settings` is refused by the declaration, not by a missing scope);
 - is set only by server code (`setting::put`, which replaces any row kept).
 
 ## Bootstrap: the first user
@@ -572,8 +659,8 @@ With no users and no keys there is nobody to authenticate, so `POST /v1/users` h
 
 | State | `POST /v1/users {email, name, password}` |
 |---|---|
-| **no user exists** | needs no `Authorization`; creates the **root** user with `com.hashinbox.*.$*` and answers `201` with the user and a session (logged in at once) |
-| a user exists | needs a `Caller` with `users.$write`; the new user's scopes must be covered by the caller's (`first_uncovered`), else `403` |
+| **no user exists** | needs no `Authorization`; creates the **root** user with `com.hashinbox` and answers `201` with the user and a session (logged in at once) |
+| a user exists | needs a `Caller` with `users`; the new user's scopes must be covered by the caller's (`first_uncovered`), else `403` |
 
 - **Atomic:** the "no user exists" check and the insert are one write, so two first requests
   racing make one root, and the other answers `403`.
@@ -620,7 +707,7 @@ With no users and no keys there is nobody to authenticate, so `POST /v1/users` h
   `{"root": {email, name, password}, "settings": {key: value}}`, both optional,
   `deny_unknown_fields` (`usecase::bootstrap`).
   - No user: in one write, the root is created as `POST /v1/users` creates it (same checks,
-    `com.hashinbox.*.$*`), then every setting written as `PUT /v1/settings/{key}` writes it;
+    `com.hashinbox`), then every setting written as `PUT /v1/settings/{key}` writes it;
     `recovery_passphrase` is 12 BIP39 words (`Mnemonic::parse`), kept as the argon2id hash
     `POST /v1/recovery` keeps. `root_exists` is set; `app.bootstrap` logs the email and the keys.
   - No user and no `root`: the server does not start (settings without a root are refused).
@@ -653,23 +740,24 @@ green active, red disabled, grey no login). The detail has four sections:
 
 | Section | Shows | Does |
 |---|---|---|
-| **Profile** | name, email, scopes (each with what it allows, from `HASHINBOX`), created | edit name and email; change password (`PUT /v1/user`, the new one only; logs out everywhere else); for another user with `users.$write`: change scopes, disable |
+| **Profile** | name, email, scopes (each with what it allows, from `HASHINBOX`), created | edit name and email; change password (`PUT /v1/user`, the new one only; logs out everywhere else); for another user with `users`: change scopes, disable |
 | **Keys** | each key: name, `hip/…`, scopes, created, last used, expires; dot green active, orange expiring, red revoked | create (name, scopes from a picker limited to the user's, expiry): the `his/…` secret is shown **once** with a copy button; rotate (invalidates its sessions); revoke |
 | **Two-factor** | off, pending (not confirmed) or on, since when | turn on: QR code (`otpauth://`), then a code to confirm; turn off (needs a code) |
 | **Sessions** | this session: issued, expires, scopes | log out; log out everywhere (`DELETE /v1/session?all=true`) |
 
 - The logged-in user's own page is `/ui/users/me`, from the top bar (name and avatar next to
-  the logo), so even a user without `users.$read` reaches their profile, keys and 2FA. Under the
+  the logo), so even a user without `users:read` reaches their profile, keys and 2FA. Under the
   hood it calls `GET /v1/user`.
-- The scope picker lists `HASHINBOX`'s resources and actions, offers only what the user holds,
-  and allows ids (`wallets[…]`). It shows the packed result before saving.
+- The scope picker shows the scope tree with a Read / Full choice per node, offers only what
+  the user holds (expanded), notes what a node implies (`also wallets`), and allows ids
+  (`wallets[…]`). It shows the packed result before saving.
 - Every action is logged like the rest (`auth.*` events), and the Logs button opens them.
 
 ## Pieces
 
 | Piece | Where |
 |---|---|
-| scope grammar, `schema!`, `pack`, `Granted` | `packages/scope` |
+| scope grammar, `schema!`, `pack`, `expand`, `Granted` | `packages/scope` |
 | `require!`, `#[scope::utoipa]` | `packages/scope/macro` (proc-macro crate `scope-macros`: `syn`, `quote`), re-exported by `scope` |
 | `HASHINBOX` schema (`auth.rs`), key format (`auth/key.rs`) | `apps/server/src/` |
 | password hashes, TOTP, BIP39 mnemonic, base 58, SHA-256, CRC32, OS randomness | `packages/crypto` (`password`, `totp`, `mnemonic`, `base58`, `sha256`, `crc32`, `random`) |

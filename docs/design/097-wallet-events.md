@@ -254,9 +254,9 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 
 | Route | What | Scope |
 |---|---|---|
-| `GET /v1/wallets/{id}/events` | One wallet's events, oldest first | `com.hashinbox.wallets[{id}].events.$read` |
-| `GET /v1/wallets/{id}/events/stream` | SSE, the same events live | `com.hashinbox.wallets[{id}].events.$read` |
-| `GET /v1/events` | Every wallet's events, oldest first | `com.hashinbox.wallets.events.$read` |
+| `GET /v1/wallets/{id}/events` | One wallet's events, oldest first | `com.hashinbox.wallets[{id}].events:read` |
+| `GET /v1/wallets/{id}/events/stream` | SSE, the same events live | `com.hashinbox.wallets[{id}].events:read` |
+| `GET /v1/events` | Every wallet's events, oldest first | `com.hashinbox.wallets.events:read` |
 | `GET /v1/events/stream` | SSE of the same | as above |
 
 - Lists follow the convention: `IndexParams { cursor, limit }`, reply `{ events, next_cursor }`;
@@ -265,11 +265,11 @@ No leg is written when `finality_at` moves, so the index worker emits it:
 - `since=<Unix ms>`: start at that moment; ignored when `cursor` is given.
 - Oldest first (a feed), unlike logs.
 - `/v1/events` needs the unnarrowed scope (096: lists are not narrowed); a token of
-  `wallets[a].events.$read` reads `/v1/wallets/a/events`.
-- Scope schema gains `wallets.events => [read]`. `wallets[x].$read` does **not** cover
-  `wallets[x].events.$read` (a longer path); a key needs `wallets.*.$read` or the events scope.
+  `wallets[a].events:read` reads `/v1/wallets/a/events`.
+- Scope schema gains `wallets.events => [read]`. `wallets[x]:read` does **not** cover
+  `wallets[x].events:read` (a longer path); a key needs `wallets:read` or the events scope.
 - Browser token: a JWT signed with `his`, `kid` = `hip`, `scope` =
-  `com.hashinbox.wallets[ethereum.mainnet.0xabc].events.$read`, narrower than its key.
+  `com.hashinbox.wallets[ethereum.mainnet.0xabc].events:read`, narrower than its key.
 
 ### The stream
 
@@ -368,7 +368,7 @@ In `apps/server/tests/` style, one test support module (086):
   clock stepped back keeps `at` monotone.
 - SSE: `Last-Event-ID` replays the missed events; a lagging listener misses none; the stream
   ends at 15 s with `reconnect` and its cursor; a revoked token fails the next re-open.
-- Scope: a `wallets[w1].events.$read` token gets 403 on w2, and `/v1/events` lists only w1.
+- Scope: a `wallets[w1].events:read` token gets 403 on w2, and `/v1/events` lists only w1.
 
 ## Open questions
 

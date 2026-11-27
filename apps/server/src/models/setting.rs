@@ -31,7 +31,7 @@ use crate::error::Error;
 ///
 /// `Type` is (de)serialized by serde. `public` means its value may be sent
 /// in any response, to anyone (`GET /v1/version`); `private`, only to a
-/// caller holding `settings.$read`; `secret`, never: listed only as set or
+/// caller holding `settings:read`; `secret`, never: listed only as set or
 /// not, and written by server code alone ([`put`]). A key's name must
 /// not be `write`, `create`, `list` or `declared`.
 macro_rules! settings {
@@ -199,7 +199,7 @@ settings! {
 enum Visibility {
     /// Anyone, in any response (`GET /v1/version`).
     Public,
-    /// A caller holding `settings.$read`.
+    /// A caller holding `settings:read`.
     #[allow(dead_code, reason = "no private setting is declared yet")]
     Private,
     /// No one: listed only as set or not, set by server code alone.

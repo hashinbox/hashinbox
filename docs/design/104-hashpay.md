@@ -21,7 +21,7 @@ Open questions are at the end.
 |---|---|
 | **Wallet group** (`wallet_group`) | One customer's (or order's) set of wallets: one per network, every asset of each indexed. It carries the intent: mode, USD amount, expiry, status |
 | **Payment intent** | What the shop asks for: `POST /v1/wallet_groups`. The answer is the group plus an **intent token** |
-| **Intent token** | A narrow JWT (096): `com.hashinbox.wallet_groups[{id}].$read`. The browser watches the group with it |
+| **Intent token** | A narrow JWT (096): `com.hashinbox.wallet_groups[{id}]:read`. The browser watches the group with it |
 | **Deposit** | One incoming transaction on one index of the group: 097's events for `(wallet_index_id, subject)`, folded |
 | **hashpay** | The brand: the headless TS core and the web components that render a checkout |
 
@@ -170,8 +170,8 @@ The SDK warns:
 | one-time, an open intent of that external id with the same amount and accept | `200` it, a fresh token (a retried checkout) |
 | one-time, an open one that differs | `409 already_exists` |
 
-- Scopes: `wallet_groups.$write` and `wallets.$write` (it makes wallets), checked with two
-  `require!`s; the token it signs must be covered by the caller, so `wallet_groups.$read` too.
+- Scopes: `wallet_groups` and `wallets` (it makes wallets), checked with two
+  `require!`s; the token it signs must be covered by the caller, so `wallet_groups:read` too.
 - Takes `Caller` (096).
 
 ### The intent token: signed by the server
@@ -185,7 +185,7 @@ The SDK warns:
   (the server keeps it readable, 096); a user session → the user's `session_secret`. So
   revoking or rotating the key ends its tokens, as any session.
 - Claims: `sub` = the group id; `scopes` =
-  `{"com.hashinbox": ["wallet_groups[0193b2c4-7d1e-…].$read"]}`; `iat` now; `exp`: one-time
+  `{"com.hashinbox": ["wallet_groups[0193b2c4-7d1e-…]:read"]}`; `iat` now; `exp`: one-time
   `expires_at` + 15 min, balance 1 h; at most 24 h (096).
 - **Refresh:** balance: `POST` again (it reuses the group). One-time: `Secret.issue` with the
   same scope, or `POST` again with the same body (the retried-checkout case).
@@ -218,11 +218,11 @@ The SDK warns:
 
 | Route | Operation id | Scope |
 |---|---|---|
-| `GET /v1/wallet_groups` `?external_id=` | `wallet_groups_list` | `com.hashinbox.wallet_groups.$read` |
-| `GET /v1/wallet_groups/{id}` | `wallet_group_get` | `wallet_groups[{id}].$read` |
-| `PATCH /v1/wallet_groups/{id}` `{status: "expired"}` | `wallet_group_update` (cancel; phase 2) | `wallet_groups[{id}].$write` |
-| `GET /v1/wallet_groups/{id}/deposits` | `wallet_group_deposits_get` | `wallet_groups[{id}].$read` |
-| `GET /v1/wallet_groups/{id}/deposits/stream` | `wallet_group_deposits_stream` | `wallet_groups[{id}].$read` |
+| `GET /v1/wallet_groups` `?external_id=` | `wallet_groups_list` | `com.hashinbox.wallet_groups:read` |
+| `GET /v1/wallet_groups/{id}` | `wallet_group_get` | `wallet_groups[{id}]:read` |
+| `PATCH /v1/wallet_groups/{id}` `{status: "expired"}` | `wallet_group_update` (cancel; phase 2) | `wallet_groups[{id}]` |
+| `GET /v1/wallet_groups/{id}/deposits` | `wallet_group_deposits_get` | `wallet_groups[{id}]:read` |
+| `GET /v1/wallet_groups/{id}/deposits/stream` | `wallet_group_deposits_stream` | `wallet_groups[{id}]:read` |
 
 - `HASHINBOX` gains `wallet_groups => [read, write]`.
 - A list answers `{ wallet_groups, next_cursor }` (`IndexParams`), never a token.
@@ -388,7 +388,7 @@ credit (103).
 | An intent token can | It cannot |
 |---|---|
 | `wallet_group_get`, `wallet_group_deposits_get`, `…_stream` of its group | read another group, list groups, read `/v1/events` |
-| see the group's addresses, amounts, status, `external_id` | read the member wallets (`wallets[x].$read` is a different path), send, create, change anything |
+| see the group's addresses, amounts, status, `external_id` | read the member wallets (`wallets[x]:read` is a different path), send, create, change anything |
 | live until its `exp` (≤ 24 h) | outlive its key: revoke or rotate the key and it is 401 |
 
 - No secret ever reaches the browser; keys are never in any answer (as today).

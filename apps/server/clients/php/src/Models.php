@@ -450,7 +450,7 @@ final readonly class CreateSessionRequest
      *     for any user; or `password`, not both.
      * @param ?string $password A login: the user's password; or `passphrase`, not both.
      * @param array<string, list<string>>|null $scopes Fewer scopes than the issuer's, packed
-     *     (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+     *     (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
      *     absent.
      * @param ?string $sub A key's session: who it is for (a customer); logged, grants
      *     nothing.
@@ -4238,7 +4238,7 @@ final readonly class User
      *     JSON, `login`: whether it has one.
      * @param string $name Its name, as shown.
      * @param array<string, list<string>> $scopes The widest scopes it may issue, packed in JSON
-     *     (`{"com.hashinbox": ["wallets.$read"]}`).
+     *     (`{"com.hashinbox": ["wallets:read"]}`).
      * @param ?int $disabledAt Unix ms it was disabled: it, its keys and every session refused.
      * @param ?int $invalidatedAt Unix ms; every session issued in its second or before is refused.
      */

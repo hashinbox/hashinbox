@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::Operation;
 use crate::models::Amr;
+use crate::operations::DEPENDS;
 use crate::scope::{Scopes, escape_id, fill};
 
 /// A session: its JWT and what the JWT says.
@@ -26,7 +27,8 @@ pub struct Session {
     pub issuer: String,
     /// `sub`: a user's id, or whom a key's session is for.
     pub subject: Option<String>,
-    /// `scopes`, unpacked.
+    /// `scopes`, unpacked and expanded with [`DEPENDS`]: what the server
+    /// checks.
     pub scopes: Scopes,
     /// `iat`, Unix seconds.
     pub issued_at: i64,
@@ -98,7 +100,7 @@ impl Session {
             return Err(Invalid("not HS256, or its kid is not its iss".into()));
         }
         Ok(Self {
-            scopes: Scopes::unpack(&claims.scopes)?,
+            scopes: Scopes::unpack(&claims.scopes)?.expand(DEPENDS),
             issuer: claims.iss,
             subject: claims.sub,
             issued_at: claims.iat,

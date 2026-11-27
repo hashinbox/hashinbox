@@ -1,16 +1,39 @@
 import Box from '@mui/material/Box';
-import Checkbox from '@mui/material/Checkbox';
-import FormControlLabel from '@mui/material/FormControlLabel';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
+import ToggleButton from '@mui/material/ToggleButton';
+import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
 import { mono } from '@/theme';
-import { ROOT, allows, full, pack, readable, short, type Resources } from './scopes';
+import { ROOT, allows, full, implied, pack, readable, short, type Resources } from './scopes';
+
+/** A node's level: none, read only, or full. */
+type Level = '' | 'read' | 'full';
+
+const RANK: Record<Level, number> = { '': 0, read: 1, full: 2 };
+
+/** The scope of tree node `path` (`''`: the root) at `level`. */
+function scopeOf(path: string, level: Level): string {
+  const base = path === '' ? ROOT : `${ROOT}.${path}`;
+  return level === 'read' ? `${base}:read` : base;
+}
+
+/** The strongest level an ancestor of `path` (the root included) holds in `levels`. */
+function inherited(path: string, levels: Record<string, Level>): Level {
+  const steps = path === '' ? [] : path.split('.');
+  const above = ['', ...steps.slice(0, -1).map((_, at) => steps.slice(0, at + 1).join('.'))];
+  return above.reduce<Level>(
+    (best, at) => (RANK[levels[at] ?? ''] > RANK[best] ? (levels[at] ?? '') : best),
+    '',
+  );
+}
 
 /**
- * Scopes as checkboxes by resource, only `held` ones enabled, plus scopes by
- * id as text; starts at `initial` and reports every change to `onChange`.
+ * The scope tree with a Read / Full choice per node, only `held` ones enabled,
+ * plus scopes by id as text; starts at `initial` and reports every change to
+ * `onChange`. A node covers its subtree, so a child below its parent's level
+ * shows the parent's.
  */
 export function Picker({
   resources,
@@ -23,65 +46,86 @@ export function Picker({
   initial: string[];
   onChange: (scopes: string[]) => void;
 }) {
-  const all = resources.flatMap(([resource, actions]) =>
-    actions.map((action) => `${ROOT}.${resource}.$${action}`),
+  const nodes = ['', ...resources];
+  const [levels, setLevels] = useState<Record<string, Level>>(() =>
+    Object.fromEntries(
+      nodes.flatMap((path): [string, Level][] => {
+        if (initial.includes(scopeOf(path, 'full'))) return [[path, 'full']];
+        if (initial.includes(scopeOf(path, 'read'))) return [[path, 'read']];
+        return [];
+      }),
+    ),
   );
-  const [checked, setChecked] = useState(() => all.filter((scope) => allows(initial, scope)));
+  const tree = new Set(nodes.flatMap((path) => [scopeOf(path, 'full'), scopeOf(path, 'read')]));
   const [extra, setExtra] = useState(() =>
     initial
-      .filter((scope) => scope.includes('['))
+      .filter((scope) => !tree.has(scope))
       .map(short)
       .join(' '),
   );
-  const scopes = [...checked, ...extra.split(/\s+/).filter(Boolean).map(full)];
 
-  const change = (nextChecked: string[], nextExtra: string) => {
-    setChecked(nextChecked);
+  const scopesOf = (next: Record<string, Level>, nextExtra: string) => [
+    ...nodes.flatMap((path) => {
+      const own = next[path] ?? '';
+      return RANK[own] > RANK[inherited(path, next)] ? [scopeOf(path, own)] : [];
+    }),
+    ...nextExtra.split(/\s+/).filter(Boolean).map(full),
+  ];
+  const change = (next: Record<string, Level>, nextExtra: string) => {
+    setLevels(next);
     setExtra(nextExtra);
-    onChange([...nextChecked, ...nextExtra.split(/\s+/).filter(Boolean).map(full)]);
+    onChange(scopesOf(next, nextExtra));
   };
 
   return (
     <Box>
       <Box sx={{ border: 1, borderColor: 'divider', borderRadius: 1, px: 1.5, py: 0.5 }}>
-        {resources.map(([resource, actions]) => (
-          <Stack key={resource} direction="row" sx={{ alignItems: 'center' }}>
-            <Typography sx={{ fontFamily: mono, fontSize: 12.5, width: 120, flex: 'none' }}>
-              {resource}
-            </Typography>
-            {actions.map((action) => {
-              const scope = `${ROOT}.${resource}.$${action}`;
-              return (
-                <FormControlLabel
-                  key={action}
-                  label={action}
-                  disabled={!allows(held, scope)}
-                  slotProps={{ typography: { sx: { fontSize: 13 } } }}
-                  control={
-                    <Checkbox
-                      size="small"
-                      checked={checked.includes(scope)}
-                      onChange={(e) =>
-                        change(
-                          e.target.checked
-                            ? [...checked, scope]
-                            : checked.filter((s) => s !== scope),
-                          extra,
-                        )
-                      }
-                    />
-                  }
-                />
-              );
-            })}
-          </Stack>
-        ))}
+        {nodes.map((path) => {
+          const above = inherited(path, levels);
+          const own = levels[path] ?? '';
+          const shown = RANK[above] > RANK[own] ? above : own;
+          const depth = path === '' ? 0 : path.split('.').length;
+          const also = path === '' ? [] : implied(path);
+          return (
+            <Stack key={path} direction="row" sx={{ alignItems: 'center', py: 0.25 }}>
+              <Typography
+                sx={{ fontFamily: mono, fontSize: 12.5, width: 180, flex: 'none', pl: depth * 1.5 }}
+              >
+                {path === '' ? 'everything' : (path.split('.').pop() ?? path)}
+              </Typography>
+              <ToggleButtonGroup
+                size="small"
+                exclusive
+                value={shown}
+                onChange={(_, level: Level | null) =>
+                  change({ ...levels, [path]: level ?? '' }, extra)
+                }
+              >
+                {(['read', 'full'] as const).map((level) => (
+                  <ToggleButton
+                    key={level}
+                    value={level}
+                    disabled={RANK[level] <= RANK[above] || !allows(held, scopeOf(path, level))}
+                    sx={{ py: 0, px: 1, fontSize: 12, textTransform: 'none' }}
+                  >
+                    {level === 'read' ? 'Read' : 'Full'}
+                  </ToggleButton>
+                ))}
+              </ToggleButtonGroup>
+              {also.length > 0 && (
+                <Typography color="text.secondary" sx={{ fontSize: 11.5, ml: 1.5 }}>
+                  also {also.join(', ')}
+                </Typography>
+              )}
+            </Stack>
+          );
+        })}
       </Box>
       <TextField
         label="By id"
         value={extra}
-        onChange={(e) => change(checked, e.target.value)}
-        helperText="Space-separated, e.g. wallets[ethereum.mainnet.0xabc].$read"
+        onChange={(e) => change(levels, e.target.value)}
+        helperText="Space-separated, e.g. wallets[ethereum.mainnet.0xabc]:read"
         slotProps={{ htmlInput: { spellCheck: false, style: { fontFamily: mono } } }}
         sx={{ mt: 2 }}
       />
@@ -89,7 +133,7 @@ export function Picker({
         sx={{ mt: 1.5, fontFamily: mono, fontSize: 11.5, color: 'text.secondary' }}
         aria-label="Packed scopes"
       >
-        {JSON.stringify(pack(scopes))}
+        {JSON.stringify(pack(scopesOf(levels, extra)))}
       </Typography>
     </Box>
   );

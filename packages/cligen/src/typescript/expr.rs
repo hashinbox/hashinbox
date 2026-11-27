@@ -504,7 +504,7 @@ mod tests {
     fn consts_like_prettier() {
         let entries = vec![
             ("id".into(), "\"pets_list\"".into()),
-            ("templates".into(), "[\"a.$read\"]".into()),
+            ("templates".into(), "[\"a:read\"]".into()),
         ];
         let text = Const {
             doc: String::new(),
@@ -515,7 +515,7 @@ mod tests {
         .to_string();
         assert_eq!(
             text,
-            "export const petsListOperation: Operation = {\n  id: \"pets_list\",\n  templates: [\"a.$read\"],\n};\n"
+            "export const petsListOperation: Operation = {\n  id: \"pets_list\",\n  templates: [\"a:read\"],\n};\n"
         );
     }
 }

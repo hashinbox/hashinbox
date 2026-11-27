@@ -1,6 +1,7 @@
-//! Access scopes as text (`com.hashinbox.wallets[w1].$read`): what an API key
-//! or a token holds, whether one set covers another, `schema!` for the known
-//! ones, and `require!`/`#[scope::utoipa]` for a handler's check.
+//! Access scopes as text (`com.hashinbox.wallets[w1]:read`): what an API key
+//! or a token holds, whether one set covers another, the dependencies a set
+//! implies, `schema!` for the known ones, and `require!`/`#[scope::utoipa]`
+//! for a handler's check.
 
 mod macros;
 mod schema;
@@ -9,8 +10,8 @@ mod scopes;
 
 use std::fmt;
 
-pub use schema::{Resource, Schema};
-pub use scope::{Action, Scope, Segment};
+pub use schema::Schema;
+pub use scope::{Scope, Segment};
 pub use scope_macros::{require, utoipa};
 pub use scopes::Scopes;
 
@@ -35,15 +36,14 @@ impl<T: Granted + ?Sized> Granted for &T {
 /// Why a scope's text does not parse.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParseError {
-    /// No step before the action.
+    /// No step.
     Empty,
-    /// A resource or action name that is not ASCII letters, digits, `_`
-    /// or `-`.
+    /// A resource name that is not ASCII letters, digits, `_` or `-`.
     Name(String),
     /// An id not closed by `]`, or empty.
     Id(String),
-    /// No `$action` at the end.
-    Action(String),
+    /// A `:` not followed by `read` and the end.
+    Level(String),
     /// A `%` not followed by two hex digits, or an id not UTF-8.
     Escape(String),
 }
@@ -54,7 +54,7 @@ impl fmt::Display for ParseError {
             Self::Empty => out.write_str("a scope needs a resource"),
             Self::Name(name) => write!(out, "`{name}` is not a name"),
             Self::Id(text) => write!(out, "bad id in `{text}`"),
-            Self::Action(text) => write!(out, "`{text}` does not end with `$action`"),
+            Self::Level(text) => write!(out, "`{text}` ends with neither `:read` nor nothing"),
             Self::Escape(text) => write!(out, "bad escape in `{text}`"),
         }
     }

@@ -1,14 +1,17 @@
 // Hand-written: a port of packages/scope (its grammar, coverage, escaping,
-// compress, pack and unpack), held to it by ../../_golden/scope.json.
+// compress, pack, unpack and expand), held to it by ../../_golden/scope.json.
 
-/** One step of a scope's path: a resource (narrowed to `id`, or all), or `*`. */
-export type Segment = { name: string; id?: string } | "*";
+/** One step of a scope's path: a resource, narrowed to `id` or all of it. */
+export interface Segment {
+  name: string;
+  id?: string;
+}
 
-/** What a scope allows doing: `$name`, or `$*` (`"*"`). */
-export type Action = string;
-
-/** Scopes as a JWT packs them: `{"com.hashinbox": ["wallets[x].$read"]}`. */
+/** Scopes as a JWT packs them: `{"com.hashinbox": ["wallets[x]:read"]}`. */
 export type Packed = Record<string, string[]>;
+
+/** What holding a scope needs beyond its subtree: source → targets (`DEPENDS`). */
+export type Depends = Readonly<Record<string, readonly string[]>>;
 
 /** Why a scope's text does not parse. */
 export class ScopeError extends Error {
@@ -18,21 +21,22 @@ export class ScopeError extends Error {
   }
 }
 
-/** One scope: `com.hashinbox.wallets[id].$read`. */
+/** One scope: `com.hashinbox.wallets[id]` (full) or `…:read` (read only). */
 export class Scope {
   readonly path: readonly Segment[];
-  readonly action: Action;
+  readonly read: boolean;
 
-  constructor(path: readonly Segment[], action: Action) {
+  constructor(path: readonly Segment[], read: boolean) {
     if (path.length === 0) throw new ScopeError("a scope needs a resource");
     this.path = path;
-    this.action = action;
+    this.read = read;
   }
 
-  /** The scope `text` is: steps split by `.` (not inside `[` `]`), then `$action`. */
+  /** The scope `text` is: steps split by `.` (not inside `[` `]`), then `:read` or nothing. */
   static parse(text: string): Scope {
     const steps: string[] = [];
     let start = 0;
+    let end = text.length;
     let inside = false;
     for (let at = 0; at < text.length; at++) {
       const char = text[at];
@@ -41,30 +45,33 @@ export class Scope {
       else if (char === "." && !inside) {
         steps.push(text.slice(start, at));
         start = at + 1;
+      } else if (char === ":" && !inside) {
+        end = at;
+        break;
       }
     }
     if (inside) throw new ScopeError(`bad id in \`${text}\``);
-    const last = text.slice(start);
-    if (!last.startsWith("$"))
-      throw new ScopeError(`\`${text}\` does not end with \`$action\``);
-    const action = last.slice(1);
-    if (action !== "*" && !isName(action))
-      throw new ScopeError(`\`${action}\` is not a name`);
-    return new Scope(steps.map(parseSegment), action);
+    const level = text.slice(end);
+    if (level !== "" && level !== ":read")
+      throw new ScopeError(
+        `\`${text}\` ends with neither \`:read\` nor nothing`,
+      );
+    if (text === "") throw new ScopeError("a scope needs a resource");
+    steps.push(text.slice(start, end));
+    return new Scope(steps.map(parseSegment), level !== "");
   }
 
   /**
-   * Whether it allows everything `other` allows: its action the same or
-   * `$*`, its path matching step by step (`*` in the middle: any one step;
-   * at the end: anything below, itself included).
+   * Whether it allows everything `other` allows: it is full or `other` is
+   * read only, and its path is a prefix of `other`'s, step by step: its
+   * whole subtree.
    */
   covers(other: Scope): boolean {
-    const action = this.action === "*" || this.action === other.action;
-    return action && pathCovers(this.path, other.path, 0, 0);
+    return (!this.read || other.read) && reaches(this.path, other.path);
   }
 
   toString(): string {
-    return [...this.path.map(segmentText), `$${this.action}`].join(".");
+    return this.path.map(segmentText).join(".") + (this.read ? ":read" : "");
   }
 }
 
@@ -97,6 +104,32 @@ export class Scopes implements Iterable<Scope> {
   /** The first of `others` none of them covers; `undefined`: they cover all. */
   firstUncovered(others: Scopes): Scope | undefined {
     return others.list.find((scope) => !this.covers(scope));
+  }
+
+  /**
+   * Them and every scope `depends` adds, to a fixed point, compressed: a held
+   * scope covering a source (its ids ignored) adds each target whole, read
+   * only when the target is `:read` or the held scope is.
+   */
+  expand(depends: Depends): Scopes {
+    const table = Object.entries(depends).flatMap(([source, targets]) => {
+      const parsed = tryParse(source);
+      const each = targets.map(tryParse);
+      if (!parsed || each.some((target) => !target)) return [];
+      return [[parsed, each as Scope[]] as const];
+    });
+    const held = [...this.list];
+    for (let at = 0; at < held.length; at++) {
+      const scope = held[at]!;
+      for (const [source, targets] of table) {
+        if (!triggers(scope, source)) continue;
+        for (const target of targets) {
+          const added = new Scope(target.path, target.read || scope.read);
+          if (!held.some((kept) => kept.covers(added))) held.push(added);
+        }
+      }
+    }
+    return new Scopes(held).compress();
   }
 
   /** The fewest scopes allowing the same, sorted: one covered by another dropped. */
@@ -142,7 +175,7 @@ export function packEntries(scopes: Scopes): [string, string[]][] {
     const shared = sharedPrefix(group);
     for (const scope of group) {
       const prefix = scope.path.slice(0, shared).map(segmentText).join(".");
-      const rest = new Scope(scope.path.slice(shared), scope.action).toString();
+      const rest = new Scope(scope.path.slice(shared), scope.read).toString();
       packed.set(prefix, [...(packed.get(prefix) ?? []), rest]);
     }
   }
@@ -193,7 +226,6 @@ function tryParse(text: string): Scope | undefined {
 }
 
 function parseSegment(text: string): Segment {
-  if (text === "*") return "*";
   const open = text.indexOf("[");
   if (open < 0) {
     if (!isName(text)) throw new ScopeError(`\`${text}\` is not a name`);
@@ -234,34 +266,30 @@ function unescape(text: string): string {
 }
 
 function segmentText(segment: Segment): string {
-  if (segment === "*") return "*";
   return segment.id === undefined
     ? segment.name
     : `${segment.name}[${escapeId(segment.id)}]`;
 }
 
-function segmentCovers(ours: Segment, theirs: Segment): boolean {
-  if (ours === "*") return true;
-  if (theirs === "*") return false;
+/** Whether path `ours` is a prefix of `theirs`, step by step. */
+function reaches(
+  ours: readonly Segment[],
+  theirs: readonly Segment[],
+): boolean {
   return (
-    ours.name === theirs.name &&
-    (ours.id === undefined || ours.id === theirs.id)
+    ours.length <= theirs.length &&
+    ours.every(
+      (step, at) =>
+        step.name === theirs[at]!.name &&
+        (step.id === undefined || step.id === theirs[at]!.id),
+    )
   );
 }
 
-function pathCovers(
-  ours: readonly Segment[],
-  theirs: readonly Segment[],
-  at: number,
-  their: number,
-): boolean {
-  if (at === ours.length && their === theirs.length) return true;
-  if (at === ours.length - 1 && ours[at] === "*") return true;
-  if (at === ours.length || their === theirs.length) return false;
-  return (
-    segmentCovers(ours[at]!, theirs[their]!) &&
-    pathCovers(ours, theirs, at + 1, their + 1)
-  );
+/** Whether `held` triggers `source`'s dependencies: it covers `source`, its ids ignored. */
+function triggers(held: Scope, source: Scope): boolean {
+  const names = held.path.map((step) => ({ name: step.name }));
+  return reaches(names, source.path);
 }
 
 function sameSegment(a: Segment, b: Segment): boolean {
@@ -275,7 +303,7 @@ function sharedPrefix(group: Scope[]): number {
   let shared = 0;
   while (shared < shortest - 1) {
     const step = first[shared]!;
-    if (step === "*" || step.id !== undefined) break;
+    if (step.id !== undefined) break;
     if (!group.every((scope) => sameSegment(scope.path[shared]!, step))) break;
     shared++;
   }
@@ -293,9 +321,8 @@ function compareText(a: string, b: string): number {
   return x.length - y.length;
 }
 
-/** Rust's derived `Ord` of `Segment`: a name (by name, then id, none first) before `*`. */
+/** Rust's derived `Ord` of `Segment`: by name, then id (none first). */
 function compareSegment(a: Segment, b: Segment): number {
-  if (a === "*" || b === "*") return (a === "*" ? 1 : 0) - (b === "*" ? 1 : 0);
   const names = compareText(a.name, b.name);
   if (names !== 0) return names;
   if (a.id === undefined || b.id === undefined)
@@ -303,16 +330,14 @@ function compareSegment(a: Segment, b: Segment): number {
   return compareText(a.id, b.id);
 }
 
-/** Rust's derived `Ord` of `Scope`: its path, then its action (a name before `*`). */
+/** Rust's derived `Ord` of `Scope`: its path, then full before read. */
 function compareScope(a: Scope, b: Scope): number {
   for (let at = 0; at < Math.min(a.path.length, b.path.length); at++) {
     const diff = compareSegment(a.path[at]!, b.path[at]!);
     if (diff !== 0) return diff;
   }
   if (a.path.length !== b.path.length) return a.path.length - b.path.length;
-  if (a.action === "*" || b.action === "*")
-    return (a.action === "*" ? 1 : 0) - (b.action === "*" ? 1 : 0);
-  return compareText(a.action, b.action);
+  return Number(a.read) - Number(b.read);
 }
 
 /** The scopes a packed claim holds: each prefix and its scopes joined by `.`. */

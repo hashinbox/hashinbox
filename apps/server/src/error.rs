@@ -286,14 +286,14 @@ mod tests {
         );
         let full = Error::permission_denied("no")
             .reason(reason::MISSING_SCOPE)
-            .with("scope", "com.hashinbox.wallets.$read");
+            .with("scope", "com.hashinbox.wallets:read");
         assert_eq!(
             serde_json::to_value(full).unwrap(),
             json!({
                 "kind": "permission_denied",
                 "message": "no",
                 "reason": "missing_scope",
-                "metadata": {"scope": "com.hashinbox.wallets.$read"},
+                "metadata": {"scope": "com.hashinbox.wallets:read"},
             })
         );
     }
@@ -338,11 +338,11 @@ mod tests {
 
     #[test]
     fn a_denied_scope_is_permission_denied_with_missing_scope_and_the_scope() {
-        let needed: scope::Scope = "com.hashinbox.wallets.$read".parse().unwrap();
+        let needed: scope::Scope = "com.hashinbox.wallets:read".parse().unwrap();
         let error = Error::from(scope::Denied::new(needed));
         assert_eq!(error.kind, Kind::PermissionDenied);
         assert_eq!(error.reason, Some(reason::MISSING_SCOPE));
-        assert_eq!(error.metadata["scope"], "com.hashinbox.wallets.$read");
+        assert_eq!(error.metadata["scope"], "com.hashinbox.wallets:read");
     }
 
     #[tokio::test]

@@ -124,7 +124,11 @@ async fn send(
     Path(path): Path<WalletPath>,
     request: Result<Json<SendRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<SendResponse>), Error> {
-    scope::require!(caller, "com.hashinbox.wallets[{id}].$write", id = path.id);
+    scope::require!(
+        caller,
+        "com.hashinbox.wallets[{id}].transactions",
+        id = path.id
+    );
     let Json(request) = request?;
     let id = WalletId::parse(&path.id)?;
     let transfer = Transfer {

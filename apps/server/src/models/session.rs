@@ -292,7 +292,7 @@ mod tests {
         let session = Session::new(
             client.clone(),
             None,
-            scopes("com.hashinbox.wallets.$read"),
+            scopes("com.hashinbox.wallets:read"),
             1000,
             60,
         );
@@ -389,7 +389,7 @@ mod tests {
         let user = session(
             Client::User("0193a".to_owned()),
             Some("0193a"),
-            "com.hashinbox.*.$* 123.a.$read",
+            "com.hashinbox 123.a:read",
             3600,
             Some("0193b"),
             vec![Amr::Pwd, Amr::Otp],
@@ -398,11 +398,11 @@ mod tests {
             "id": id,
             "secret": secret,
             "sessions": [
-                key(None, "com.hashinbox.wallets[ethereum.mainnet.0xabc].$read", 900),
+                key(None, "com.hashinbox.wallets[ethereum.mainnet.0xabc]:read", 900),
                 key(
                     Some("customer-1"),
-                    "com.hashinbox.wallets[a,b%5D%20c%25d].$read com.hashinbox.markets.$read \
-                     com.hashinbox.wallets[é].legs.$read other.thing.$write 123.a.$read",
+                    "com.hashinbox.wallets[a,b%5D%20c%25d]:read com.hashinbox.triggers \
+                     com.hashinbox.wallets[é].tags:read other.thing 123.a:read",
                     MAX_TTL,
                 ),
                 key(Some("\"quoted\" \\ ü"), "", 60),

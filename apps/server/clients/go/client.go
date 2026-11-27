@@ -74,8 +74,6 @@ type RawEvent struct {
 }
 
 // The reasons an error answers with, as errors.Is targets of an *APIError.
-// ErrMissingScope is also what HTTPClient returns, without calling, when
-// its session cannot cover a call.
 var (
 	ErrMissingScope     = errors.New("hashinbox: missing scope")
 	ErrTOTPRequired     = errors.New("hashinbox: two-factor code required")
@@ -83,15 +81,82 @@ var (
 	ErrSessionExpired   = errors.New("hashinbox: session expired")
 )
 
-// APIError is a non-2xx answer: its status, the API's error body decoded
-// (empty when the body is not one), and the body as sent.
+// The reasons an error answers with: what a client acts on, as
+// APIError.Reason.
+const (
+	ReasonWrongCredentials = "wrong_credentials"
+	ReasonTOTPRequired     = "totp_required"
+	ReasonSessionExpired   = "session_expired"
+	ReasonMissingScope     = "missing_scope"
+)
+
+// APIError is any failure as the API's error: its kind, message, reason,
+// metadata, and the answer's status (0 when none came). A plain value;
+// APIErrorFrom turns anything into one.
 type APIError struct {
 	Status   int
 	Kind     Kind
 	Message  string
 	Reason   string
 	Metadata map[string]string
-	Raw      []byte
+	Cause    error
+}
+
+// httpAnswer is a non-2xx answer, its body read: what APIErrorFrom parses.
+type httpAnswer struct {
+	status int
+	raw    []byte
+}
+
+// APIErrorFrom is x as an *APIError, never nil: the *APIError an error
+// wraps, as is; an answer in the API's error shape (a kind it knows, a
+// message) that error, with its status; any other answer (HTML, empty,
+// other JSON) unavailable, its status, its body's first 1024 characters as
+// Metadata["response"]; another error unavailable, its message, itself as
+// Cause; anything else (nil too) unavailable, fmt.Sprint's of it.
+func APIErrorFrom(x any) *APIError {
+	switch x := x.(type) {
+	case nil:
+		return &APIError{Kind: KindUnavailable}
+	case httpAnswer:
+		return x.apiError()
+	case error:
+		var api *APIError
+		if errors.As(x, &api) {
+			return api
+		}
+		return &APIError{Kind: KindUnavailable, Message: x.Error(), Cause: x}
+	}
+	return &APIError{Kind: KindUnavailable, Message: fmt.Sprint(x)}
+}
+
+// apiError is a's error: its body's, else unavailable with the body kept.
+func (a httpAnswer) apiError() *APIError {
+	var body struct {
+		Kind     Kind              `json:"kind"`
+		Message  *string           `json:"message"`
+		Reason   *string           `json:"reason"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if json.Unmarshal(a.raw, &body) != nil || !body.Kind.known() || body.Message == nil {
+		text := []rune(string(a.raw))
+		return &APIError{
+			Status:   a.status,
+			Kind:     KindUnavailable,
+			Message:  fmt.Sprintf("could not parse the response (HTTP %d)", a.status),
+			Metadata: map[string]string{"response": string(text[:min(len(text), 1024)])},
+		}
+	}
+	e := &APIError{Status: a.status, Kind: body.Kind, Message: *body.Message, Metadata: body.Metadata}
+	if body.Reason != nil {
+		e.Reason = *body.Reason
+	}
+	return e
+}
+
+// Unwrap is its Cause.
+func (e *APIError) Unwrap() error {
+	return e.Cause
 }
 
 // Error is its status, kind, reason and message.
@@ -113,28 +178,37 @@ func (e *APIError) Error() string {
 func (e *APIError) Is(target error) bool {
 	switch target {
 	case ErrMissingScope:
-		return e.Reason == "missing_scope"
+		return e.Reason == ReasonMissingScope
 	case ErrTOTPRequired:
-		return e.Reason == "totp_required"
+		return e.Reason == ReasonTOTPRequired
 	case ErrWrongCredentials:
-		return e.Reason == "wrong_credentials"
+		return e.Reason == ReasonWrongCredentials
 	case ErrSessionExpired:
-		return e.Reason == "session_expired"
+		return e.Reason == ReasonSessionExpired
 	}
 	return false
 }
 
-// newAPIError is the error of status with raw as its body.
-func newAPIError(status int, raw []byte) *APIError {
-	e := &APIError{Status: status, Raw: raw}
-	var body Error
-	if json.Unmarshal(raw, &body) == nil {
-		e.Kind, e.Message, e.Metadata = body.Kind, body.Message, body.Metadata
-		if body.Reason != nil {
-			e.Reason = *body.Reason
-		}
+// missingScope is the server's 403 for a call operation lacking scope,
+// refused here, unsent.
+func missingScope(operation, scope string) *APIError {
+	return &APIError{
+		Status:   http.StatusForbidden,
+		Kind:     KindPermissionDenied,
+		Message:  operation + " needs scope " + scope,
+		Reason:   ReasonMissingScope,
+		Metadata: map[string]string{"scope": scope, "operation": operation},
 	}
-	return e
+}
+
+// known reports whether k is a Kind the API answers with.
+func (k Kind) known() bool {
+	switch k {
+	case KindInvalidArgument, KindFailedPrecondition, KindAlreadyExists, KindNotFound, KindUnauthenticated,
+		KindPermissionDenied, KindResourceExhausted, KindDeadlineExceeded, KindUnavailable, KindInternal:
+		return true
+	}
+	return false
 }
 
 // Path is request's path, each {name} its parameter, escaped.
@@ -432,7 +506,7 @@ func (c *HTTPClient) attempt(ctx context.Context, session *Session, request Requ
 	op := request.Operation()
 	if c.check && session != nil {
 		if scope, ok := session.missing(op, request.Params()); !ok {
-			return nil, fmt.Errorf("%w: %s needs %s", ErrMissingScope, op.ID, scope)
+			return nil, missingScope(op.ID, scope)
 		}
 	}
 	target := c.base + Path(request)
@@ -478,7 +552,7 @@ func (c *HTTPClient) attempt(ctx context.Context, session *Session, request Requ
 	if err != nil {
 		return nil, err
 	}
-	return nil, newAPIError(answer.StatusCode, raw)
+	return nil, APIErrorFrom(httpAnswer{answer.StatusCode, raw})
 }
 
 // decode reads answer's body into response, then closes it. An empty body

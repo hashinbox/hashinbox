@@ -68,8 +68,8 @@ CREATE INDEX wallet_event_group ON wallet_event (wallet_group_id, at, id)
   tells it once).
 - **Visibility, one rule** (`WalletEvent::visible_to(scopes)`), used by lists, streams and the
   trigger's events term: an event is visible when the scopes cover
-  `wallets[{wallet_id}].events.$read`, or it has a group and they cover
-  `wallet_groups[{group}].$read`, or they cover `wallets.events.$read` (everything).
+  `wallets[{wallet_id}].events:read`, or it has a group and they cover
+  `wallet_groups[{group}]:read`, or they cover `wallets.events:read` (everything).
 
 ## The cursor: the last record's timestamp, with a tie-breaker
 
@@ -112,8 +112,8 @@ same event comes again; **dedupe by event `id`**. Order is total and the same on
 
 - Reply `{ events, next_cursor }`. `next_cursor` is the last listed event's cursor, null when
   none listed (keep yours); a page shorter than `limit` means caught up.
-- Scope: `com.hashinbox.wallets.events.$read` for everything (unnarrowed, 096 lists); with
-  `group`, `wallet_groups[{group}].$read` is enough. Model fns `wallet_event::db::find_page` and
+- Scope: `com.hashinbox.wallets.events:read` for everything (unnarrowed, 096 lists); with
+  `group`, `wallet_groups[{group}]:read` is enough. Model fns `wallet_event::db::find_page` and
   `find_by_group_page`.
 
 ## The 15 s rule: every SSE stream is a window
@@ -225,7 +225,7 @@ Other languages, the same loop and rules:
 | PHP | blocking: `$client->subscribe(new Subscribe(cursor: $c, group: $g), function (WalletEvent $event, callable $ack): void { …; $ack(); });` SSE windows, with the poll between windows when 30 s have passed. `$client->poll($cursor, $fn): string` pages once to caught up and returns the new cursor: for cron (WordPress) |
 
 - TS works in browsers, Node, Deno, Bun (fetch streams); a browser subscriber uses a narrow
-  token (`wallet_groups[g].$read`).
+  token (`wallet_groups[g]:read`).
 - Tests: a fake server per language: an unacked event comes again after the backoff; SSE and
   poll overlapping deliver once; `close()` waits for the callback; 410 is fatal; a
   `reconnect` re-opens from the acked cursor, not the last sent one.
@@ -275,8 +275,8 @@ is an event, so the server's `Check` gains one term:
 
 - `run`: one `webhook` job per run, its input the frozen body and the trigger id (never the
   secret); no job when nothing is kept.
-- **Scope:** creating or replacing a trigger needs `com.hashinbox.triggers.$write`. The
-  `wallets.$write` check moves from the route to `send` triggers only.
+- **Scope:** creating or replacing a trigger needs `com.hashinbox.triggers`. The
+  `wallets` check moves from the route to `send` triggers only.
 - Registered beside `send`: `Registry::new().add(Transfer).add(Webhook)`.
 
 ### The body: the run
@@ -414,7 +414,7 @@ app.post("/hooks/hashinbox", express.raw({ type: "application/json" }), async (r
 - `GET /v1/events?group=` lists the members' events and `paid`; `kinds` filters.
 - Subscribe, per language: as listed above.
 - Trigger: `events` holds once per new event, never twice across rounds; a group's `paid` fires
-  only the trigger of its `data.network`; a webhook trigger without `wallets.$write` is created;
+  only the trigger of its `data.network`; a webhook trigger without `wallets` is created;
   `send` still needs it; the secret reads back redacted.
 - Delivery against a loopback receiver: 2xx done; 500 retried by the queue; 20 failures fail;
   a slow receiver times out at 10 s; the runs page shows status and reason.
@@ -440,12 +440,12 @@ app.post("/hooks/hashinbox", express.raw({ type: "application/json" }), async (r
 - **Readable secrets** (`whs/` in the trigger row, like `his/`): a database leak lets someone
   forge deliveries. Replace the secret after a leak.
 - **Clock skew** on the receiver beyond 300 s refuses every delivery: keep NTP.
-- **Webhook bodies carry wallet data** to a URL anyone with `triggers.$write` chose, and sit in
-  job inputs (`jobs.$read`).
+- **Webhook bodies carry wallet data** to a URL anyone with `triggers` chose, and sit in
+  job inputs (`jobs:read`).
 
 ## Open questions
 
-1. **Webhook scope:** `triggers.$write` alone (decided), or also `wallets.events.$read`, since a
+1. **Webhook scope:** `triggers` alone (decided), or also `wallets.events:read`, since a
    body ships wallet balances and events?
 2. **Group events in triggers:** told on one network through `data.network` (proposed), or
    network-less triggers for group events?
@@ -456,7 +456,7 @@ app.post("/hooks/hashinbox", express.raw({ type: "application/json" }), async (r
    https and loopback only (proposed)?
 6. **Secret rotation:** replace in one step (proposed), or keep a previous secret signing for
    24 h (two `v1=`)?
-7. **`/v1/events` and group events:** is `wallets.events.$read` the right scope for `paid` and
-   `expired` (proposed), or should they need `wallet_groups.$read`?
+7. **`/v1/events` and group events:** is `wallets.events:read` the right scope for `paid` and
+   `expired` (proposed), or should they need `wallet_groups:read`?
 8. **Window length:** 15 s for every stream (decided); a per-route override for the logs
    dashboard if the gaps show?

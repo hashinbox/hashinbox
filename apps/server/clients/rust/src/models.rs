@@ -193,7 +193,7 @@ pub struct CreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
     /// Fewer scopes than the issuer's, packed
-    /// (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+    /// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scopes: Option<BTreeMap<String, Vec<String>>>,
@@ -1709,7 +1709,7 @@ pub struct User {
     /// Its name, as shown.
     pub name: String,
     /// The widest scopes it may issue, packed in JSON
-    /// (`{"com.hashinbox": ["wallets.$read"]}`).
+    /// (`{"com.hashinbox": ["wallets:read"]}`).
     pub scopes: BTreeMap<String, Vec<String>>,
 }
 

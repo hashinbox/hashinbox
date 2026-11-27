@@ -6,22 +6,22 @@ import { api } from '@/api/client';
 import { Empty } from '@/_components/empty';
 import { Split } from '@/_components/split';
 import { When } from '@/_components/when';
-import type { Shell } from '@/layout';
 import { go, useSegments } from '@/route';
 import { Side, SideItem } from '@/_components/side';
 import { Market } from './_components/market';
+import { fail } from '@/store/app';
 
 const BEAT_MS = 10_000;
 
 /** The markets beside the one whose candles and logs are shown. */
-export function Markets({ shell }: { shell: Shell }) {
+export function Markets() {
   const [list, setList] = useState<MarketList | null>(null);
   // markets/{name}
   const [, selected] = useSegments();
 
   const refresh = useCallback(() => {
-    marketsList(api).then(setList).catch(shell.fail);
-  }, [shell.fail]);
+    marketsList(api).then(setList).catch(fail);
+  }, []);
 
   useEffect(() => {
     refresh();
@@ -69,13 +69,7 @@ export function Markets({ shell }: { shell: Shell }) {
       detail={
         <Box sx={{ px: { xs: 2, md: 4 }, py: { xs: 2.5, md: 3.5 }, minWidth: 0 }}>
           {current ? (
-            <Market
-              key={current.name}
-              shell={shell}
-              market={current}
-              tickers={tickers}
-              onChanged={refresh}
-            />
+            <Market key={current.name} market={current} tickers={tickers} onChanged={refresh} />
           ) : (
             <Empty icon={<ShowChart />} title="Markets">
               A market is a price source this server asks for quotes. Pick one to see its hourly

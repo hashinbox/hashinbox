@@ -23,6 +23,9 @@ pub struct Spec {
     pub operations: Vec<Operation>,
     /// The model most error bodies are: what an `ApiError` decodes.
     pub error: Option<String>,
+    /// `x-hashinbox-depends`: what holding a scope needs beyond its
+    /// subtree, source → targets; empty when the document has none.
+    pub depends: BTreeMap<String, Vec<String>>,
 }
 
 /// A named type.
@@ -290,6 +293,7 @@ impl Spec {
             models: resolver.models.into_values().collect(),
             operations,
             error,
+            depends: doc.depends.clone().unwrap_or_default(),
         })
     }
 
@@ -776,7 +780,7 @@ mod tests {
     #[test]
     fn refuses_holes_clashes_and_unsupported() {
         let paths = r#"{"/x":{"get":{"operationId":"read_x","responses":{"204":{"description":""}},
-            "security":[{"bearer":["a[{id}].$read"]}]}}}"#;
+            "security":[{"bearer":["a[{id}]:read"]}]}}}"#;
         assert_eq!(
             spec(paths, "{}").unwrap_err(),
             Error::Hole {
@@ -809,8 +813,8 @@ mod tests {
     #[test]
     fn splits_templates() {
         assert_eq!(
-            split("a[{id}].$read"),
-            [Piece::Text("a["), Piece::Hole("id"), Piece::Text("].$read")]
+            split("a[{id}]:read"),
+            [Piece::Text("a["), Piece::Hole("id"), Piece::Text("]:read")]
         );
     }
 }

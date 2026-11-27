@@ -5,7 +5,6 @@ import Typography from '@mui/material/Typography';
 import { useEffect, useMemo, useState } from 'react';
 import { openapi } from '@/api/client';
 import { Prose } from '@/_components/prose';
-import type { Shell } from '@/layout';
 import { mono } from '@/theme';
 import { go, segments } from '@/route';
 import { Operation } from './_components/operation';
@@ -13,6 +12,7 @@ import { Rail } from './_components/rail';
 import { groups, isDocument, type Document, type Group } from './_components/spec';
 import { Verb } from './_components/verb';
 import { Split } from '@/_components/split';
+import { notify } from '@/store/app';
 
 /** The operation named after `docs/` in the address, so a reload or a shared link lands on it. */
 function linked(): string | null {
@@ -21,7 +21,6 @@ function linked(): string | null {
 }
 
 interface Props {
-  shell: Shell;
   /**
    * Whether this server asks for a token. The document marks every `/v1`
    * route as bearer-protected, because a token is required whenever the
@@ -34,7 +33,7 @@ interface Props {
  * The API reference, rendered from the document the server itself serves at
  * `/openapi.json`: whatever this build of the server answers, this page shows.
  */
-export function Docs({ shell, secured }: Props) {
+export function Docs({ secured }: Props) {
   const [document, setDocument] = useState<Document | null>(null);
   const [failed, setFailed] = useState(false);
   const [selected, setSelected] = useState<string | null>(linked);
@@ -103,7 +102,7 @@ export function Docs({ shell, secured }: Props) {
               document={document}
               endpoint={endpoint}
               secured={secured}
-              onNotify={shell.notify}
+              onNotify={notify}
             />
           ) : (
             <Overview document={document} groups={all} secured={secured} onSelect={select} />

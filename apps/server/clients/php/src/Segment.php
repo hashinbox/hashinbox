@@ -7,8 +7,8 @@ namespace Hashinbox;
 use Stringable;
 
 /**
- * Hand-written: one step of a scope's path: a resource (`wallets`), narrowed to
- * one id (`wallets[a]`), or `*` (name `Scope::ANY`, no id).
+ * Hand-written: one step of a scope's path: a resource, all of it
+ * (`wallets`), or only the one named (`wallets[a]`).
  */
 final readonly class Segment implements Stringable
 {
@@ -19,9 +19,6 @@ final readonly class Segment implements Stringable
      */
     public static function parse(string $text): self
     {
-        if ($text === Scope::ANY) {
-            return new self(Scope::ANY);
-        }
         $open = strpos($text, '[');
         if ($open === false) {
             return self::isName($text) ? new self($text) : throw new ScopeError("`{$text}` is not a name");
@@ -46,26 +43,19 @@ final readonly class Segment implements Stringable
         return preg_match('/^[A-Za-z0-9_-]+$/D', $text) === 1;
     }
 
+    /**
+     * Whether it covers `$other`: the same name, and no id or the same.
+     */
     public function covers(self $other): bool
     {
-        if ($this->name === Scope::ANY) {
-            return true;
-        }
-        if ($other->name === Scope::ANY) {
-            return false;
-        }
         return $this->name === $other->name && ($this->id === null || $this->id === $other->id);
     }
 
     /**
-     * Rust's order: a name (no id before an id, each by bytes) before `*`.
+     * Rust's order: by name, then no id before an id, each by bytes.
      */
     public static function compare(self $a, self $b): int
     {
-        $any = ($a->name === Scope::ANY) <=> ($b->name === Scope::ANY);
-        if ($any !== 0 || $a->name === Scope::ANY) {
-            return $any;
-        }
         $name = strcmp($a->name, $b->name) <=> 0;
         if ($name !== 0 || $a->id === $b->id) {
             return $name;

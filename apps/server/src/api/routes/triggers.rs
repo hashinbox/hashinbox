@@ -73,7 +73,7 @@ async fn list(
     State(state): State<Arc<AppState>>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.triggers.$read");
+    scope::require!(session, "com.hashinbox.triggers:read");
     let Query(index) = index?;
     let page = index.page("triggers", |cursor| Some(cursor.to_owned()))?;
     let limit = page.limit;
@@ -170,10 +170,7 @@ async fn create(
     State(state): State<Arc<AppState>>,
     request: Result<Json<BatchRequest>, JsonRejection>,
 ) -> Result<(StatusCode, Json<CreateResponse>), Error> {
-    scope::require!(caller, "com.hashinbox.triggers.$write");
-    // Its `send` moves funds from whichever wallets its selector picks when
-    // it runs (by tag or asset), so it needs every wallet.
-    scope::require!(caller, "com.hashinbox.wallets.$write");
+    scope::require!(caller, "com.hashinbox.triggers");
     let Json(request) = request?;
     let definitions = request.triggers.into_iter().map(Into::into).collect();
     let (container, db, actions) = (&state.container, &state.db, &state.actions);
@@ -209,7 +206,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<Json<Trigger>, Error> {
-    scope::require!(session, "com.hashinbox.triggers.$read");
+    scope::require!(session, "com.hashinbox.triggers:read");
     Ok(Json(triggers::read(&state.db, path.id).await?))
 }
 
@@ -240,10 +237,7 @@ async fn replace(
     Path(path): Path<TriggerPath>,
     request: Result<Json<Definition>, JsonRejection>,
 ) -> Result<Json<Trigger>, Error> {
-    scope::require!(caller, "com.hashinbox.triggers.$write");
-    // Its `send` moves funds from whichever wallets its selector picks when
-    // it runs (by tag or asset), so it needs every wallet.
-    scope::require!(caller, "com.hashinbox.wallets.$write");
+    scope::require!(caller, "com.hashinbox.triggers");
     let Json(definition) = request?;
     let (container, db, actions) = (&state.container, &state.db, &state.actions);
     let trigger = triggers::replace(container, db, actions, path.id, definition.into());
@@ -270,7 +264,7 @@ async fn delete(
     State(state): State<Arc<AppState>>,
     Path(path): Path<TriggerPath>,
 ) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.triggers.$write");
+    scope::require!(caller, "com.hashinbox.triggers");
     triggers::delete(&state.db, path.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -336,7 +330,7 @@ async fn runs(
     Path(path): Path<TriggerPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<RunsResponse>, Error> {
-    scope::require!(session, "com.hashinbox.triggers.$read");
+    scope::require!(session, "com.hashinbox.triggers.runs:read");
     let Query(index) = index?;
     let page = index.page("runs", |cursor| cursor.parse().ok())?;
     let limit = page.limit;

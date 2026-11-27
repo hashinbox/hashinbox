@@ -62,7 +62,7 @@ async fn list(
     Path(path): Path<NetworkPath>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.networks.$read");
+    scope::require!(session, "com.hashinbox.networks:read");
     let Query(index) = index?;
     let page = index.page("blocks", |cursor| cursor.parse().ok())?;
     let limit = page.limit;
@@ -116,7 +116,7 @@ async fn read(
     State(state): State<Arc<AppState>>,
     Path(path): Path<BlockPath>,
 ) -> Result<Json<Block>, Error> {
-    scope::require!(session, "com.hashinbox.networks.$read");
+    scope::require!(session, "com.hashinbox.networks:read");
     let (network, position) = path.at()?;
     Ok(Json(networks::block(&state.db, network, position).await?))
 }

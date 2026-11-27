@@ -12,7 +12,7 @@ import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useEffect, useRef, useState, type SubmitEvent } from 'react';
 import { networksList, networkTipSearch, type EventStream, type RawEvent } from '@hashinbox/client';
-import { api } from '@/api/client';
+import { ApiError, api } from '@/api/client';
 import { mono } from '@/theme';
 
 /** A produced block: its native position and Unix seconds. */
@@ -94,8 +94,7 @@ export function SearchDialog({
     };
     read()
       .catch((failure: unknown) => {
-        if (searching.current === stream)
-          setError(failure instanceof Error ? failure.message : String(failure));
+        if (searching.current === stream) setError(ApiError.from(failure).message);
       })
       .finally(() => {
         if (searching.current === stream) setBusy(false);

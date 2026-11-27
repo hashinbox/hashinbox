@@ -5,29 +5,28 @@ import ListItemButton from '@mui/material/ListItemButton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { useState } from 'react';
-import type { Shell } from '@/layout';
 import { TEMPLATES, blank, type Definition } from './forms';
 import { NetworkSelect } from '@/_components/network-select';
 import { networkChoices } from '@/money';
+import { useApp } from '@/store/app';
 
 /** How new triggers start: blank, or from a template, on one network. */
 export function Start({
-  shell,
   open,
   onClose,
   onStart,
 }: {
-  shell: Shell;
   open: boolean;
   onClose: () => void;
   onStart: (title: string, drafts: Definition[]) => void;
 }) {
-  const networks = [...new Set(shell.listings.map((l) => `${l.network.chain}/${l.network.name}`))];
+  const listings = useApp((s) => s.listings);
+  const networks = [...new Set(listings.map((l) => `${l.network.chain}/${l.network.name}`))];
   const [network, setNetwork] = useState('');
   const chosen = network || (networks[0] ?? '');
   const [chain = '', name = ''] = chosen.split('/');
   const token =
-    shell.listings.find(
+    listings.find(
       (l) => l.network.chain === chain && l.network.name === name && l.asset !== 'native',
     )?.asset ?? '';
 
@@ -56,7 +55,7 @@ export function Start({
       <DialogContent>
         <NetworkSelect
           value={chosen}
-          networks={networkChoices(shell.listings)}
+          networks={networkChoices(listings)}
           onChange={setNetwork}
           sx={{ mt: 1, mb: 2, width: '100%' }}
         />

@@ -33,7 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wallet = wallets_create(&client, WalletsCreateRequest { body }).await?;
     println!("wallet: {}", wallet.id);
 
-    let scope = format!("com.hashinbox.wallets[{}].$read", escape_id(&wallet.id));
+    let scope = format!("com.hashinbox.wallets[{}]:read", escape_id(&wallet.id));
     let token = secret.issue(
         Issue::new()
             .scope(&scope)?

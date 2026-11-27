@@ -3,7 +3,7 @@ name = "scope"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-description = "Access scopes as text (`com.hashinbox.wallets[id].$read`): parsing, coverage, narrowing checks, compression, expansion against a declared schema, and macros to build scopes and deny requests."
+description = "Access scopes as text (`com.hashinbox.wallets[id]:read`): parsing, subtree coverage, narrowing checks, compression, dependency expansion, a declared schema, and macros to deny requests."
 
 [dependencies]
 scope-macros = { path = "macro" }

@@ -83,57 +83,140 @@ export interface Backoff {
   max: number;
 }
 
+/** The reasons an `ApiError` names, as the server's `error::reason`: what a client acts on. */
+export const Reason = {
+  /** A login's email, password or code is wrong (401). */
+  WrongCredentials: "wrong_credentials",
+  /** The password was right; the two-factor code is needed (401). */
+  TotpRequired: "totp_required",
+  /** The session is no longer accepted: log in again (401). */
+  SessionExpired: "session_expired",
+  /** A scope is missing; metadata `scope` names it (403). */
+  MissingScope: "missing_scope",
+} as const;
+export type Reason = (typeof Reason)[keyof typeof Reason];
+
+/** Every `Kind`, to check an answer's. */
+const KINDS: Record<models.Kind, true> = {
+  invalid_argument: true,
+  failed_precondition: true,
+  already_exists: true,
+  not_found: true,
+  unauthenticated: true,
+  permission_denied: true,
+  resource_exhausted: true,
+  deadline_exceeded: true,
+  unavailable: true,
+  internal: true,
+};
+
+/** How much of an answer's text an `ApiError` keeps. */
+const KEPT = 1024;
+
+/** `body` when it is the API's error (`Error`): a known kind, a message. */
+function errorOf(body: unknown): models.Error | undefined {
+  if (typeof body !== "object" || body === null) return undefined;
+  const error = body as Partial<Record<keyof models.Error, unknown>>;
+  if (typeof error.kind !== "string" || !Object.hasOwn(KINDS, error.kind))
+    return undefined;
+  if (typeof error.message !== "string") return undefined;
+  if (error.reason !== undefined && typeof error.reason !== "string")
+    return undefined;
+  return body as models.Error;
+}
+
+/** A non-2xx answer, its body read: what `ApiError.from` parses. */
+class Answer {
+  readonly status: number;
+  readonly text: string;
+
+  constructor(status: number, text: string) {
+    this.status = status;
+    this.text = text;
+  }
+}
+
+/** An `ApiError`'s fields: `kind` `unavailable`, `status` 0, `metadata` empty unless set. */
+export interface ApiErrorInit {
+  kind?: models.Kind;
+  message: string;
+  /** What a client acts on: one of `Reason`. */
+  reason?: string;
+  metadata?: Record<string, string>;
+  /** The answer's status; 0 when none came. */
+  status?: number;
+  cause?: unknown;
+}
+
 /**
- * A non-2xx answer: its status, the API error body's fields (`kind`,
- * `message`, `reason`, `metadata`), and the body as sent (`text`, `body`
- * when JSON: another model, as `health_get`'s 503 `Report`).
+ * Any failure as one error, the API's: `kind`, `message`, `reason`,
+ * `metadata`, and the answer's `status` (0 when none came). A plain value;
+ * `from` turns anything into one.
  */
 export class ApiError extends Error {
   readonly status: number;
-  readonly kind: models.Kind | undefined;
-  /** What a client acts on: `wrong_credentials`, `totp_required`, `session_expired`, `missing_scope`. */
+  readonly kind: models.Kind;
+  /** What a client acts on: one of `Reason`. */
   readonly reason: string | undefined;
   readonly metadata: Record<string, string>;
-  readonly text: string;
-  readonly body: unknown;
 
-  constructor(status: number, text: string) {
+  constructor({
+    kind = "unavailable",
+    message,
+    reason,
+    metadata = {},
+    status = 0,
+    cause,
+  }: ApiErrorInit) {
+    super(message, cause === undefined ? undefined : { cause });
+    this.name = "ApiError";
+    this.status = status;
+    this.kind = kind;
+    this.reason = reason;
+    this.metadata = metadata;
+  }
+
+  /**
+   * `error` as an `ApiError`: itself when it is one; an answer in the API's
+   * error shape that error, with its status; any other answer (an HTML 502
+   * from a proxy, an empty body, other JSON, as `health_get`'s 503
+   * `Report`) `unavailable`, its status, its text's first 1024 characters
+   * as `metadata.response`; anything thrown (a network error, a timeout,
+   * an abort, anything else) `unavailable`, its message, `error` as `cause`.
+   */
+  static from(error: unknown): ApiError {
+    if (error instanceof ApiError) return error;
+    if (!(error instanceof Answer))
+      return new ApiError({
+        message: error instanceof Error ? error.message : String(error),
+        cause: error,
+      });
+    const { status, text } = error;
     let body: unknown;
     try {
       body = JSON.parse(text);
     } catch {
       body = undefined;
     }
-    const error = (
-      typeof body === "object" && body ? body : {}
-    ) as Partial<models.Error>;
-    super(typeof error.message === "string" ? error.message : `HTTP ${status}`);
-    this.name = "ApiError";
-    this.status = status;
-    this.kind = error.kind;
-    this.reason = error.reason;
-    this.metadata = error.metadata ?? {};
-    this.text = text;
-    this.body = body;
-  }
-
-  /** `response`'s error, its body read. */
-  static async read(response: Response): Promise<ApiError> {
-    return new ApiError(response.status, await response.text());
+    const parsed = errorOf(body);
+    if (parsed) return new ApiError({ ...parsed, status });
+    return new ApiError({
+      message: `could not parse the response (HTTP ${status})`,
+      metadata: { response: text.slice(0, KEPT) },
+      status,
+    });
   }
 }
 
-/** A call the session cannot make: refused here, before it is sent. */
-export class MissingScope extends Error {
-  readonly operation: string;
-  readonly scope: string;
-
-  constructor(operation: string, scope: string) {
-    super(`${operation} needs scope ${scope}`);
-    this.name = "MissingScope";
-    this.operation = operation;
-    this.scope = scope;
-  }
+/** The server's 403 for a call `operation` lacking `scope`, refused here, unsent. */
+function missingScope(operation: string, scope: string): ApiError {
+  return new ApiError({
+    kind: "permission_denied",
+    message: `${operation} needs scope ${scope}`,
+    reason: Reason.MissingScope,
+    metadata: { scope, operation },
+    status: 403,
+  });
 }
 
 /** `operation`'s path for `request`, each `{name}` its field, URI-encoded. */
@@ -199,7 +282,6 @@ function typedEvent<E>(operation: Operation, event: RawEvent): E | undefined {
 
 /** Whether a failed connect is tried again: a network error, a 5xx or a 429. */
 function retried(error: unknown): boolean {
-  if (error instanceof MissingScope) return false;
   if (!(error instanceof ApiError)) return true;
   return error.status >= 500 || error.status === 429;
 }
@@ -302,7 +384,10 @@ class Reconnecting<E> implements EventStream<E> {
 }
 
 /** The 401 reasons that mean wrong input, not a lost session. */
-const WRONG_INPUT = ["wrong_credentials", "totp_required"];
+const WRONG_INPUT: readonly string[] = [
+  Reason.WrongCredentials,
+  Reason.TotpRequired,
+];
 
 /** How long before its `exp` a self-signed session is replaced, seconds. */
 const REFRESH = 60;
@@ -329,7 +414,7 @@ export interface ClientOptions {
   onSession?: (session: Session | undefined) => void;
   /** Called when the server refuses the session sent (a 401 other than wrong input). */
   onUnauthorized?: (error: ApiError) => void;
-  /** Refuse locally (`MissingScope`) a call the session's scopes do not cover. */
+  /** Refuse locally (the server's `missing_scope` `ApiError`, unsent) a call the session's scopes do not cover. */
   checkScopes?: boolean;
 }
 
@@ -503,7 +588,7 @@ export class HashinboxClient implements Client, Streamer {
               (scope) => !session.scopes.covers(scope),
             )
           : undefined;
-      if (missing !== undefined) throw new MissingScope(operation.id, missing);
+      if (missing !== undefined) throw missingScope(operation.id, missing);
       const sent = await this.#fetch(
         operation,
         request,
@@ -512,9 +597,10 @@ export class HashinboxClient implements Client, Streamer {
         session,
       );
       if (sent.response.ok) return sent;
-      const error = await ApiError.read(sent.response).finally(sent.done);
+      const text = await sent.response.text().finally(sent.done);
+      const error = ApiError.from(new Answer(sent.response.status, text));
       const expired =
-        error.status === 401 && error.reason === "session_expired";
+        error.status === 401 && error.reason === Reason.SessionExpired;
       if (expired && this.#secret && attempt === 0) {
         this.#session = undefined;
         continue;
@@ -591,7 +677,7 @@ export class HashinboxClient implements Client, Streamer {
         probe,
       );
       const text = await response.text().finally(done);
-      if (!response.ok) throw new ApiError(response.status, text);
+      if (!response.ok) throw ApiError.from(new Answer(response.status, text));
       const read = JSON.parse(text) as models.SessionRead;
       this.#scopes = Scopes.parse(read.key?.scopes ?? {});
     }

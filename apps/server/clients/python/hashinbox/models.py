@@ -333,7 +333,7 @@ class CreateSessionRequest:
     # A login: the user's password; or `passphrase`, not both.
     password: str | None = None
     # Fewer scopes than the issuer's, packed
-    # (`{"com.hashinbox": ["wallets[x].$read"]}`); the issuer's when
+    # (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     # absent.
     scopes: dict[str, list[str]] | None = None
     # A key's session: who it is for (a customer); logged, grants
@@ -2920,7 +2920,7 @@ class User:
     # Its name, as shown.
     name: str
     # The widest scopes it may issue, packed in JSON
-    # (`{"com.hashinbox": ["wallets.$read"]}`).
+    # (`{"com.hashinbox": ["wallets:read"]}`).
     scopes: dict[str, list[str]]
 
     @classmethod

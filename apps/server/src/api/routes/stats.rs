@@ -103,7 +103,7 @@ async fn read(
     session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<StatsResponse>, Error> {
-    scope::require!(session, "com.hashinbox.stats.$read");
+    scope::require!(session, "com.hashinbox.stats:read");
     Ok(Json(stats::read(&state.db).await?.into()))
 }
 

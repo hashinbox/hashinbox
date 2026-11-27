@@ -139,7 +139,7 @@ impl Builder {
     }
 
     /// Whether a call its session lacks a scope for fails unsent
-    /// ([`CallError::MissingScope`]); on unless set.
+    /// (the server's 403 `missing_scope` [`CallError::Api`]); on unless set.
     #[must_use]
     pub fn check_scopes(mut self, check: bool) -> Self {
         self.check_scopes = check;
@@ -221,7 +221,7 @@ impl Client {
         let http = Http::of(&request);
         let response = self.read(&http, None).await.map_err(CallError::Transport)?;
         if !(200..300).contains(&response.status) {
-            return Err(CallError::api(response));
+            return Err(CallError::Api(response.into()));
         }
         let issued: IssuedSession =
             serde_json::from_str(&response.body).map_err(CallError::Decode)?;

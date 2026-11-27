@@ -22,6 +22,16 @@ use crate::models::Missed;
 use crate::models::Pet;
 use crate::models::PetList;
 
+/// What holding a scope needs beyond its subtree (`x-hashinbox-depends`):
+/// source → targets.
+pub const DEPENDS: &[(&str, &[&str])] = &[
+    (
+        "mini.owners.with.a.rather.long.name",
+        &["mini.pets.with.a.long.name:read", "mini.vets"],
+    ),
+    ("mini.pets", &["mini.owners:read"]),
+];
+
 /// `GET /v1/animals`.
 pub const ANIMALS_LIST: Operation = Operation {
     id: "animals_list",
@@ -58,7 +68,7 @@ pub const LOGS_STREAM: Operation = Operation {
     id: "logs_stream",
     method: Method::Get,
     path: "/v1/logs/stream",
-    templates: &["mini.logs.$read"],
+    templates: &["mini.logs:read"],
 };
 
 /// The input of [`logs_stream`].
@@ -117,7 +127,7 @@ pub const PET_DELETE: Operation = Operation {
     id: "pet_delete",
     method: Method::Delete,
     path: "/v1/pets/{id}",
-    templates: &["mini.pets[{id}].$write"],
+    templates: &["mini.pets[{id}]"],
 };
 
 /// The input of [`pet_delete`].
@@ -157,7 +167,7 @@ pub const PET_EVENTS_STREAM: Operation = Operation {
     id: "pet_events_stream",
     method: Method::Get,
     path: "/v1/pets/{id}/events",
-    templates: &["mini.pets[{id}].$read"],
+    templates: &["mini.pets[{id}]:read"],
 };
 
 /// The input of [`pet_events_stream`].
@@ -221,7 +231,7 @@ pub const PET_GET: Operation = Operation {
     id: "pet_get",
     method: Method::Get,
     path: "/v1/pets/{id}",
-    templates: &["mini.pets[{id}].$read"],
+    templates: &["mini.pets[{id}]:read"],
 };
 
 /// The input of [`pet_get`].
@@ -262,7 +272,7 @@ pub const PETS_CREATE: Operation = Operation {
     id: "pets_create",
     method: Method::Post,
     path: "/v1/pets",
-    templates: &["mini.pets.$write", "mini.owners.$read"],
+    templates: &["mini.pets", "mini.owners:read"],
 };
 
 /// The input of [`pets_create`].
@@ -299,7 +309,7 @@ pub const PETS_LIST: Operation = Operation {
     id: "pets_list",
     method: Method::Get,
     path: "/v1/pets",
-    templates: &["mini.pets.$read"],
+    templates: &["mini.pets:read"],
 };
 
 /// The input of [`pets_list`].

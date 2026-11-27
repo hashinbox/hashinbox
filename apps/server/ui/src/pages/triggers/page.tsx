@@ -6,7 +6,9 @@ import Tooltip from '@mui/material/Tooltip';
 import { useCallback, useEffect, useState } from 'react';
 import {
   tagsList,
+  tagsListOperation,
   triggerDelete,
+  triggersCreateOperation,
   triggersList,
   type Listing,
   type Trigger,
@@ -15,7 +17,6 @@ import {
 import { api } from '@/api/client';
 import { assetName } from '@/money';
 import { Empty } from '@/_components/empty';
-import type { Shell } from '@/layout';
 import { Confirm } from '@/_components/confirm';
 import { Editor } from './_components/editor';
 import { View } from './_components/view';
@@ -24,6 +25,8 @@ import { Start } from './_components/start';
 import type { Definition } from './_components/forms';
 import { Split } from '@/_components/split';
 import { Side, SideItem } from '@/_components/side';
+import { fail, notify, useApp } from '@/store/app';
+import { useCan } from '@/store/session';
 
 /** What the right side shows: a stored trigger read or edited, new ones being written, or nothing. */
 type Open =
@@ -58,37 +61,41 @@ function summary(trigger: Trigger, listings: Listing[]): string {
 }
 
 /** The triggers beside the one being edited. */
-export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }) {
+export function Triggers({ wallets }: { wallets: Wallet[] }) {
+  const listings = useApp((s) => s.listings);
   const [triggers, setTriggers] = useState<Trigger[]>([]);
   const [open, setOpen] = useState<Open>(null);
   const [choosing, setChoosing] = useState(false);
   const [tags, setTags] = useState<string[]>([]);
   // The trigger being deleted.
   const [deleting, setDeleting] = useState<Trigger | null>(null);
+  const creates = useCan(triggersCreateOperation);
+  const readsTags = useCan(tagsListOperation);
+
+  const refresh = useCallback(() => {
+    triggersList(api)
+      .then((list) => setTriggers(list.triggers))
+      .catch(fail);
+  }, []);
 
   const remove = (trigger: Trigger) => {
     setDeleting(null);
     triggerDelete(api, { id: trigger.id })
       .then(() => {
-        shell.notify('Trigger deleted.');
+        notify('Trigger deleted.');
         refresh();
         setOpen((now) => (now && !('compose' in now) && kept(now).id === trigger.id ? null : now));
       })
-      .catch(shell.fail);
+      .catch(fail);
   };
-
-  const refresh = useCallback(() => {
-    triggersList(api)
-      .then((list) => setTriggers(list.triggers))
-      .catch(shell.fail);
-  }, [shell.fail]);
 
   useEffect(refresh, [refresh]);
   useEffect(() => {
+    if (!readsTags) return;
     tagsList(api)
       .then((list) => setTags(list.tags))
-      .catch(shell.fail);
-  }, [shell.fail]);
+      .catch(fail);
+  }, [readsTags]);
 
   const selected = open && !('compose' in open) ? kept(open).id : null;
 
@@ -102,20 +109,24 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
           <Side
             title="Triggers"
             actions={
-              <Tooltip title="New trigger">
-                <IconButton
-                  size="small"
-                  aria-label="New trigger"
-                  onClick={(e) => {
-                    e.currentTarget.blur();
-                    setChoosing(true);
-                  }}
-                >
-                  <Add fontSize="small" />
-                </IconButton>
-              </Tooltip>
+              creates && (
+                <Tooltip title="New trigger">
+                  <IconButton
+                    size="small"
+                    aria-label="New trigger"
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      setChoosing(true);
+                    }}
+                  >
+                    <Add fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )
             }
-            empty={triggers.length === 0 && 'No triggers yet. Start with +.'}
+            empty={
+              triggers.length === 0 && (creates ? 'No triggers yet. Start with +.' : 'No triggers.')
+            }
           >
             {triggers.map((t) => (
               <SideItem
@@ -127,7 +138,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                 }}
                 selected={t.id === selected}
                 onClick={() => setOpen({ view: t })}
-                detail={`${t.chain}/${t.network} · ${summary(t, shell.listings)}`}
+                detail={`${t.chain}/${t.network} · ${summary(t, listings)}`}
               />
             ))}
           </Side>
@@ -138,7 +149,6 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
               'view' in open ? (
                 <View
                   key={open.view.id}
-                  shell={shell}
                   initial={open.view}
                   onEdit={() => setOpen({ edit: open.view })}
                   onDelete={() => setDeleting(open.view)}
@@ -147,7 +157,6 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
               ) : 'edit' in open ? (
                 <Editor
                   key={open.edit.id}
-                  shell={shell}
                   wallets={wallets}
                   tags={tags}
                   initial={definitionOf(open.edit)}
@@ -160,7 +169,6 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
               ) : (
                 <Compose
                   key={`${open.compose.title}:${String(open.compose.drafts.length)}`}
-                  shell={shell}
                   wallets={wallets}
                   tags={tags}
                   title={open.compose.title}
@@ -168,7 +176,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
                   onCancel={() => setOpen(null)}
                   onCreated={(created) => {
                     refresh();
-                    shell.notify(`Created ${created.map((t) => t.id).join(', ')}.`);
+                    notify(`Created ${created.map((t) => t.id).join(', ')}.`);
                     const first = created[0];
                     setOpen(first ? { view: first } : null);
                   }}
@@ -178,7 +186,7 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
               <Empty icon={<Bolt />} title="Triggers">
                 A trigger watches wallets and sends money on its own when a rule is met, like a
                 balance going over a limit. Pick one to see what it does and how its rounds went;
-                edit or delete it there. Add new ones with +.
+                edit or delete it there.
               </Empty>
             )}
           </Box>
@@ -195,7 +203,6 @@ export function Triggers({ shell, wallets }: { shell: Shell; wallets: Wallet[] }
         Deletes the trigger and its run history. Sends already queued still go out.
       </Confirm>
       <Start
-        shell={shell}
         open={choosing}
         onClose={() => setChoosing(false)}
         onStart={(title, drafts) => {

@@ -1,7 +1,7 @@
 //! `/v1/recovery`: the recovery passphrase (design 096), optional, 12
 //! BIP39 words the root creates, replaces or removes; shown once. They sign
 //! in as any user (`POST /v1/session` with `passphrase`), two-factor still
-//! asked. Every route needs `recovery.$write`, reading it too: only the
+//! asked. Every route needs `recovery`, reading it too: only the
 //! root holds it.
 
 use std::sync::Arc;
@@ -32,7 +32,7 @@ struct ReadResponse {
     operation_id = "recovery_get",
     summary = "Read whether the recovery passphrase is set",
     description = "Whether a passphrase is set and when it was created; never its words or \
-        hash. Needs `recovery.$write`, as the other recovery routes do.",
+        hash. Needs `recovery`, as the other recovery routes do.",
     responses(
         (status = 200, description = "Set or not", body = ReadResponse),
         (status = 401, description = "Missing or invalid bearer token", body = Error),
@@ -45,7 +45,7 @@ async fn read(
     caller: Caller,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ReadResponse>, Error> {
-    scope::require!(caller, "com.hashinbox.recovery.$write");
+    scope::require!(caller, "com.hashinbox.recovery");
     let created_at = recovery::set_at(&state.db).await?;
     let set = created_at.is_some();
     Ok(Json(ReadResponse { set, created_at }))
@@ -81,7 +81,7 @@ async fn create(
     caller: Caller,
     State(state): State<Arc<AppState>>,
 ) -> Result<(StatusCode, Json<CreateResponse>), Error> {
-    scope::require!(caller, "com.hashinbox.recovery.$write");
+    scope::require!(caller, "com.hashinbox.recovery");
     let mnemonic = recovery::create(&state.db, &caller.user.id).await?;
     let passphrase = mnemonic.to_string();
     Ok((StatusCode::CREATED, Json(CreateResponse { passphrase })))
@@ -103,7 +103,7 @@ async fn create(
     tag = "auth"
 )]
 async fn remove(caller: Caller, State(state): State<Arc<AppState>>) -> Result<StatusCode, Error> {
-    scope::require!(caller, "com.hashinbox.recovery.$write");
+    scope::require!(caller, "com.hashinbox.recovery");
     recovery::remove(&state.db, &caller.user.id).await?;
     Ok(StatusCode::NO_CONTENT)
 }

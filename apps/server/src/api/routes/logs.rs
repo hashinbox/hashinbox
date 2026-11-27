@@ -160,7 +160,7 @@ async fn list(
     query: Result<Query<LogQuery>, QueryRejection>,
     index: Result<Query<IndexParams>, QueryRejection>,
 ) -> Result<Json<ListResponse>, Error> {
-    scope::require!(session, "com.hashinbox.logs.$read");
+    scope::require!(session, "com.hashinbox.logs:read");
     let Query(query) = query?;
     let (filter, page) = (query.filter()?, page(index)?);
     let limit = page.limit;
@@ -196,7 +196,7 @@ async fn list_targets(
     session: Session,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<TargetsResponse>, Error> {
-    scope::require!(session, "com.hashinbox.logs.$read");
+    scope::require!(session, "com.hashinbox.logs:read");
     let targets = logs::targets(&state.db).await?;
     Ok(Json(TargetsResponse { targets }))
 }
@@ -229,7 +229,7 @@ struct MessagesResponse {
     tag = "logs"
 )]
 async fn list_messages(session: Session) -> Result<impl IntoResponse, Error> {
-    scope::require!(session, "com.hashinbox.logs.$read");
+    scope::require!(session, "com.hashinbox.logs:read");
     let messages = MessagesResponse {
         messages: events::MESSAGES.clone(),
     };
@@ -282,7 +282,7 @@ async fn stream(
     query: Result<Query<LogQuery>, QueryRejection>,
     resume: Result<Query<ResumeQuery>, QueryRejection>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, Error> {
-    scope::require!(session, "com.hashinbox.logs.$read");
+    scope::require!(session, "com.hashinbox.logs:read");
     let (Query(query), Query(resume)) = (query?, resume?);
     let filter = query.filter()?;
     let after = resume

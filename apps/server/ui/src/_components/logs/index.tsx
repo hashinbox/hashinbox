@@ -5,7 +5,6 @@ import TableBody from '@mui/material/TableBody';
 import TableContainer from '@mui/material/TableContainer';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Shell } from '@/layout';
 import { EmptyRow } from '@/_components/table';
 import { useEntries, type LogSource } from './entries';
 import { queryOf, tagsOf, withTag, type Filter, type LogFilter } from './filter';
@@ -15,6 +14,7 @@ import { COLUMNS, ROW_PX, type Messages } from './render';
 import { Head, Item as Measured, LogRow, Pad } from './row';
 import { Calls, RunHead } from './runs';
 import { useVirtual } from './virtual';
+import { fail } from '@/store/app';
 
 /** How near an end of the list, in px, the page beyond it is read. */
 const NEAR_PX = 400;
@@ -23,15 +23,7 @@ const NEAR_PX = 400;
  * Kept log entries, newest first, filtered: `preset`'s tags and a level (info
  * and above) to start with. Fills its parent's height; see `View`.
  */
-export function Logs({
-  shell,
-  source,
-  preset = {},
-}: {
-  shell: Shell;
-  source: LogSource;
-  preset?: LogFilter;
-}) {
+export function Logs({ source, preset = {} }: { source: LogSource; preset?: LogFilter }) {
   const [tags, setTags] = useState(() => tagsOf(preset));
   const [jump, setJump] = useState('');
   // Bumped by "Live": read the newest again.
@@ -44,21 +36,13 @@ export function Logs({
   const addTag = useCallback((tag: Filter) => setTags((was) => withTag(was, tag)), []);
   const [messages, setMessages] = useState<Messages>({});
   useEffect(() => {
-    source.messages().then(setMessages).catch(shell.fail);
-  }, [source, shell.fail]);
+    source.messages().then(setMessages).catch(fail);
+  }, [source]);
   return (
     <Stack spacing={1} sx={{ minHeight: 0, flexGrow: 1 }}>
-      <Filters
-        shell={shell}
-        source={source}
-        tags={tags}
-        onTags={setTags}
-        jump={jump}
-        onJump={setJump}
-      />
+      <Filters source={source} tags={tags} onTags={setTags} jump={jump} onJump={setJump} />
       <View
         key={`${search}#${reads}`}
-        shell={shell}
         source={source}
         search={search}
         messages={messages}
@@ -76,14 +60,12 @@ export function Logs({
  * they are counted. For a job, rows group by run.
  */
 function View({
-  shell,
   source,
   search,
   messages,
   onTag,
   onLive,
 }: {
-  shell: Shell;
   source: LogSource;
   search: string;
   messages: Messages;
@@ -93,7 +75,7 @@ function View({
   const query = useMemo(() => Object.fromEntries(new URLSearchParams(search)), [search]);
   const scroller = useRef<HTMLDivElement>(null);
   const atTop = useCallback(() => (scroller.current?.scrollTop ?? 0) < 4, []);
-  const { held, older, newer, waiting, showWaiting } = useEntries(source, query, shell, atTop);
+  const { held, older, newer, waiting, showWaiting } = useEntries(source, query, atTop);
   const items = useMemo(() => itemsOf(held.rows, query.job_id !== undefined), [held.rows, query]);
   const keys = useMemo(() => items.map((item) => item.key), [items]);
   const virtual = useVirtual(keys, held.anchored, scroller, ROW_PX);

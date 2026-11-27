@@ -78,12 +78,21 @@ import type {
   WriteSettingRequest,
 } from "./models";
 
+/** What holding a scope needs beyond its subtree (`x-hashinbox-depends`): source → targets. */
+export const DEPENDS: Readonly<Record<string, readonly string[]>> = {
+  "com.hashinbox.networks.endpoints": ["com.hashinbox.networks:read"],
+  "com.hashinbox.networks.routes": ["com.hashinbox.networks.endpoints:read"],
+  "com.hashinbox.networks.transactions": ["com.hashinbox.networks:read"],
+  "com.hashinbox.triggers": ["com.hashinbox.wallets"],
+  "com.hashinbox.wallets": ["com.hashinbox.jobs"],
+};
+
 /** `GET /v1/assets`. */
 export const assetsListOperation: Operation = {
   id: "assets_list",
   method: "GET",
   path: "/v1/assets",
-  templates: ["com.hashinbox.assets.$read"],
+  templates: [],
 };
 
 /** The input of `assetsList`. */
@@ -95,7 +104,7 @@ export type AssetsListResponse = AssetList;
 /**
  * List every configured asset. `GET /v1/assets`
  *
- * Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept.
+ * Every asset of every configured network, with its metadata. This is the only list of assets the wallet routes accept. Any session may read it: every wallet page shows its tickers, decimals and icons.
  */
 export function assetsList(
   client: Client,
@@ -110,7 +119,7 @@ export const keyRevokeOperation: Operation = {
   id: "key_revoke",
   method: "DELETE",
   path: "/v1/user/keys/{id}",
-  templates: ["com.hashinbox.keys.$write"],
+  templates: ["com.hashinbox.users.keys"],
 };
 
 /** The input of `keyRevoke`. */
@@ -140,7 +149,7 @@ export const keyRotateOperation: Operation = {
   id: "key_rotate",
   method: "POST",
   path: "/v1/user/keys/{id}/rotate",
-  templates: ["com.hashinbox.keys.$write"],
+  templates: ["com.hashinbox.users.keys"],
 };
 
 /** The input of `keyRotate`. */
@@ -170,7 +179,7 @@ export const keysCreateOperation: Operation = {
   id: "keys_create",
   method: "POST",
   path: "/v1/user/keys",
-  templates: ["com.hashinbox.keys.$write"],
+  templates: ["com.hashinbox.users.keys"],
 };
 
 /** The input of `keysCreate`. */
@@ -200,7 +209,7 @@ export const keysListOperation: Operation = {
   method: "GET",
   path: "/v1/user/keys",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.keys.$read"],
+  templates: ["com.hashinbox.users.keys:read"],
 };
 
 /** The input of `keysList`. */
@@ -292,7 +301,7 @@ export const recoveryCreateOperation: Operation = {
   id: "recovery_create",
   method: "POST",
   path: "/v1/recovery",
-  templates: ["com.hashinbox.recovery.$write"],
+  templates: ["com.hashinbox.recovery"],
 };
 
 /** The input of `recoveryCreate`. */
@@ -323,7 +332,7 @@ export const recoveryDeleteOperation: Operation = {
   id: "recovery_delete",
   method: "DELETE",
   path: "/v1/recovery",
-  templates: ["com.hashinbox.recovery.$write"],
+  templates: ["com.hashinbox.recovery"],
 };
 
 /** The input of `recoveryDelete`. */
@@ -354,7 +363,7 @@ export const recoveryGetOperation: Operation = {
   id: "recovery_get",
   method: "GET",
   path: "/v1/recovery",
-  templates: ["com.hashinbox.recovery.$write"],
+  templates: ["com.hashinbox.recovery"],
 };
 
 /** The input of `recoveryGet`. */
@@ -366,7 +375,7 @@ export type RecoveryGetResponse = Recovery;
 /**
  * Read whether the recovery passphrase is set. `GET /v1/recovery`
  *
- * Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery.$write`, as the other recovery routes do.
+ * Whether a passphrase is set and when it was created; never its words or hash. Needs `recovery`, as the other recovery routes do.
  */
 export function recoveryGet(
   client: Client,
@@ -468,7 +477,7 @@ export type SessionGetResponse = SessionRead;
 /**
  * Read the caller's session. `GET /v1/session`
  *
- * The session the bearer token is, decoded and checked: its issuer, user, key, scopes, times and `amr`.
+ * The session the bearer token is, decoded and checked: its issuer, user, key, scopes (expanded with `x-hashinbox-depends`: what it may do), times and `amr`.
  */
 export function sessionGet(
   client: Client,
@@ -580,7 +589,7 @@ export const userUpdateOperation: Operation = {
   id: "user_update",
   method: "PATCH",
   path: "/v1/users/{id}",
-  templates: ["com.hashinbox.users.$write"],
+  templates: ["com.hashinbox.users"],
 };
 
 /** The input of `userUpdate`. */
@@ -611,7 +620,7 @@ export const usersCreateOperation: Operation = {
   id: "users_create",
   method: "POST",
   path: "/v1/users",
-  templates: ["com.hashinbox.users.$write"],
+  templates: ["com.hashinbox.users"],
 };
 
 /** The input of `usersCreate`. */
@@ -625,7 +634,7 @@ export type UsersCreateResponse = CreatedUser;
 /**
  * Create a user, or the root user on a fresh install. `POST /v1/users`
  *
- * With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users.$write`, and the new user's scopes must be covered by the caller's.
+ * With no user yet (`GET /v1/version` says `missing_root`), needs no `Authorization`: creates the root user, holding every scope, logged in at once (its session in the answer); of two racing, one is root and the other answers 409. Else needs `users`, and the new user's scopes must be covered by the caller's.
  */
 export function usersCreate(
   client: Client,
@@ -645,7 +654,7 @@ export const usersListOperation: Operation = {
   method: "GET",
   path: "/v1/users",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.users.$read"],
+  templates: ["com.hashinbox.users:read"],
 };
 
 /** The input of `usersList`. */
@@ -731,7 +740,7 @@ export const jobGetOperation: Operation = {
   id: "job_get",
   method: "GET",
   path: "/v1/jobs/{id}",
-  templates: ["com.hashinbox.jobs.$read"],
+  templates: ["com.hashinbox.jobs:read"],
 };
 
 /** The input of `jobGet`. */
@@ -762,7 +771,7 @@ export const jobsListOperation: Operation = {
   method: "GET",
   path: "/v1/jobs",
   query: ["chain", "network", "kind", "state", "cursor", "limit"],
-  templates: ["com.hashinbox.jobs.$read"],
+  templates: ["com.hashinbox.jobs:read"],
 };
 
 /** The input of `jobsList`. */
@@ -798,7 +807,7 @@ export const logMessagesListOperation: Operation = {
   id: "log_messages_list",
   method: "GET",
   path: "/v1/logs/messages",
-  templates: ["com.hashinbox.logs.$read"],
+  templates: ["com.hashinbox.logs:read"],
 };
 
 /** The input of `logMessagesList`. */
@@ -829,7 +838,7 @@ export const logTargetsListOperation: Operation = {
   id: "log_targets_list",
   method: "GET",
   path: "/v1/logs/targets",
-  templates: ["com.hashinbox.logs.$read"],
+  templates: ["com.hashinbox.logs:read"],
 };
 
 /** The input of `logTargetsList`. */
@@ -875,7 +884,7 @@ export const logsListOperation: Operation = {
     "cursor",
     "limit",
   ],
-  templates: ["com.hashinbox.logs.$read"],
+  templates: ["com.hashinbox.logs:read"],
 };
 
 /** The input of `logsList`. */
@@ -946,7 +955,7 @@ export const logsStreamOperation: Operation = {
     "after",
     "cursor",
   ],
-  templates: ["com.hashinbox.logs.$read"],
+  templates: ["com.hashinbox.logs:read"],
 };
 
 /** The input of `logsStream`. */
@@ -1002,7 +1011,7 @@ export const marketCandlesListOperation: Operation = {
   method: "GET",
   path: "/v1/markets/{name}/candles",
   query: ["asset", "after"],
-  templates: ["com.hashinbox.markets.$read"],
+  templates: [],
 };
 
 /** The input of `marketCandlesList`. */
@@ -1024,7 +1033,7 @@ export type MarketCandlesListResponse = MarketCandles;
 /**
  * List a market's hourly candles of an asset. `GET /v1/markets/{name}/candles`
  *
- * The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends.
+ * The market's own hourly USD candles of the asset (open, high, low and close of its quotes) from `after` on, at most the last 7 days, oldest first; the current hour's moves until the hour ends. Any session may read them.
  */
 export function marketCandlesList(
   client: Client,
@@ -1043,7 +1052,7 @@ export const marketUpdateOperation: Operation = {
   id: "market_update",
   method: "PATCH",
   path: "/v1/markets/{name}",
-  templates: ["com.hashinbox.markets.$write"],
+  templates: ["com.hashinbox.markets"],
 };
 
 /** The input of `marketUpdate`. */
@@ -1078,7 +1087,7 @@ export const marketsListOperation: Operation = {
   id: "markets_list",
   method: "GET",
   path: "/v1/markets",
-  templates: ["com.hashinbox.markets.$read"],
+  templates: [],
 };
 
 /** The input of `marketsList`. */
@@ -1090,7 +1099,7 @@ export type MarketsListResponse = MarketList;
 /**
  * List the markets and the latest prices. `GET /v1/markets`
  *
- * Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles.
+ * Every market data source: its name, whether it is asked for quotes (`feed`), when it was last changed and when its last quote answered (`last_at`); and, by ticker, each asset's latest USD price: the median close of the current hour's candles. Any session may read it.
  */
 export function marketsList(
   client: Client,
@@ -1109,7 +1118,7 @@ export const endpointsCreateOperation: Operation = {
   id: "endpoints_create",
   method: "POST",
   path: "/v1/networks/endpoints",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `endpointsCreate`. */
@@ -1142,7 +1151,7 @@ export const networkBlockGetOperation: Operation = {
   id: "network_block_get",
   method: "GET",
   path: "/v1/networks/{chain}/{network}/blocks/{position}",
-  templates: ["com.hashinbox.networks.$read"],
+  templates: ["com.hashinbox.networks:read"],
 };
 
 /** The input of `networkBlockGet`. */
@@ -1177,7 +1186,7 @@ export const networkBlockTransactionsListOperation: Operation = {
   method: "GET",
   path: "/v1/networks/{chain}/{network}/blocks/{position}/transactions",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.transactions.$read"],
+  templates: ["com.hashinbox.networks.transactions:read"],
 };
 
 /** The input of `networkBlockTransactionsList`. */
@@ -1216,7 +1225,7 @@ export const networkBlocksListOperation: Operation = {
   method: "GET",
   path: "/v1/networks/{chain}/{network}/blocks",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.networks.$read"],
+  templates: ["com.hashinbox.networks:read"],
 };
 
 /** The input of `networkBlocksList`. */
@@ -1256,7 +1265,7 @@ export const networkEndpointDeleteOperation: Operation = {
   id: "network_endpoint_delete",
   method: "DELETE",
   path: "/v1/networks/{chain}/{network}/endpoints/{id}",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `networkEndpointDelete`. */
@@ -1293,7 +1302,7 @@ export const networkEndpointFailuresListOperation: Operation = {
   method: "GET",
   path: "/v1/networks/{chain}/{network}/endpoints/{id}/failures",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.endpoints.$read"],
+  templates: ["com.hashinbox.networks.endpoints:read"],
 };
 
 /** The input of `networkEndpointFailuresList`. */
@@ -1333,7 +1342,7 @@ export const networkEndpointStateUpdateOperation: Operation = {
   id: "network_endpoint_state_update",
   method: "PUT",
   path: "/v1/networks/{chain}/{network}/endpoints/{id}/state",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `networkEndpointStateUpdate`. */
@@ -1370,7 +1379,7 @@ export const networkEndpointTestOperation: Operation = {
   id: "network_endpoint_test",
   method: "POST",
   path: "/v1/networks/{chain}/{network}/endpoints/test",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `networkEndpointTest`. */
@@ -1407,7 +1416,7 @@ export const networkEndpointsCreateOperation: Operation = {
   id: "network_endpoints_create",
   method: "POST",
   path: "/v1/networks/{chain}/{network}/endpoints",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `networkEndpointsCreate`. */
@@ -1444,7 +1453,7 @@ export const networkEndpointsListOperation: Operation = {
   id: "network_endpoints_list",
   method: "GET",
   path: "/v1/networks/{chain}/{network}/endpoints",
-  templates: ["com.hashinbox.endpoints.$read"],
+  templates: ["com.hashinbox.networks.endpoints:read"],
 };
 
 /** The input of `networkEndpointsList`. */
@@ -1480,7 +1489,7 @@ export const networkEndpointsReplaceOperation: Operation = {
   id: "network_endpoints_replace",
   method: "PUT",
   path: "/v1/networks/{chain}/{network}/endpoints",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.endpoints"],
 };
 
 /** The input of `networkEndpointsReplace`. */
@@ -1517,7 +1526,7 @@ export const networkRoutesListOperation: Operation = {
   id: "network_routes_list",
   method: "GET",
   path: "/v1/networks/{chain}/{network}/routes",
-  templates: ["com.hashinbox.endpoints.$read"],
+  templates: ["com.hashinbox.networks.routes:read"],
 };
 
 /** The input of `networkRoutesList`. */
@@ -1553,7 +1562,7 @@ export const networkRoutesReplaceOperation: Operation = {
   id: "network_routes_replace",
   method: "PUT",
   path: "/v1/networks/{chain}/{network}/routes",
-  templates: ["com.hashinbox.endpoints.$write"],
+  templates: ["com.hashinbox.networks.routes"],
 };
 
 /** The input of `networkRoutesReplace`. */
@@ -1591,7 +1600,7 @@ export const networkTipSearchOperation: Operation = {
   method: "GET",
   path: "/v1/networks/{chain}/{network}/tip/search",
   query: ["at", "cursor"],
-  templates: ["com.hashinbox.networks.$read"],
+  templates: ["com.hashinbox.networks:read"],
 };
 
 /** The input of `networkTipSearch`. */
@@ -1631,7 +1640,7 @@ export const networkTransactionsListOperation: Operation = {
   method: "GET",
   path: "/v1/networks/{chain}/{network}/transactions",
   query: ["pending", "cursor", "limit"],
-  templates: ["com.hashinbox.transactions.$read"],
+  templates: ["com.hashinbox.networks.transactions:read"],
 };
 
 /** The input of `networkTransactionsList`. */
@@ -1672,7 +1681,7 @@ export const networksCreateOperation: Operation = {
   id: "networks_create",
   method: "POST",
   path: "/v1/networks",
-  templates: ["com.hashinbox.networks.$write"],
+  templates: ["com.hashinbox.networks"],
 };
 
 /** The input of `networksCreate`. */
@@ -1705,7 +1714,7 @@ export const networksListOperation: Operation = {
   id: "networks_list",
   method: "GET",
   path: "/v1/networks",
-  templates: ["com.hashinbox.networks.$read"],
+  templates: ["com.hashinbox.networks:read"],
 };
 
 /** The input of `networksList`. */
@@ -1763,7 +1772,7 @@ export const settingUpdateOperation: Operation = {
   id: "setting_update",
   method: "PUT",
   path: "/v1/settings/{key}",
-  templates: ["com.hashinbox.settings.$write"],
+  templates: ["com.hashinbox.settings"],
 };
 
 /** The input of `settingUpdate`. */
@@ -1798,7 +1807,7 @@ export const settingsListOperation: Operation = {
   id: "settings_list",
   method: "GET",
   path: "/v1/settings",
-  templates: ["com.hashinbox.settings.$read"],
+  templates: ["com.hashinbox.settings:read"],
 };
 
 /** The input of `settingsList`. */
@@ -1829,7 +1838,7 @@ export const statsGetOperation: Operation = {
   id: "stats_get",
   method: "GET",
   path: "/v1/stats",
-  templates: ["com.hashinbox.stats.$read"],
+  templates: ["com.hashinbox.stats:read"],
 };
 
 /** The input of `statsGet`. */
@@ -1856,7 +1865,7 @@ export const walletPaymentSendOperation: Operation = {
   id: "wallet_payment_send",
   method: "POST",
   path: "/v1/wallets/{id}/transactions",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].transactions"],
 };
 
 /** The input of `walletPaymentSend`. */
@@ -1892,7 +1901,7 @@ export const tagsListOperation: Operation = {
   method: "GET",
   path: "/v1/wallets/tags",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.wallets.$read"],
+  templates: ["com.hashinbox.wallets.tags:read"],
 };
 
 /** The input of `tagsList`. */
@@ -1920,7 +1929,7 @@ export const triggerDeleteOperation: Operation = {
   id: "trigger_delete",
   method: "DELETE",
   path: "/v1/triggers/{id}",
-  templates: ["com.hashinbox.triggers.$write"],
+  templates: ["com.hashinbox.triggers"],
 };
 
 /** The input of `triggerDelete`. */
@@ -1950,7 +1959,7 @@ export const triggerGetOperation: Operation = {
   id: "trigger_get",
   method: "GET",
   path: "/v1/triggers/{id}",
-  templates: ["com.hashinbox.triggers.$read"],
+  templates: ["com.hashinbox.triggers:read"],
 };
 
 /** The input of `triggerGet`. */
@@ -1976,7 +1985,7 @@ export const triggerReplaceOperation: Operation = {
   id: "trigger_replace",
   method: "PUT",
   path: "/v1/triggers/{id}",
-  templates: ["com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"],
+  templates: ["com.hashinbox.triggers"],
 };
 
 /** The input of `triggerReplace`. */
@@ -2012,7 +2021,7 @@ export const triggerRunsListOperation: Operation = {
   method: "GET",
   path: "/v1/triggers/{id}/runs",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.triggers.$read"],
+  templates: ["com.hashinbox.triggers.runs:read"],
 };
 
 /** The input of `triggerRunsList`. */
@@ -2046,7 +2055,7 @@ export const triggersCreateOperation: Operation = {
   id: "triggers_create",
   method: "POST",
   path: "/v1/triggers",
-  templates: ["com.hashinbox.triggers.$write", "com.hashinbox.wallets.$write"],
+  templates: ["com.hashinbox.triggers"],
 };
 
 /** The input of `triggersCreate`. */
@@ -2080,7 +2089,7 @@ export const triggersListOperation: Operation = {
   method: "GET",
   path: "/v1/triggers",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.triggers.$read"],
+  templates: ["com.hashinbox.triggers:read"],
 };
 
 /** The input of `triggersList`. */
@@ -2112,7 +2121,7 @@ export const walletTagAddOperation: Operation = {
   id: "wallet_tag_add",
   method: "PUT",
   path: "/v1/wallets/{id}/tags/{tag}",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].tags"],
 };
 
 /** The input of `walletTagAdd`. */
@@ -2148,7 +2157,7 @@ export const walletTagRemoveOperation: Operation = {
   id: "wallet_tag_remove",
   method: "DELETE",
   path: "/v1/wallets/{id}/tags/{tag}",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].tags"],
 };
 
 /** The input of `walletTagRemove`. */
@@ -2184,7 +2193,7 @@ export const walletGetOperation: Operation = {
   id: "wallet_get",
   method: "GET",
   path: "/v1/wallets/{id}",
-  templates: ["com.hashinbox.wallets[{id}].$read"],
+  templates: ["com.hashinbox.wallets[{id}]:read"],
 };
 
 /** The input of `walletGet`. */
@@ -2214,7 +2223,7 @@ export const walletIndexDeleteOperation: Operation = {
   id: "wallet_index_delete",
   method: "DELETE",
   path: "/v1/wallets/{id}/indexes/{asset}",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /** The input of `walletIndexDelete`. */
@@ -2251,7 +2260,7 @@ export const walletIndexLegsListOperation: Operation = {
   method: "GET",
   path: "/v1/wallets/{id}/indexes/{asset}/legs",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.wallets[{id}].$read"],
+  templates: ["com.hashinbox.wallets[{id}].indexes:read"],
 };
 
 /** The input of `walletIndexLegsList`. */
@@ -2291,7 +2300,7 @@ export const walletIndexReconcileOperation: Operation = {
   id: "wallet_index_reconcile",
   method: "POST",
   path: "/v1/wallets/{id}/indexes/{asset}/reconcile",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /** The input of `walletIndexReconcile`. */
@@ -2327,7 +2336,7 @@ export const walletIndexUpdateOperation: Operation = {
   id: "wallet_index_update",
   method: "PATCH",
   path: "/v1/wallets/{id}/indexes/{asset}",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /** The input of `walletIndexUpdate`. */
@@ -2364,7 +2373,7 @@ export const walletIndexesCreateOperation: Operation = {
   id: "wallet_indexes_create",
   method: "POST",
   path: "/v1/wallets/{id}/indexes",
-  templates: ["com.hashinbox.wallets[{id}].$write"],
+  templates: ["com.hashinbox.wallets[{id}].indexes"],
 };
 
 /** The input of `walletIndexesCreate`. */
@@ -2399,7 +2408,7 @@ export const walletsCreateOperation: Operation = {
   id: "wallets_create",
   method: "POST",
   path: "/v1/wallets",
-  templates: ["com.hashinbox.wallets.$write"],
+  templates: ["com.hashinbox.wallets"],
 };
 
 /** The input of `walletsCreate`. */
@@ -2433,7 +2442,7 @@ export const walletsListOperation: Operation = {
   method: "GET",
   path: "/v1/wallets",
   query: ["cursor", "limit"],
-  templates: ["com.hashinbox.wallets.$read"],
+  templates: ["com.hashinbox.wallets:read"],
 };
 
 /** The input of `walletsList`. */
