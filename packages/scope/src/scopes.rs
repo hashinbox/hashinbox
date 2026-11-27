@@ -125,15 +125,15 @@ impl Scopes {
     /// When a joined scope does not parse.
     pub fn unpack(packed: &Packed) -> Result<Self, ParseError> {
         let each = packed.iter().flat_map(|(prefix, group)| {
-            group.iter().map(move |scope| {
-                match (prefix.as_str(), scope.strip_prefix('*')) {
+            group.iter().map(
+                move |scope| match (prefix.as_str(), scope.strip_prefix('*')) {
                     ("", _) => scope.parse(),
                     (prefix, Some(level)) if level.is_empty() || level.starts_with(':') => {
                         format!("{prefix}{level}").parse()
                     }
                     (prefix, _) => format!("{prefix}.{scope}").parse(),
-                }
-            })
+                },
+            )
         });
         each.collect()
     }

@@ -4,8 +4,10 @@
 
 # 1. The dashboard. `vite build` alone: `npm run build` also regenerates the
 #    committed types and lints, which changes nothing in `dist`.
+#    The UI depends on `file:../clients/typescript`: it keeps its repo path.
 FROM node:22-alpine AS ui
-WORKDIR /ui
+WORKDIR /src/apps/server/ui
+COPY apps/server/clients/typescript/ ../clients/typescript/
 COPY apps/server/ui/package.json apps/server/ui/package-lock.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci
 COPY apps/server/ui/ ./
@@ -16,7 +18,7 @@ FROM rust:1.91-alpine AS build
 RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY . .
-COPY --from=ui /ui/dist apps/server/ui/dist
+COPY --from=ui /src/apps/server/ui/dist apps/server/ui/dist
 # No .git in the context: the version comes from here, else the crate's.
 ARG HASHINBOX_VERSION=
 ENV CARGO_PROFILE_RELEASE_STRIP=true

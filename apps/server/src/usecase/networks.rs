@@ -624,4 +624,3 @@ pub(crate) async fn transactions_page(
         })
         .await?)
 }
-
