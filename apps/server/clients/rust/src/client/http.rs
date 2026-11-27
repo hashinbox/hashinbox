@@ -314,7 +314,8 @@ impl Client {
         let key = read
             .key
             .ok_or_else(|| Invalid("no key in GET /v1/session".into()))?;
-        let scopes = Scopes::unpack(&key.scopes).map_err(Invalid::from)?;
+        let packed = key.scopes.into_iter().map(|(prefix, group)| (prefix, group.into()));
+        let scopes = Scopes::unpack(&packed.collect()).map_err(Invalid::from)?;
         if let Ok(mut kept) = signer.key_scopes.write() {
             *kept = Some(scopes.clone());
         }

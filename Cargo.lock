@@ -2157,7 +2157,6 @@ dependencies = [
  "hex",
  "http-body-util",
  "http-server",
- "jiff",
  "jsonwebtoken",
  "libsqlite3-sys",
  "reqwest",
@@ -3829,6 +3828,7 @@ version = "0.1.0"
 dependencies = [
  "futures-executor",
  "scope-macros",
+ "serde",
  "serde_json",
  "utoipa",
 ]

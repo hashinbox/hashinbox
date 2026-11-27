@@ -299,14 +299,17 @@ class CreateKeyRequest:
     name: str
     # Its scopes, packed, covered by the caller's; the caller's when
     # absent.
-    scopes: dict[str, list[str]] | None = None
+    scopes: dict[str, ScopeGroup] | None = None
 
     @classmethod
     def from_json(cls, data: Any) -> CreateKeyRequest:
         return cls(
             expires_at=data.get("expires_at"),
             name=data["name"],
-            scopes=data.get("scopes"),
+            scopes=optional(
+                lambda value: mapping(scope_group_from_json, value),
+                data.get("scopes"),
+            ),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -314,7 +317,7 @@ class CreateKeyRequest:
         if self.expires_at is not None:
             data["expires_at"] = self.expires_at
         if self.scopes is not None:
-            data["scopes"] = self.scopes
+            data["scopes"] = encode(self.scopes)
         return data
 
 
@@ -335,7 +338,7 @@ class CreateSessionRequest:
     # Fewer scopes than the issuer's, packed
     # (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     # absent.
-    scopes: dict[str, list[str]] | None = None
+    scopes: dict[str, ScopeGroup] | None = None
     # A key's session: who it is for (a customer); logged, grants
     # nothing.
     sub: str | None = None
@@ -350,7 +353,10 @@ class CreateSessionRequest:
             email=data.get("email"),
             passphrase=data.get("passphrase"),
             password=data.get("password"),
-            scopes=data.get("scopes"),
+            scopes=optional(
+                lambda value: mapping(scope_group_from_json, value),
+                data.get("scopes"),
+            ),
             sub=data.get("sub"),
             totp=data.get("totp"),
             ttl=data.get("ttl"),
@@ -365,7 +371,7 @@ class CreateSessionRequest:
         if self.password is not None:
             data["password"] = self.password
         if self.scopes is not None:
-            data["scopes"] = self.scopes
+            data["scopes"] = encode(self.scopes)
         if self.sub is not None:
             data["sub"] = self.sub
         if self.totp is not None:
@@ -388,7 +394,7 @@ class CreateUserRequest:
     password: str | None = None
     # Its scopes, packed, covered by the creator's; none when absent.
     # The root user holds every scope.
-    scopes: dict[str, list[str]] | None = None
+    scopes: dict[str, ScopeGroup] | None = None
 
     @classmethod
     def from_json(cls, data: Any) -> CreateUserRequest:
@@ -396,7 +402,10 @@ class CreateUserRequest:
             email=data["email"],
             name=data["name"],
             password=data.get("password"),
-            scopes=data.get("scopes"),
+            scopes=optional(
+                lambda value: mapping(scope_group_from_json, value),
+                data.get("scopes"),
+            ),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -404,7 +413,7 @@ class CreateUserRequest:
         if self.password is not None:
             data["password"] = self.password
         if self.scopes is not None:
-            data["scopes"] = self.scopes
+            data["scopes"] = encode(self.scopes)
         return data
 
 
@@ -584,7 +593,7 @@ class IssuedSession:
     # Unix seconds it expires.
     expires_at: int
     # What it may do, packed.
-    scopes: dict[str, list[str]]
+    scopes: dict[str, ScopeGroup]
     # The JWT: send it as `Authorization: Bearer …`.
     token: str
     # The logged-in user (a login only).
@@ -594,7 +603,7 @@ class IssuedSession:
     def from_json(cls, data: Any) -> IssuedSession:
         return cls(
             expires_at=data["expires_at"],
-            scopes=data["scopes"],
+            scopes=mapping(scope_group_from_json, data["scopes"]),
             token=data["token"],
             user=optional(User.from_json, data.get("user")),
         )
@@ -602,7 +611,7 @@ class IssuedSession:
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "expires_at": self.expires_at,
-            "scopes": self.scopes,
+            "scopes": encode(self.scopes),
             "token": self.token,
         }
         if self.user is not None:
@@ -2062,6 +2071,17 @@ class RunOutcome(StrEnum):
     MIXED = "mixed"
 
 
+# A prefix's packed scopes: one as text, several as a list; `*` is the
+# prefix itself (`*:read` read only).
+ScopeGroup: TypeAlias = "str | list[str]"
+
+
+def scope_group_from_json(data: Any) -> ScopeGroup:
+    """The first variant of `ScopeGroup` `data` decodes as."""
+    value: ScopeGroup = first(data, lambda value: value, lambda value: value)
+    return value
+
+
 @dataclass(frozen=True, kw_only=True)
 class SecretSetting:
     """A secret setting as listed: never its value or default."""
@@ -2177,7 +2197,7 @@ class SessionRead:
     # Who issued it.
     kind: Issuer
     # What it may do, packed.
-    scopes: dict[str, list[str]]
+    scopes: dict[str, ScopeGroup]
     # Who it is for; always present, null: not said.
     sub: str | None
     # Its user.
@@ -2191,7 +2211,7 @@ class SessionRead:
             issued_at=data["issued_at"],
             key=optional(UserKey.from_json, data.get("key")),
             kind=Issuer(data["kind"]),
-            scopes=data["scopes"],
+            scopes=mapping(scope_group_from_json, data["scopes"]),
             sub=data["sub"],
             user=User.from_json(data["user"]),
         )
@@ -2202,7 +2222,7 @@ class SessionRead:
             "expires_at": self.expires_at,
             "issued_at": self.issued_at,
             "kind": self.kind,
-            "scopes": self.scopes,
+            "scopes": encode(self.scopes),
             "sub": self.sub,
             "user": encode(self.user),
         }
@@ -2866,18 +2886,24 @@ class UpdateUserRequest:
     # Disabled (it, its keys and every session refused), or enabled again.
     disabled: bool | None = None
     # Its new scopes, packed, covered by the caller's.
-    scopes: dict[str, list[str]] | None = None
+    scopes: dict[str, ScopeGroup] | None = None
 
     @classmethod
     def from_json(cls, data: Any) -> UpdateUserRequest:
-        return cls(disabled=data.get("disabled"), scopes=data.get("scopes"))
+        return cls(
+            disabled=data.get("disabled"),
+            scopes=optional(
+                lambda value: mapping(scope_group_from_json, value),
+                data.get("scopes"),
+            ),
+        )
 
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if self.disabled is not None:
             data["disabled"] = self.disabled
         if self.scopes is not None:
-            data["scopes"] = self.scopes
+            data["scopes"] = encode(self.scopes)
         return data
 
 
@@ -2921,7 +2947,7 @@ class User:
     name: str
     # The widest scopes it may issue, packed in JSON
     # (`{"com.hashinbox": ["wallets:read"]}`).
-    scopes: dict[str, list[str]]
+    scopes: dict[str, ScopeGroup]
 
     @classmethod
     def from_json(cls, data: Any) -> User:
@@ -2933,7 +2959,7 @@ class User:
             invalidated_at=data.get("invalidated_at"),
             login=data["login"],
             name=data["name"],
-            scopes=data["scopes"],
+            scopes=mapping(scope_group_from_json, data["scopes"]),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -2943,7 +2969,7 @@ class User:
             "id": self.id,
             "login": self.login,
             "name": self.name,
-            "scopes": self.scopes,
+            "scopes": encode(self.scopes),
         }
         if self.disabled_at is not None:
             data["disabled_at"] = self.disabled_at
@@ -2972,7 +2998,7 @@ class UserKey:
     # Unix ms it was revoked: it and its sessions refused for good.
     revoked_at: int | None = None
     # What it may do, covered by its user's; packed in JSON.
-    scopes: dict[str, list[str]]
+    scopes: dict[str, ScopeGroup]
     # The user that issued it.
     user_id: str
 
@@ -2986,7 +3012,7 @@ class UserKey:
             last_used_at=data.get("last_used_at"),
             name=data["name"],
             revoked_at=data.get("revoked_at"),
-            scopes=data["scopes"],
+            scopes=mapping(scope_group_from_json, data["scopes"]),
             user_id=data["user_id"],
         )
 
@@ -2995,7 +3021,7 @@ class UserKey:
             "created_at": self.created_at,
             "id": self.id,
             "name": self.name,
-            "scopes": self.scopes,
+            "scopes": encode(self.scopes),
             "user_id": self.user_id,
         }
         if self.expires_at is not None:

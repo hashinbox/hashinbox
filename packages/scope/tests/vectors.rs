@@ -87,6 +87,18 @@ const SETS: &[&str] = &[
     "a:read a a.b",
 ];
 
+/// Packed claims to unpack, in either form: a group's text or list, `*`
+/// its prefix itself.
+const UNPACKS: &[&str] = &[
+    r#"{"com":["hashinbox"]}"#,
+    r#"{"com.hashinbox":"*"}"#,
+    r#"{"com.hashinbox":["*:read","wallets"],"":"x[y]"}"#,
+    r#"{"a":"b.c:read","a.b":["*"]}"#,
+    r#"{"":"*"}"#,
+    r#"{"a":"*b"}"#,
+    r#"{"a":"*:write"}"#,
+];
+
 /// `(granted, asked)` pairs for `first_uncovered`.
 const NARROWS: &[(&str, &str)] = &[
     ("a.wallets a.markets:read", "a.wallets[x]:read"),
@@ -174,6 +186,14 @@ fn vectors() -> Value {
             })
         })
         .collect();
+    let unpacks: Vec<Value> = UNPACKS
+        .iter()
+        .map(|text| {
+            let packed: scope::Packed = serde_json::from_str(text).unwrap();
+            let scopes = Scopes::unpack(&packed).ok().map(|held| held.to_string());
+            json!({ "packed": packed, "scopes": scopes })
+        })
+        .collect();
     let narrows: Vec<Value> = NARROWS
         .iter()
         .map(|(granted, asked)| {
@@ -201,6 +221,7 @@ fn vectors() -> Value {
         "refuse": REFUSED,
         "covers": covers,
         "sets": sets,
+        "unpack": unpacks,
         "first_uncovered": narrows,
         "expand": { "depends": depends, "cases": expands },
         "escape": escape,

@@ -89,7 +89,7 @@ struct CreateRequest {
     /// Its scopes, packed, covered by the caller's; the caller's when
     /// absent.
     #[serde(default)]
-    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, Vec<String>>>)]
+    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, scope::Group>>)]
     scopes: Option<Packed>,
     /// Unix ms it stops working; never when absent.
     #[serde(default)]

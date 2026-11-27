@@ -328,9 +328,7 @@
           "wallets[x].tags",
           "wallets[y]:read"
         ],
-        "other": [
-          "thing"
-        ]
+        "other.thing": "*"
       },
       "scopes": "com.hashinbox.wallets[x]:read com.hashinbox.wallets[y]:read com.hashinbox.wallets[x].tags com.hashinbox.triggers other.thing"
     },
@@ -338,9 +336,7 @@
       "compressed": "a.b:read",
       "display": "a.b.c:read a.b:read",
       "packed": {
-        "a": [
-          "b:read"
-        ]
+        "a.b": "*:read"
       },
       "scopes": "a.b.c:read a.b:read"
     },
@@ -348,9 +344,9 @@
       "compressed": "a.b:read a.b.c",
       "display": "a.b.c a.b:read",
       "packed": {
-        "a": [
-          "b:read",
-          "b.c"
+        "a.b": [
+          "*:read",
+          "c"
         ]
       },
       "scopes": "a.b.c a.b:read"
@@ -359,9 +355,7 @@
       "compressed": "com.hashinbox",
       "display": "com.hashinbox com.hashinbox.wallets:read",
       "packed": {
-        "com": [
-          "hashinbox"
-        ]
+        "com.hashinbox": "*"
       },
       "scopes": "com.hashinbox com.hashinbox.wallets:read"
     },
@@ -369,9 +363,9 @@
       "compressed": "com.hashinbox:read com.hashinbox.wallets",
       "display": "com.hashinbox:read com.hashinbox.wallets",
       "packed": {
-        "com": [
-          "hashinbox:read",
-          "hashinbox.wallets"
+        "com.hashinbox": [
+          "*:read",
+          "wallets"
         ]
       },
       "scopes": "com.hashinbox:read com.hashinbox.wallets"
@@ -410,9 +404,7 @@
           "a:read",
           "b:read"
         ],
-        "9": [
-          "a:read"
-        ]
+        "9.a": "*:read"
       },
       "scopes": "123.a:read 123.b:read 9.a:read"
     },
@@ -420,11 +412,62 @@
       "compressed": "a",
       "display": "a:read a a.b",
       "packed": {
-        "": [
-          "a"
-        ]
+        "a": "*"
       },
       "scopes": "a:read a a.b"
+    }
+  ],
+  "unpack": [
+    {
+      "packed": {
+        "com": [
+          "hashinbox"
+        ]
+      },
+      "scopes": "com.hashinbox"
+    },
+    {
+      "packed": {
+        "com.hashinbox": "*"
+      },
+      "scopes": "com.hashinbox"
+    },
+    {
+      "packed": {
+        "": "x[y]",
+        "com.hashinbox": [
+          "*:read",
+          "wallets"
+        ]
+      },
+      "scopes": "x[y] com.hashinbox:read com.hashinbox.wallets"
+    },
+    {
+      "packed": {
+        "a": "b.c:read",
+        "a.b": [
+          "*"
+        ]
+      },
+      "scopes": "a.b.c:read a.b"
+    },
+    {
+      "packed": {
+        "": "*"
+      },
+      "scopes": null
+    },
+    {
+      "packed": {
+        "a": "*b"
+      },
+      "scopes": null
+    },
+    {
+      "packed": {
+        "a": "*:write"
+      },
+      "scopes": null
     }
   ]
 }

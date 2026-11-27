@@ -25,8 +25,6 @@ pub(crate) struct AppState {
     /// Whether a user exists: false until the root is created (then
     /// `/v1/version` drops `missing_root`); once true, never read again.
     pub(crate) root_exists: std::sync::atomic::AtomicBool,
-    /// The tip searches running, and just ended, a reconnect reads on.
-    pub(crate) searches: crate::usecase::networks::Searches,
     /// How long one stream answer lasts (`http_server::sse::SSE_WINDOW`;
     /// shorter in tests).
     pub(crate) stream_window: std::time::Duration,

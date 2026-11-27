@@ -401,7 +401,7 @@ final readonly class CreateKeyRequest
     /**
      * @param string $name What it is for, 1 to 128 characters: `shop backend`.
      * @param ?int $expiresAt Unix ms it stops working; never when absent.
-     * @param array<string, list<string>>|null $scopes Its scopes, packed, covered by the caller's; the caller's when
+     * @param array<string, string|list<string>>|null $scopes Its scopes, packed, covered by the caller's; the caller's when
      *     absent.
      */
     public function __construct(public string $name, public ?int $expiresAt = null, public ?array $scopes = null) {}
@@ -414,10 +414,7 @@ final readonly class CreateKeyRequest
         return new self(
             expiresAt: isset($data['expires_at']) ? Json::int($data['expires_at']) : null,
             name: Json::string(Json::field($data, 'name')),
-            scopes: isset($data['scopes']) ? Json::map(
-                $data['scopes'],
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ) : null,
+            scopes: isset($data['scopes']) ? Json::map($data['scopes'], scopeGroupFromJson(...)) : null,
         );
     }
 
@@ -431,7 +428,7 @@ final readonly class CreateKeyRequest
             $data['expires_at'] = $this->expiresAt;
         }
         if ($this->scopes !== null) {
-            $data['scopes'] = (object) $this->scopes;
+            $data['scopes'] = (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes);
         }
         return $data;
     }
@@ -449,7 +446,7 @@ final readonly class CreateSessionRequest
      * @param ?string $passphrase A login: the recovery passphrase (12 words, any spacing or case),
      *     for any user; or `password`, not both.
      * @param ?string $password A login: the user's password; or `passphrase`, not both.
-     * @param array<string, list<string>>|null $scopes Fewer scopes than the issuer's, packed
+     * @param array<string, string|list<string>>|null $scopes Fewer scopes than the issuer's, packed
      *     (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
      *     absent.
      * @param ?string $sub A key's session: who it is for (a customer); logged, grants
@@ -476,10 +473,7 @@ final readonly class CreateSessionRequest
             email: isset($data['email']) ? Json::string($data['email']) : null,
             passphrase: isset($data['passphrase']) ? Json::string($data['passphrase']) : null,
             password: isset($data['password']) ? Json::string($data['password']) : null,
-            scopes: isset($data['scopes']) ? Json::map(
-                $data['scopes'],
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ) : null,
+            scopes: isset($data['scopes']) ? Json::map($data['scopes'], scopeGroupFromJson(...)) : null,
             sub: isset($data['sub']) ? Json::string($data['sub']) : null,
             totp: isset($data['totp']) ? Json::string($data['totp']) : null,
             ttl: isset($data['ttl']) ? Json::int($data['ttl']) : null,
@@ -502,7 +496,7 @@ final readonly class CreateSessionRequest
             $data['password'] = $this->password;
         }
         if ($this->scopes !== null) {
-            $data['scopes'] = (object) $this->scopes;
+            $data['scopes'] = (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes);
         }
         if ($this->sub !== null) {
             $data['sub'] = $this->sub;
@@ -527,7 +521,7 @@ final readonly class CreateUserRequest
      * @param string $name Its name, 1 to 128 characters.
      * @param ?string $password Its password, 8 characters at least; absent: no dashboard login
      *     (the root user needs one).
-     * @param array<string, list<string>>|null $scopes Its scopes, packed, covered by the creator's; none when absent.
+     * @param array<string, string|list<string>>|null $scopes Its scopes, packed, covered by the creator's; none when absent.
      *     The root user holds every scope.
      */
     public function __construct(
@@ -546,10 +540,7 @@ final readonly class CreateUserRequest
             email: Json::string(Json::field($data, 'email')),
             name: Json::string(Json::field($data, 'name')),
             password: isset($data['password']) ? Json::string($data['password']) : null,
-            scopes: isset($data['scopes']) ? Json::map(
-                $data['scopes'],
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ) : null,
+            scopes: isset($data['scopes']) ? Json::map($data['scopes'], scopeGroupFromJson(...)) : null,
         );
     }
 
@@ -563,7 +554,7 @@ final readonly class CreateUserRequest
             $data['password'] = $this->password;
         }
         if ($this->scopes !== null) {
-            $data['scopes'] = (object) $this->scopes;
+            $data['scopes'] = (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes);
         }
         return $data;
     }
@@ -820,7 +811,7 @@ final readonly class IssuedSession
 {
     /**
      * @param int $expiresAt Unix seconds it expires.
-     * @param array<string, list<string>> $scopes What it may do, packed.
+     * @param array<string, string|list<string>> $scopes What it may do, packed.
      * @param string $token The JWT: send it as `Authorization: Bearer …`.
      * @param ?User $user The logged-in user (a login only).
      */
@@ -838,10 +829,7 @@ final readonly class IssuedSession
     {
         return new self(
             expiresAt: Json::int(Json::field($data, 'expires_at')),
-            scopes: Json::map(
-                Json::field($data, 'scopes'),
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ),
+            scopes: Json::map(Json::field($data, 'scopes'), scopeGroupFromJson(...)),
             token: Json::string(Json::field($data, 'token')),
             user: isset($data['user']) ? User::fromJson(Json::object($data['user'])) : null,
         );
@@ -852,7 +840,11 @@ final readonly class IssuedSession
      */
     public function toJson(): array
     {
-        $data = ['expires_at' => $this->expiresAt, 'scopes' => (object) $this->scopes, 'token' => $this->token];
+        $data = [
+            'expires_at' => $this->expiresAt,
+            'scopes' => (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes),
+            'token' => $this->token,
+        ];
         if ($this->user !== null) {
             $data['user'] = (object) $this->user->toJson();
         }
@@ -2983,6 +2975,17 @@ enum RunOutcome: string
 }
 
 /**
+ * A prefix's packed scopes: one as text, several as a list; `*` is the
+ * prefix itself (`*:read` read only): the first of its variants `$data` decodes as.
+ *
+ * @return string|list<string>
+ */
+function scopeGroupFromJson(mixed $data): string|array
+{
+    return Json::first($data, Json::string(...), static fn(mixed $v): array => Json::list($v, Json::string(...)));
+}
+
+/**
  * A secret setting as listed: never its value or default.
  */
 final readonly class SecretSetting
@@ -3142,7 +3145,7 @@ final readonly class SessionRead
      * @param int $expiresAt Unix seconds; a key's bearer secret: now.
      * @param int $issuedAt Unix seconds.
      * @param Issuer $kind Who issued it.
-     * @param array<string, list<string>> $scopes What it may do, packed.
+     * @param array<string, string|list<string>> $scopes What it may do, packed.
      * @param ?string $sub Who it is for; always present, null: not said.
      * @param User $user Its user.
      * @param ?UserKey $key Its key, when a key issued it.
@@ -3169,10 +3172,7 @@ final readonly class SessionRead
             issuedAt: Json::int(Json::field($data, 'issued_at')),
             key: isset($data['key']) ? UserKey::fromJson(Json::object($data['key'])) : null,
             kind: Issuer::from(Json::string(Json::field($data, 'kind'))),
-            scopes: Json::map(
-                Json::field($data, 'scopes'),
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ),
+            scopes: Json::map(Json::field($data, 'scopes'), scopeGroupFromJson(...)),
             sub: isset($data['sub']) ? Json::string($data['sub']) : null,
             user: User::fromJson(Json::object(Json::field($data, 'user'))),
         );
@@ -3188,7 +3188,7 @@ final readonly class SessionRead
             'expires_at' => $this->expiresAt,
             'issued_at' => $this->issuedAt,
             'kind' => $this->kind->value,
-            'scopes' => (object) $this->scopes,
+            'scopes' => (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes),
             'sub' => $this->sub,
             'user' => (object) $this->user->toJson(),
         ];
@@ -4161,7 +4161,7 @@ final readonly class UpdateUserRequest
 {
     /**
      * @param ?bool $disabled Disabled (it, its keys and every session refused), or enabled again.
-     * @param array<string, list<string>>|null $scopes Its new scopes, packed, covered by the caller's.
+     * @param array<string, string|list<string>>|null $scopes Its new scopes, packed, covered by the caller's.
      */
     public function __construct(public ?bool $disabled = null, public ?array $scopes = null) {}
 
@@ -4172,10 +4172,7 @@ final readonly class UpdateUserRequest
     {
         return new self(
             disabled: isset($data['disabled']) ? Json::bool($data['disabled']) : null,
-            scopes: isset($data['scopes']) ? Json::map(
-                $data['scopes'],
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ) : null,
+            scopes: isset($data['scopes']) ? Json::map($data['scopes'], scopeGroupFromJson(...)) : null,
         );
     }
 
@@ -4189,7 +4186,7 @@ final readonly class UpdateUserRequest
             $data['disabled'] = $this->disabled;
         }
         if ($this->scopes !== null) {
-            $data['scopes'] = (object) $this->scopes;
+            $data['scopes'] = (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes);
         }
         return $data;
     }
@@ -4237,7 +4234,7 @@ final readonly class User
      * @param bool $login The argon2id hash of its password; `None`: no dashboard login. In
      *     JSON, `login`: whether it has one.
      * @param string $name Its name, as shown.
-     * @param array<string, list<string>> $scopes The widest scopes it may issue, packed in JSON
+     * @param array<string, string|list<string>> $scopes The widest scopes it may issue, packed in JSON
      *     (`{"com.hashinbox": ["wallets:read"]}`).
      * @param ?int $disabledAt Unix ms it was disabled: it, its keys and every session refused.
      * @param ?int $invalidatedAt Unix ms; every session issued in its second or before is refused.
@@ -4266,10 +4263,7 @@ final readonly class User
             invalidatedAt: isset($data['invalidated_at']) ? Json::int($data['invalidated_at']) : null,
             login: Json::bool(Json::field($data, 'login')),
             name: Json::string(Json::field($data, 'name')),
-            scopes: Json::map(
-                Json::field($data, 'scopes'),
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ),
+            scopes: Json::map(Json::field($data, 'scopes'), scopeGroupFromJson(...)),
         );
     }
 
@@ -4284,7 +4278,7 @@ final readonly class User
             'id' => $this->id,
             'login' => $this->login,
             'name' => $this->name,
-            'scopes' => (object) $this->scopes,
+            'scopes' => (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes),
         ];
         if ($this->disabledAt !== null) {
             $data['disabled_at'] = $this->disabledAt;
@@ -4305,7 +4299,7 @@ final readonly class UserKey
      * @param int $createdAt Unix ms.
      * @param string $id `hip/…`: its public client id, a session's `kid` and `iss`.
      * @param string $name What it is for: `shop backend`.
-     * @param array<string, list<string>> $scopes What it may do, covered by its user's; packed in JSON.
+     * @param array<string, string|list<string>> $scopes What it may do, covered by its user's; packed in JSON.
      * @param string $userId The user that issued it.
      * @param ?int $expiresAt Unix ms it stops working; `None`: never.
      * @param ?int $invalidatedAt Unix ms; every session it issued in that second or before is
@@ -4338,10 +4332,7 @@ final readonly class UserKey
             lastUsedAt: isset($data['last_used_at']) ? Json::int($data['last_used_at']) : null,
             name: Json::string(Json::field($data, 'name')),
             revokedAt: isset($data['revoked_at']) ? Json::int($data['revoked_at']) : null,
-            scopes: Json::map(
-                Json::field($data, 'scopes'),
-                static fn(mixed $v): array => Json::list($v, Json::string(...)),
-            ),
+            scopes: Json::map(Json::field($data, 'scopes'), scopeGroupFromJson(...)),
             userId: Json::string(Json::field($data, 'user_id')),
         );
     }
@@ -4355,7 +4346,7 @@ final readonly class UserKey
             'created_at' => $this->createdAt,
             'id' => $this->id,
             'name' => $this->name,
-            'scopes' => (object) $this->scopes,
+            'scopes' => (object) array_map(static fn(string|array $v): mixed => Json::encode($v), $this->scopes),
             'user_id' => $this->userId,
         ];
         if ($this->expiresAt !== null) {

@@ -36,13 +36,13 @@ type header struct {
 // claims are a session JWT's claims, in the server's order; it refuses
 // any other.
 type claims struct {
-	Iss    string              `json:"iss"`
-	Sub    string              `json:"sub,omitempty"`
-	Iat    int64               `json:"iat"`
-	Exp    int64               `json:"exp"`
-	Jti    string              `json:"jti,omitempty"`
-	Scopes map[string][]string `json:"scopes"`
-	Amr    []Amr               `json:"amr,omitempty"`
+	Iss    string                `json:"iss"`
+	Sub    string                `json:"sub,omitempty"`
+	Iat    int64                 `json:"iat"`
+	Exp    int64                 `json:"exp"`
+	Jti    string                `json:"jti,omitempty"`
+	Scopes map[string]ScopeGroup `json:"scopes"`
+	Amr    []Amr                 `json:"amr,omitempty"`
 }
 
 // ParseSession is the session token is, decoded; its signature is not

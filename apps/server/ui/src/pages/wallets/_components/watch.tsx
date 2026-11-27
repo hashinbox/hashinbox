@@ -1,4 +1,3 @@
-import Search from '@mui/icons-material/Search';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Dialog from '@mui/material/Dialog';
@@ -6,21 +5,16 @@ import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
 import DialogContentText from '@mui/material/DialogContentText';
 import DialogTitle from '@mui/material/DialogTitle';
-import IconButton from '@mui/material/IconButton';
-import InputAdornment from '@mui/material/InputAdornment';
 import MenuItem from '@mui/material/MenuItem';
 import Stack from '@mui/material/Stack';
 import TextField from '@mui/material/TextField';
 import ToggleButton from '@mui/material/ToggleButton';
 import ToggleButtonGroup from '@mui/material/ToggleButtonGroup';
-import Tooltip from '@mui/material/Tooltip';
 import Typography from '@mui/material/Typography';
 import { useState, type SubmitEvent } from 'react';
-import { networkTipSearchOperation, type Listing, type Wallet } from '@hashinbox/client';
-import { SearchDialog } from './search';
+import type { Listing, Wallet } from '@hashinbox/client';
 import { WATCH_NOTHING, watch, type Watching } from './watching';
 import { fail, useApp } from '@/store/app';
-import { useCan } from '@/store/session';
 
 /** The assets to index in, and the block to index from. */
 export function WatchFields({
@@ -36,10 +30,6 @@ export function WatchFields({
   /** A key generated here has no past: it is indexed from now only. */
   freshOnly?: boolean;
 }) {
-  const network = offered[0]?.network;
-  const searches = useCan(networkTipSearchOperation);
-  const [searching, setSearching] = useState(false);
-
   return (
     <Stack spacing={2}>
       <TextField
@@ -83,41 +73,12 @@ export function WatchFields({
               label="Start block"
               value={value.from}
               onChange={(e) => onChange({ ...value, from: e.target.value.replace(/\D/g, '') })}
-              slotProps={{
-                htmlInput: { inputMode: 'numeric' },
-                input: {
-                  endAdornment: network && searches && (
-                    <InputAdornment position="end">
-                      <Tooltip title="Find by time">
-                        <IconButton
-                          size="small"
-                          edge="end"
-                          aria-label="Find the block by time"
-                          onClick={() => setSearching(true)}
-                        >
-                          <Search fontSize="small" />
-                        </IconButton>
-                      </Tooltip>
-                    </InputAdornment>
-                  ),
-                },
-              }}
+              slotProps={{ htmlInput: { inputMode: 'numeric' } }}
               required
               sx={{ width: 180 }}
             />
           )}
         </Stack>
-      )}
-      {network && (
-        <SearchDialog
-          network={network}
-          open={searching}
-          onClose={() => setSearching(false)}
-          onUse={(position) => {
-            onChange({ ...value, from: `${position}` });
-            setSearching(false);
-          }}
-        />
       )}
     </Stack>
   );

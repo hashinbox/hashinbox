@@ -62,7 +62,7 @@ struct CreateRequest {
     /// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     /// absent.
     #[serde(default)]
-    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, Vec<String>>>)]
+    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, scope::Group>>)]
     scopes: Option<Packed>,
     /// Seconds it lasts, 1 to 86400; 43200 when absent.
     #[serde(default)]
@@ -79,7 +79,7 @@ pub(super) struct CreateResponse {
     /// Unix seconds it expires.
     expires_at: i64,
     /// What it may do, packed.
-    #[schema(value_type = std::collections::BTreeMap<String, Vec<String>>)]
+    #[schema(value_type = std::collections::BTreeMap<String, scope::Group>)]
     scopes: Packed,
     /// The logged-in user (a login only).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -204,7 +204,7 @@ struct ReadResponse {
     #[schema(required)]
     sub: Option<String>,
     /// What it may do, packed.
-    #[schema(value_type = std::collections::BTreeMap<String, Vec<String>>)]
+    #[schema(value_type = std::collections::BTreeMap<String, scope::Group>)]
     scopes: Packed,
     /// Unix seconds.
     issued_at: i64,

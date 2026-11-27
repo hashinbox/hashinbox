@@ -50,6 +50,12 @@ final class ScopeTest extends TestCase
     }
 
     /** @return list<array{array<string, mixed>}> */
+    public static function unpack(): array
+    {
+        return Golden::cases('scope.json', 'unpack');
+    }
+
+    /** @return list<array{array<string, mixed>}> */
     public static function expand(): array
     {
         return Json::list(Json::object(Golden::load('scope.json')['expand'])['cases'], static fn(mixed $case): array => [Json::object($case)]);
@@ -104,6 +110,17 @@ final class ScopeTest extends TestCase
         self::assertSame(Json::string($case['compressed']), (string) $scopes->compress());
         self::assertSame(Json::object($case['packed']), $scopes->pack());
         self::assertSame((string) $scopes->compress(), (string) Scopes::parse(Json::object($case['packed'])));
+    }
+
+    /** @param array<string, mixed> $case */
+    #[DataProvider('unpack')]
+    public function testUnpack(array $case): void
+    {
+        $packed = Json::object($case['packed']);
+        if ($case['scopes'] === null) {
+            $this->expectException(ScopeError::class);
+        }
+        self::assertSame($case['scopes'], (string) Scopes::parse($packed));
     }
 
     /** @param array<string, mixed> $case */

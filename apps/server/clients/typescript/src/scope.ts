@@ -7,8 +7,11 @@ export interface Segment {
   id?: string;
 }
 
-/** Scopes as a JWT packs them: `{"com.hashinbox": ["wallets[x]:read"]}`. */
-export type Packed = Record<string, string[]>;
+/**
+ * Scopes as a JWT packs them: each prefix and its scopes, one as text, several
+ * as a list, `*` the prefix itself: `{"com.hashinbox": ["*:read", "wallets"]}`.
+ */
+export type Packed = Record<string, string | string[]>;
 
 /** What holding a scope needs beyond its subtree: source → targets (`DEPENDS`). */
 export type Depends = Readonly<Record<string, readonly string[]>>;
@@ -160,7 +163,7 @@ export class Scopes implements Iterable<Scope> {
  * The packed claim as ordered entries (by prefix, as the server's `BTreeMap`):
  * what a JWT's JSON must keep in that order.
  */
-export function packEntries(scopes: Scopes): [string, string[]][] {
+export function packEntries(scopes: Scopes): [string, string | string[]][] {
   const groups: Scope[][] = [];
   for (const scope of scopes.compress()) {
     const group = groups.find((g) =>
@@ -175,11 +178,18 @@ export function packEntries(scopes: Scopes): [string, string[]][] {
     const shared = sharedPrefix(group);
     for (const scope of group) {
       const prefix = scope.path.slice(0, shared).map(segmentText).join(".");
-      const rest = new Scope(scope.path.slice(shared), scope.read).toString();
+      const rest =
+        scope.path.length === shared
+          ? scope.read
+            ? "*:read"
+            : "*"
+          : new Scope(scope.path.slice(shared), scope.read).toString();
       packed.set(prefix, [...(packed.get(prefix) ?? []), rest]);
     }
   }
-  return [...packed].sort(([a], [b]) => compareText(a, b));
+  return [...packed]
+    .sort(([a], [b]) => compareText(a, b))
+    .map(([prefix, list]) => [prefix, list.length === 1 ? list[0]! : list]);
 }
 
 /** `id` as written between a scope's brackets: `%`, `[`, `]`, whitespace and controls as `%XX`. */
@@ -301,7 +311,7 @@ function sharedPrefix(group: Scope[]): number {
   const shortest = Math.min(...group.map((scope) => scope.path.length));
   const first = group[0]!.path;
   let shared = 0;
-  while (shared < shortest - 1) {
+  while (shared < shortest) {
     const step = first[shared]!;
     if (step.id !== undefined) break;
     if (!group.every((scope) => sameSegment(scope.path[shared]!, step))) break;
@@ -340,13 +350,19 @@ function compareScope(a: Scope, b: Scope): number {
   return Number(a.read) - Number(b.read);
 }
 
-/** The scopes a packed claim holds: each prefix and its scopes joined by `.`. */
+/** The scopes a packed claim holds: each prefix and its scopes joined by `.`, `*` the prefix itself. */
 function unpack(packed: Packed): Scopes {
   const prefixes = Object.keys(packed).sort(compareText);
   const list = prefixes.flatMap((prefix) =>
-    packed[prefix]!.map((scope) =>
-      Scope.parse(prefix === "" ? scope : `${prefix}.${scope}`),
-    ),
+    [packed[prefix]!].flat().map((scope) => Scope.parse(joined(prefix, scope))),
   );
   return new Scopes(list);
+}
+
+/** `scope` under `prefix`: `*` (`*:read`) the prefix itself. */
+function joined(prefix: string, scope: string): string {
+  if (prefix === "") return scope;
+  const level = scope.startsWith("*") ? scope.slice(1) : undefined;
+  if (level === "" || level?.startsWith(":")) return prefix + level;
+  return `${prefix}.${scope}`;
 }

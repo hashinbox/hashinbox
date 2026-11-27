@@ -1855,55 +1855,6 @@ async def network_routes_replace(
     return NetworkRoutes.from_json(await client.send(request))
 
 
-# `GET /v1/networks/{chain}/{network}/tip/search`.
-NETWORK_TIP_SEARCH = Operation(
-    id="network_tip_search",
-    method="GET",
-    path="/v1/networks/{chain}/{network}/tip/search",
-    templates=("com.hashinbox.networks:read",),
-)
-
-
-@dataclass(frozen=True, kw_only=True)
-class NetworkTipSearchRequest(Request):
-    """The input of `network_tip_search`."""
-
-    # Chain name, as `GET /v1/networks` lists it.
-    chain: str
-    # Network name, as `GET /v1/networks` lists it.
-    network: str
-    # RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
-    # block at or before it.
-    at: str
-    # The last event `id` read (a step's number): the same search's steps
-    # after it.
-    cursor: str | None = None
-
-    def operation(self) -> Operation:
-        return NETWORK_TIP_SEARCH
-
-    def params(self) -> dict[str, str]:
-        return {"chain": self.chain, "network": self.network}
-
-    def query(self) -> list[tuple[str, str]]:
-        pairs: list[tuple[str, str]] = []
-        pairs.append(("at", self.at))
-        if self.cursor is not None:
-            pairs.append(("cursor", self.cursor))
-        return pairs
-
-
-def network_tip_search(
-    streamer: Streamer,
-    request: NetworkTipSearchRequest,
-) -> Stream[RawEvent]:
-    """Find a network's last block at or before a time, streaming the search: `GET /v1/networks/{chain}/{network}/tip/search`.
-
-    `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
-    """
-    return streamer.open(request)
-
-
 # `GET /v1/networks/{chain}/{network}/transactions`.
 NETWORK_TRANSACTIONS_LIST = Operation(
     id="network_transactions_list",

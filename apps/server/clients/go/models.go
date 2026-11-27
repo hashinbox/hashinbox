@@ -134,7 +134,7 @@ type CreateKeyRequest struct {
 	Name string `json:"name"`
 	// Its scopes, packed, covered by the caller's; the caller's when
 	// absent.
-	Scopes map[string][]string `json:"scopes,omitempty"`
+	Scopes map[string]ScopeGroup `json:"scopes,omitempty"`
 }
 
 // CreateSessionRequest is `POST /v1/session` body: `email` and `password` or `passphrase` (and
@@ -151,7 +151,7 @@ type CreateSessionRequest struct {
 	// Fewer scopes than the issuer's, packed
 	// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
 	// absent.
-	Scopes map[string][]string `json:"scopes,omitempty"`
+	Scopes map[string]ScopeGroup `json:"scopes,omitempty"`
 	// A key's session: who it is for (a customer); logged, grants
 	// nothing.
 	Sub *string `json:"sub,omitempty"`
@@ -172,7 +172,7 @@ type CreateUserRequest struct {
 	Password *string `json:"password,omitempty"`
 	// Its scopes, packed, covered by the creator's; none when absent.
 	// The root user holds every scope.
-	Scopes map[string][]string `json:"scopes,omitempty"`
+	Scopes map[string]ScopeGroup `json:"scopes,omitempty"`
 }
 
 // CreateWalletIndexRequest is `POST /v1/wallets/{id}/indexes` body.
@@ -268,7 +268,7 @@ type IssuedSession struct {
 	// Unix seconds it expires.
 	ExpiresAt int64 `json:"expires_at"`
 	// What it may do, packed.
-	Scopes map[string][]string `json:"scopes"`
+	Scopes map[string]ScopeGroup `json:"scopes"`
 	// The JWT: send it as `Authorization: Bearer …`.
 	Token string `json:"token"`
 	// The logged-in user (a login only).
@@ -973,6 +973,38 @@ const (
 	RunOutcomeMixed     RunOutcome = "mixed"
 )
 
+// ScopeGroup is A prefix's packed scopes: one as text, several as a list; `*` is the
+// prefix itself (`*:read` read only).
+type ScopeGroup struct {
+	String *string
+	List   *[]string
+}
+
+// MarshalJSON writes the variant that is set.
+func (u ScopeGroup) MarshalJSON() ([]byte, error) {
+	if u.String != nil {
+		return encodeJSON(u.String)
+	}
+	if u.List != nil {
+		return encodeJSON(u.List)
+	}
+	return []byte("null"), nil
+}
+
+// UnmarshalJSON reads the first variant data decodes as, no field left over.
+func (u *ScopeGroup) UnmarshalJSON(data []byte) error {
+	*u = ScopeGroup{}
+	if v := new(string); decodeStrict(data, v) {
+		u.String = v
+		return nil
+	}
+	if v := new([]string); decodeStrict(data, v) {
+		u.List = v
+		return nil
+	}
+	return noVariant("ScopeGroup")
+}
+
 // SecretSetting is A secret setting as listed: never its value or default.
 type SecretSetting struct {
 	// What it is for: its declaration's doc comment.
@@ -1029,7 +1061,7 @@ type SessionRead struct {
 	// Who issued it.
 	Kind Issuer `json:"kind"`
 	// What it may do, packed.
-	Scopes map[string][]string `json:"scopes"`
+	Scopes map[string]ScopeGroup `json:"scopes"`
 	// Who it is for; always present, null: not said.
 	Sub *string `json:"sub"`
 	// Its user.
@@ -1322,7 +1354,7 @@ type UpdateUserRequest struct {
 	// Disabled (it, its keys and every session refused), or enabled again.
 	Disabled *bool `json:"disabled,omitempty"`
 	// Its new scopes, packed, covered by the caller's.
-	Scopes map[string][]string `json:"scopes,omitempty"`
+	Scopes map[string]ScopeGroup `json:"scopes,omitempty"`
 }
 
 // UpdateWalletIndexRequest is `PATCH /v1/wallets/{id}/indexes/{asset}` body.
@@ -1353,7 +1385,7 @@ type User struct {
 	Name string `json:"name"`
 	// The widest scopes it may issue, packed in JSON
 	// (`{"com.hashinbox": ["wallets:read"]}`).
-	Scopes map[string][]string `json:"scopes"`
+	Scopes map[string]ScopeGroup `json:"scopes"`
 }
 
 // UserKey is one `user_key` row. Its JSON shows neither the secret nor its hash.
@@ -1374,7 +1406,7 @@ type UserKey struct {
 	// Unix ms it was revoked: it and its sessions refused for good.
 	RevokedAt *int64 `json:"revoked_at,omitempty"`
 	// What it may do, covered by its user's; packed in JSON.
-	Scopes map[string][]string `json:"scopes"`
+	Scopes map[string]ScopeGroup `json:"scopes"`
 	// The user that issued it.
 	UserID string `json:"user_id"`
 }

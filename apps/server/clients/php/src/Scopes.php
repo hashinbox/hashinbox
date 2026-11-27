@@ -28,7 +28,8 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
 
     /**
      * Space-separated text (empty: none), or a packed claim (each shared
-     * prefix and the scopes after it).
+     * prefix and the scopes after it, one as text or several as a list; `*`
+     * the prefix itself).
      *
      * @param string|array<array-key, mixed> $value
      * @throws ScopeError
@@ -47,14 +48,15 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
         $items = [];
         foreach ($prefixes as $prefix) {
             $texts = $value[$prefix];
+            $texts = is_string($texts) ? [$texts] : $texts;
             if (!is_array($texts)) {
-                throw new ScopeError("packed scopes of `{$prefix}` are not a list");
+                throw new ScopeError("packed scopes of `{$prefix}` are not text or a list");
             }
             foreach ($texts as $text) {
                 if (!is_string($text)) {
                     throw new ScopeError("packed scopes of `{$prefix}` are not text");
                 }
-                $items[] = Scope::parse($prefix === '' ? $text : "{$prefix}.{$text}");
+                $items[] = Scope::parse(self::joined($prefix, $text));
             }
         }
         return new self($items);
@@ -156,11 +158,12 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
 
     /**
      * Compressed, then grouped by their shared prefix (the leading plain names
-     * every scope starting with the same step shares, each keeping one step at
-     * least): the JWT claim, sorted by prefix. PHP turns a prefix like `"123"`
-     * into the integer key 123.
+     * every scope starting with the same step shares; a scope that is its
+     * prefix is `*`, `*:read`): the JWT claim, sorted by prefix. A group of one
+     * scope is its text alone: `{"com.hashinbox": "*"}`. PHP turns a prefix
+     * like `"123"` into the integer key 123.
      *
-     * @return array<string, list<string>>
+     * @return array<string, string|list<string>>
      */
     public function pack(): array
     {
@@ -173,12 +176,12 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
             $shared = self::sharedPrefix($scopes);
             foreach ($scopes as $scope) {
                 $steps = array_map(strval(...), array_slice($scope->path, 0, $shared));
-                $rest = new Scope(array_slice($scope->path, $shared), $scope->read);
-                $packed[implode('.', $steps)][] = (string) $rest;
+                $rest = (string) new Scope(array_slice($scope->path, $shared), $scope->read);
+                $packed[implode('.', $steps)][] = count($scope->path) === $shared ? "*{$rest}" : $rest;
             }
         }
         ksort($packed, SORT_STRING);
-        return $packed;
+        return array_map(static fn(array $texts): string|array => count($texts) === 1 ? $texts[0] : $texts, $packed);
     }
 
     public function getIterator(): Traversable
@@ -196,9 +199,21 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
         return implode(' ', array_map(static fn(Scope $scope): string => (string) $scope, $this->items));
     }
 
+    /** `$text` under `$prefix`: `*` (`*:read`) the prefix itself. */
+    private static function joined(string $prefix, string $text): string
+    {
+        if ($prefix === '') {
+            return $text;
+        }
+        $level = substr($text, 1);
+        if (str_starts_with($text, '*') && ($level === '' || str_starts_with($level, ':'))) {
+            return $prefix . $level;
+        }
+        return "{$prefix}.{$text}";
+    }
+
     /**
-     * How many leading steps of `$scopes` are the same plain name in each, each
-     * scope keeping one step at least.
+     * How many leading steps of `$scopes` are the same plain name in each.
      *
      * @param non-empty-list<Scope> $scopes
      */
@@ -206,7 +221,7 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
     {
         $shortest = min(array_map(static fn(Scope $scope): int => count($scope->path), $scopes));
         $first = $scopes[0]->path;
-        for ($at = 0; $at < $shortest - 1; $at++) {
+        for ($at = 0; $at < $shortest; $at++) {
             $step = $first[$at];
             if ($step->id !== null) {
                 return $at;
@@ -217,6 +232,6 @@ final readonly class Scopes implements Countable, IteratorAggregate, Stringable
                 }
             }
         }
-        return max($shortest - 1, 0);
+        return $shortest;
     }
 }

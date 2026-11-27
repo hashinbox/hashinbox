@@ -101,7 +101,7 @@ pub(crate) struct UserKey {
     /// What it may do, covered by its user's; packed in JSON.
     #[diesel(deserialize_as = PackedScopes)]
     #[serde(serialize_with = "serialize_packed")]
-    #[schema(value_type = std::collections::BTreeMap<String, Vec<String>>)]
+    #[schema(value_type = std::collections::BTreeMap<String, scope::Group>)]
     pub(crate) scopes: Scopes,
     /// Unix ms.
     pub(crate) created_at: i64,

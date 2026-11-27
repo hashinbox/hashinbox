@@ -143,7 +143,6 @@ async fn wallets_balance_legs_and_sends() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -342,12 +341,6 @@ async fn wallets_balance_legs_and_sends() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (status, _) = call(&router, Method::GET, "/v1/networks/bitcoin/regtest", None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, events) = text(&router, "/v1/networks/bitcoin/regtest/tip/search?at=1").await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        events.contains("event: error") && events.contains("cannot find blocks by time"),
-        "{events}"
-    );
     let (status, _) = call(
         &router,
         Method::GET,
@@ -431,7 +424,6 @@ async fn a_routed_method_alternates_its_nodes_and_routes_follow_their_nodes() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -562,7 +554,6 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -611,36 +602,6 @@ async fn a_start_past_the_depth_limit_is_refused_and_an_index_pauses_resumes_and
     assert_eq!(networks["networks"][0]["max_depth"], 30);
     // No node told a tip yet, and none is stored: the list asks no node.
     assert_eq!(networks["networks"][0]["tip"]["live"], Value::Null);
-    // Block p is 100 - p days old: 50.5 days ago is after block 49.
-    let at = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("after 1970")
-        .as_secs()
-        - 101 * 43_200;
-    let uri = format!("/v1/networks/bitcoin/regtest/tip/search?at={at}");
-    let (status, events) = text(&router, &uri).await;
-    assert_eq!(status, StatusCode::OK, "{events}");
-    assert!(events.contains("event: probe"), "{events}");
-    let found = events
-        .split("\n\n")
-        .find(|event| event.starts_with("event: found"))
-        .and_then(|event| event.lines().find_map(|line| line.strip_prefix("data: ")))
-        .and_then(|data| serde_json::from_str::<Value>(data).ok())
-        .unwrap_or_default();
-    assert_eq!(found["position"], 49, "{events}");
-    // Asked again after its last probe: the same search, its last step only.
-    let (_, steps) = self::events(&router, &uri, &[]).await;
-    let probed = (steps.len() - 1).to_string();
-    let resumed = format!("{uri}&cursor={probed}");
-    let (status, rest) = self::events(&router, &resumed, &[]).await;
-    assert_eq!(status, StatusCode::OK);
-    let rest: Vec<_> = rest
-        .iter()
-        .map(|(event, _, id)| (event.as_str(), id.as_str()))
-        .collect();
-    assert_eq!(rest, [("found", steps.len().to_string().as_str())]);
-    let (status, _) = text(&router, "/v1/networks/bitcoin/regtest/tip/search?at=soon").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
 
     let uri = "/v1/wallets/bitcoin.regtest.alice";
     let native = format!("{uri}/indexes/native");
@@ -687,7 +648,6 @@ async fn a_wallet_is_generated_imported_or_watched_then_indexed() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -915,7 +875,6 @@ async fn a_failing_index_step_leaves_its_reason_on_the_job_and_health_not_ready(
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -973,7 +932,6 @@ async fn a_trigger_run_shows_its_jobs_and_how_they_ended() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -1014,7 +972,6 @@ async fn a_count_compares_with_a_whole_number_and_a_put_keeps_enabled() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -1112,7 +1069,6 @@ async fn a_reconciled_index_reads_null_skips_triggers_and_settles_again() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -1240,7 +1196,6 @@ async fn the_legs_route_shows_when_a_jump_archived_a_coin() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -1301,7 +1256,6 @@ async fn app(
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -2300,7 +2254,6 @@ async fn the_log_stream_sends_each_new_entry_its_filters_read() {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -2387,7 +2340,6 @@ async fn the_log_stream_ends_each_window_and_resumes_after_the_last_id() {
             candles: Default::default(),
             chains: Default::default(),
             root_exists: Default::default(),
-            searches: Default::default(),
             stream_window: std::time::Duration::from_millis(300),
         });
         let config = http_server::Config::new(
@@ -2528,7 +2480,6 @@ async fn markets_list_set_read_candles_and_log() {
         candles: candles.clone(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(
@@ -2673,7 +2624,6 @@ async fn a_network_is_created_live_its_node_tested_and_added() {
                 .with::<chain_ethereum::Info, chain_ethereum::Factory>(),
         ),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(

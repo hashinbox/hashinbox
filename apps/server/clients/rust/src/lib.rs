@@ -22,6 +22,6 @@ pub mod session;
 #[cfg(feature = "reqwest")]
 pub use client::http::Client;
 pub use client::{ApiError, Error, Operation, reason};
-pub use scope::{Scope, Scopes, fill};
+pub use scope::{Packed, Scope, Scopes, fill};
 pub use secret::{Issue, Secret};
 pub use session::{Invalid, Session};

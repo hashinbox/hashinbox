@@ -21,8 +21,9 @@ __all__ = [
     "fill",
 ]
 
-# What a packed set is: each shared prefix and the scopes after it.
-Packed: TypeAlias = Mapping[str, Iterable[str]]
+# What a packed set is: each shared prefix and the scopes after it, one as
+# text, several as a list; `*` the prefix itself.
+Packed: TypeAlias = Mapping[str, str | Iterable[str]]
 
 # What a read-only scope's text ends with.
 _READ = ":read"
@@ -186,9 +187,9 @@ class Scopes:
         if isinstance(value, str):
             return cls(Scope.parse(text) for text in _WHITESPACE.split(value) if text)
         return cls(
-            Scope.parse(f"{prefix}.{text}" if prefix else text)
+            Scope.parse(_joined(prefix, text))
             for prefix in sorted(value)
-            for text in value[prefix]
+            for text in _texts(value[prefix])
         )
 
     def covers(self, scope: Scope | str) -> bool:
@@ -247,10 +248,11 @@ class Scopes:
         kept = [scope for at, scope in enumerate(items) if not dropped(at)]
         return Scopes(sorted(kept, key=Scope._key))
 
-    def pack(self) -> dict[str, list[str]]:
+    def pack(self) -> dict[str, str | list[str]]:
         """Compressed, then grouped by their shared prefix (the leading
-        plain names every scope starting with the same step shares, each
-        keeping one step at least): the JWT claim."""
+        plain names every scope starting with the same step shares; a scope
+        that is its prefix is `*`, `*:read`): the JWT claim. A group of one
+        scope is its text alone: `{"com.hashinbox": "*"}`."""
         groups: dict[Segment, list[Scope]] = {}
         for scope in self.compress():
             groups.setdefault(scope.path[0], []).append(scope)
@@ -259,9 +261,14 @@ class Scopes:
             shared = _shared_prefix(scopes)
             for scope in scopes:
                 prefix = ".".join(str(step) for step in scope.path[:shared])
-                rest = Scope(scope.path[shared:], scope.read)
-                packed.setdefault(prefix, []).append(str(rest))
-        return dict(sorted(packed.items()))
+                rest = str(Scope(scope.path[shared:], scope.read))
+                if len(scope.path) == shared:
+                    rest = "*" + rest
+                packed.setdefault(prefix, []).append(rest)
+        return {
+            prefix: texts[0] if len(texts) == 1 else texts
+            for prefix, texts in sorted(packed.items())
+        }
 
     def __iter__(self) -> Iterator[Scope]:
         return iter(self._items)
@@ -289,13 +296,25 @@ def _triggers(held: Scope, source: Scope) -> bool:
     return Scope(path)._reaches(source.path)
 
 
+def _texts(group: str | Iterable[str]) -> Iterable[str]:
+    """A packed group's scopes: one text, or several."""
+    return (group,) if isinstance(group, str) else group
+
+
+def _joined(prefix: str, text: str) -> str:
+    """`text` under `prefix`: `*` (`*:read`) the prefix itself."""
+    level = text[1:]
+    if prefix and text.startswith("*") and (not level or level.startswith(":")):
+        return prefix + level
+    return f"{prefix}.{text}" if prefix else text
+
+
 def _shared_prefix(scopes: list[Scope]) -> int:
-    """How many leading steps of `scopes` are the same plain name in each,
-    each scope keeping one step at least."""
+    """How many leading steps of `scopes` are the same plain name in each."""
     shortest = min(len(scope.path) for scope in scopes)
     first = scopes[0].path
     count = 0
-    for at in range(shortest - 1):
+    for at in range(shortest):
         step = first[at]
         if step.id is not None or any(scope.path[at] != step for scope in scopes):
             break

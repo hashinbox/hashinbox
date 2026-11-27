@@ -7,6 +7,12 @@ description = "Access scopes as text (`com.hashinbox.wallets[id]:read`): parsing
 
 [dependencies]
 scope-macros = { path = "macro" }
+serde = { workspace = true, features = ["derive", "std"] }
+utoipa = { workspace = true, optional = true }
+
+[features]
+# `Group`'s OpenAPI schema (`ScopeGroup`).
+utoipa = ["dep:utoipa"]
 
 [dev-dependencies]
 futures-executor.workspace = true

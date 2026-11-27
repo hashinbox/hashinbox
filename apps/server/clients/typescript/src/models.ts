@@ -150,7 +150,7 @@ export interface CreateKeyRequest {
    * Its scopes, packed, covered by the caller's; the caller's when
    * absent.
    */
-  scopes?: Record<string, string[]>;
+  scopes?: Record<string, ScopeGroup>;
 }
 
 /**
@@ -173,7 +173,7 @@ export interface CreateSessionRequest {
    * (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
    * absent.
    */
-  scopes?: Record<string, string[]>;
+  scopes?: Record<string, ScopeGroup>;
   /**
    * A key's session: who it is for (a customer); logged, grants
    * nothing.
@@ -200,7 +200,7 @@ export interface CreateUserRequest {
    * Its scopes, packed, covered by the creator's; none when absent.
    * The root user holds every scope.
    */
-  scopes?: Record<string, string[]>;
+  scopes?: Record<string, ScopeGroup>;
 }
 
 /** `POST /v1/wallets/{id}/indexes` body. */
@@ -304,7 +304,7 @@ export interface IssuedSession {
   /** Unix seconds it expires. */
   expires_at: number;
   /** What it may do, packed. */
-  scopes: Record<string, string[]>;
+  scopes: Record<string, ScopeGroup>;
   /** The JWT: send it as `Authorization: Bearer …`. */
   token: string;
   /** The logged-in user (a login only). */
@@ -1066,6 +1066,12 @@ export interface RunJob {
 /** Where a run's jobs are together. */
 export type RunOutcome = "pending" | "succeeded" | "failed" | "mixed";
 
+/**
+ * A prefix's packed scopes: one as text, several as a list; `*` is the
+ * prefix itself (`*:read` read only).
+ */
+export type ScopeGroup = string | string[];
+
 /** A secret setting as listed: never its value or default. */
 export interface SecretSetting {
   /** What it is for: its declaration's doc comment. */
@@ -1128,7 +1134,7 @@ export interface SessionRead {
   /** Who issued it. */
   kind: Issuer;
   /** What it may do, packed. */
-  scopes: Record<string, string[]>;
+  scopes: Record<string, ScopeGroup>;
   /** Who it is for; always present, null: not said. */
   sub: string | null;
   /** Its user. */
@@ -1473,7 +1479,7 @@ export interface UpdateUserRequest {
   /** Disabled (it, its keys and every session refused), or enabled again. */
   disabled?: boolean;
   /** Its new scopes, packed, covered by the caller's. */
-  scopes?: Record<string, string[]>;
+  scopes?: Record<string, ScopeGroup>;
 }
 
 /** `PATCH /v1/wallets/{id}/indexes/{asset}` body. */
@@ -1512,7 +1518,7 @@ export interface User {
    * The widest scopes it may issue, packed in JSON
    * (`{"com.hashinbox": ["wallets:read"]}`).
    */
-  scopes: Record<string, string[]>;
+  scopes: Record<string, ScopeGroup>;
 }
 
 /** One `user_key` row. Its JSON shows neither the secret nor its hash. */
@@ -1535,7 +1541,7 @@ export interface UserKey {
   /** Unix ms it was revoked: it and its sessions refused for good. */
   revoked_at?: number | null;
   /** What it may do, covered by its user's; packed in JSON. */
-  scopes: Record<string, string[]>;
+  scopes: Record<string, ScopeGroup>;
   /** The user that issued it. */
   user_id: string;
 }

@@ -1594,46 +1594,6 @@ export function networkRoutesReplace(
   );
 }
 
-/** `GET /v1/networks/{chain}/{network}/tip/search`. */
-export const networkTipSearchOperation: Operation = {
-  id: "network_tip_search",
-  method: "GET",
-  path: "/v1/networks/{chain}/{network}/tip/search",
-  query: ["at", "cursor"],
-  templates: ["com.hashinbox.networks:read"],
-};
-
-/** The input of `networkTipSearch`. */
-export interface NetworkTipSearchRequest {
-  /** Chain name, as `GET /v1/networks` lists it. */
-  chain: string;
-  /** Network name, as `GET /v1/networks` lists it. */
-  network: string;
-  /**
-   * RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
-   * block at or before it.
-   */
-  at: string;
-  /**
-   * The last event `id` read (a step's number): the same search's steps
-   * after it.
-   */
-  cursor?: string;
-}
-
-/**
- * Find a network's last block at or before a time, streaming the search. `GET /v1/networks/{chain}/{network}/tip/search`
- *
- * `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
- */
-export function networkTipSearch(
-  streamer: Streamer,
-  request: NetworkTipSearchRequest,
-  signal?: AbortSignal,
-): EventStream<RawEvent> {
-  return streamer.open<RawEvent>(networkTipSearchOperation, request, signal);
-}
-
 /** `GET /v1/networks/{chain}/{network}/transactions`. */
 export const networkTransactionsListOperation: Operation = {
   id: "network_transactions_list",

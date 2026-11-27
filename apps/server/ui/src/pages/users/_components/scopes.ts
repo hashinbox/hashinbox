@@ -9,19 +9,12 @@ export type Resources = string[];
 
 /** Every scope of `packed`, written in full. */
 export function unpack(packed: Packed): string[] {
-  return Object.entries(packed).flatMap(([prefix, list]) =>
-    list.map((scope) => (prefix ? `${prefix}.${scope}` : scope)),
-  );
+  return [...Scopes.parse(packed)].map(String);
 }
 
-/** `scopes` packed under `com.hashinbox` (the root itself as it is), as the server takes them. */
+/** `scopes` packed, as the server takes them. */
 export function pack(scopes: string[]): Packed {
-  const packed: Packed = {};
-  for (const scope of scopes) {
-    const [prefix, rest] = scope.startsWith(`${ROOT}.`) ? [ROOT, short(scope)] : ['', scope];
-    (packed[prefix] ??= []).push(rest);
-  }
-  return packed;
+  return Scopes.parse(scopes.join(' ')).pack();
 }
 
 /** A scope without `com.hashinbox.`. */

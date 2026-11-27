@@ -174,7 +174,7 @@ pub struct CreateKeyRequest {
     /// Its scopes, packed, covered by the caller's; the caller's when
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<BTreeMap<String, Vec<String>>>,
+    pub scopes: Option<BTreeMap<String, ScopeGroup>>,
 }
 
 /// `POST /v1/session` body: `email` and `password` or `passphrase` (and
@@ -196,7 +196,7 @@ pub struct CreateSessionRequest {
     /// (`{"com.hashinbox": ["wallets[x]:read"]}`); the issuer's when
     /// absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<BTreeMap<String, Vec<String>>>,
+    pub scopes: Option<BTreeMap<String, ScopeGroup>>,
     /// A key's session: who it is for (a customer); logged, grants
     /// nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,7 +223,7 @@ pub struct CreateUserRequest {
     /// Its scopes, packed, covered by the creator's; none when absent.
     /// The root user holds every scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<BTreeMap<String, Vec<String>>>,
+    pub scopes: Option<BTreeMap<String, ScopeGroup>>,
 }
 
 /// `POST /v1/wallets/{id}/indexes` body.
@@ -379,7 +379,7 @@ pub struct IssuedSession {
     /// Unix seconds it expires.
     pub expires_at: i64,
     /// What it may do, packed.
-    pub scopes: BTreeMap<String, Vec<String>>,
+    pub scopes: BTreeMap<String, ScopeGroup>,
     /// The JWT: send it as `Authorization: Bearer …`.
     pub token: String,
     /// The logged-in user (a login only).
@@ -1285,6 +1285,15 @@ impl fmt::Display for RunOutcome {
     }
 }
 
+/// A prefix's packed scopes: one as text, several as a list; `*` is the
+/// prefix itself (`*:read` read only).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ScopeGroup {
+    String(String),
+    List(Vec<String>),
+}
+
 /// A secret setting as listed: never its value or default.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SecretSetting {
@@ -1349,7 +1358,7 @@ pub struct SessionRead {
     /// Who issued it.
     pub kind: Issuer,
     /// What it may do, packed.
-    pub scopes: BTreeMap<String, Vec<String>>,
+    pub scopes: BTreeMap<String, ScopeGroup>,
     /// Who it is for; always present, null: not said.
     pub sub: Option<String>,
     /// Its user.
@@ -1675,7 +1684,7 @@ pub struct UpdateUserRequest {
     pub disabled: Option<bool>,
     /// Its new scopes, packed, covered by the caller's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scopes: Option<BTreeMap<String, Vec<String>>>,
+    pub scopes: Option<BTreeMap<String, ScopeGroup>>,
 }
 
 /// `PATCH /v1/wallets/{id}/indexes/{asset}` body.
@@ -1710,7 +1719,7 @@ pub struct User {
     pub name: String,
     /// The widest scopes it may issue, packed in JSON
     /// (`{"com.hashinbox": ["wallets:read"]}`).
-    pub scopes: BTreeMap<String, Vec<String>>,
+    pub scopes: BTreeMap<String, ScopeGroup>,
 }
 
 /// One `user_key` row. Its JSON shows neither the secret nor its hash.
@@ -1736,7 +1745,7 @@ pub struct UserKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revoked_at: Option<i64>,
     /// What it may do, covered by its user's; packed in JSON.
-    pub scopes: BTreeMap<String, Vec<String>>,
+    pub scopes: BTreeMap<String, ScopeGroup>,
     /// The user that issued it.
     pub user_id: String,
 }

@@ -2258,60 +2258,6 @@ func NetworkRoutesReplace(ctx context.Context, client Client, request NetworkRou
 	return response, err
 }
 
-// networkTipSearch is GET /v1/networks/{chain}/{network}/tip/search.
-var networkTipSearch = Operation{
-	ID:        "network_tip_search",
-	Method:    "GET",
-	Path:      "/v1/networks/{chain}/{network}/tip/search",
-	Templates: []string{"com.hashinbox.networks:read"},
-}
-
-// NetworkTipSearchRequest is NetworkTipSearch's input: its path and query parameters, and its body.
-type NetworkTipSearchRequest struct {
-	// Chain name, as `GET /v1/networks` lists it.
-	Chain string `json:"-"`
-	// Network name, as `GET /v1/networks` lists it.
-	Network string `json:"-"`
-	// RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
-	// block at or before it.
-	At string `json:"-"`
-	// The last event `id` read (a step's number): the same search's steps
-	// after it.
-	Cursor *string `json:"-"`
-}
-
-// Operation is networkTipSearch.
-func (r NetworkTipSearchRequest) Operation() Operation {
-	return networkTipSearch
-}
-
-// Params are the path parameters by name.
-func (r NetworkTipSearchRequest) Params() map[string]string {
-	return map[string]string{"chain": r.Chain, "network": r.Network}
-}
-
-// Query is the query string.
-func (r NetworkTipSearchRequest) Query() url.Values {
-	query := url.Values{}
-	query.Set("at", r.At)
-	if r.Cursor != nil {
-		query.Set("cursor", *r.Cursor)
-	}
-	return query
-}
-
-// Body is the JSON body; nil when none.
-func (r NetworkTipSearchRequest) Body() ([]byte, error) {
-	return nil, nil
-}
-
-// NetworkTipSearch finds a network's last block at or before a time, streaming the search.
-//
-// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
-func NetworkTipSearch(ctx context.Context, streamer Streamer, request NetworkTipSearchRequest) (*Stream[RawEvent], error) {
-	return Open[RawEvent](ctx, streamer, request)
-}
-
 // networkTransactionsList is GET /v1/networks/{chain}/{network}/transactions.
 var networkTransactionsList = Operation{
 	ID:        "network_transactions_list",

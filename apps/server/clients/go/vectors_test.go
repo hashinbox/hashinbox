@@ -55,7 +55,11 @@ func TestScopeVectors(t *testing.T) {
 		} `json:"first_uncovered"`
 		Sets []struct {
 			Scopes, Display, Compressed string
-			Packed                      map[string][]string
+			Packed                      map[string]ScopeGroup
+		}
+		Unpack []struct {
+			Packed map[string]ScopeGroup
+			Scopes *string
 		}
 		Expand struct {
 			Depends map[string][]string
@@ -64,7 +68,7 @@ func TestScopeVectors(t *testing.T) {
 	}
 	read(t, "scope.json", &v)
 	if len(v.Parse) == 0 || len(v.Refuse) == 0 || len(v.Covers) == 0 || len(v.Escape) == 0 ||
-		len(v.FirstUncovered) == 0 || len(v.Sets) == 0 || len(v.Expand.Depends) == 0 || len(v.Expand.Cases) == 0 {
+		len(v.FirstUncovered) == 0 || len(v.Sets) == 0 || len(v.Unpack) == 0 || len(v.Expand.Depends) == 0 || len(v.Expand.Cases) == 0 {
 		t.Fatal("a vector section is empty or renamed")
 	}
 	for _, c := range v.Parse {
@@ -110,6 +114,12 @@ func TestScopeVectors(t *testing.T) {
 		unpacked, err := ParseScopes(packed)
 		if err != nil || unpacked.compress().String() != c.Compressed {
 			t.Errorf("unpack %q: %v %q, want %q", c.Scopes, err, unpacked, c.Compressed)
+		}
+	}
+	for _, c := range v.Unpack {
+		scopes, err := ParseScopes(c.Packed)
+		if (err == nil) != (c.Scopes != nil) || (err == nil && scopes.String() != *c.Scopes) {
+			t.Errorf("unpack %v: %v %q, want %v", c.Packed, err, scopes, c.Scopes)
 		}
 	}
 	for _, c := range v.Expand.Cases {

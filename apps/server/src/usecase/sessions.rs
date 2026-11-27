@@ -4,8 +4,6 @@
 //! that cannot sign, logging out everywhere, and the scope narrowing every
 //! issue checks.
 
-use std::collections::BTreeMap;
-
 use crypto::{mnemonic::Mnemonic, password};
 use diesel::{QueryResult, SqliteConnection};
 use scope::Scopes;
@@ -28,7 +26,7 @@ use crate::{
 pub(crate) const DEFAULT_TTL: i64 = 12 * 60 * 60;
 
 /// Scopes as [`Scopes::pack`] writes them: what a request body carries.
-pub(crate) type Packed = BTreeMap<String, Vec<String>>;
+pub(crate) use scope::Packed;
 
 /// A missing, malformed or forged bearer token: 401, no reason.
 pub(crate) fn bearer_required() -> Error {

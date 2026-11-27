@@ -3,7 +3,34 @@
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
+use serde::{Deserialize, Serialize};
+
 use crate::{ParseError, Scope, Segment};
+
+/// Scopes as [`Scopes::pack`] writes them: each prefix and its group.
+pub type Packed = BTreeMap<String, Group>;
+
+/// A prefix's packed scopes: one as text, several as a list; `*` is the
+/// prefix itself (`*:read` read only).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema), schema(as = ScopeGroup))]
+#[serde(untagged)]
+pub enum Group {
+    /// One scope.
+    One(String),
+    /// Several.
+    Many(Vec<String>),
+}
+
+impl Group {
+    /// Each scope.
+    pub fn iter(&self) -> std::slice::Iter<'_, String> {
+        match self {
+            Self::One(scope) => std::slice::from_ref(scope).iter(),
+            Self::Many(scopes) => scopes.iter(),
+        }
+    }
+}
 
 /// Scopes a key or token holds; its text is theirs, space-separated.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -54,12 +81,13 @@ impl Scopes {
 
     /// [`Self::compress`]ed, then grouped by their shared prefix, the
     /// shortest text for a JWT claim:
-    /// `{"com.hashinbox": ["triggers", "wallets[a]:read"]}`. A
-    /// prefix is the leading plain names (no ids) every scope
-    /// starting with the same step shares, each scope keeping one step at
-    /// least. [`Self::unpack`] reverses it.
+    /// `{"com.hashinbox": ["triggers", "wallets[a]:read"]}`. A prefix is
+    /// the leading plain names (no ids) every scope starting with the same
+    /// step shares; a scope that is its prefix is `*` (`*:read`). A group
+    /// of one scope is its text alone: `{"com.hashinbox": "*"}`.
+    /// [`Self::unpack`] reverses it.
     #[must_use]
-    pub fn pack(&self) -> BTreeMap<String, Vec<String>> {
+    pub fn pack(&self) -> Packed {
         let compressed = self.compress();
         let mut by_first: BTreeMap<&Segment, Vec<&Scope>> = BTreeMap::new();
         for scope in &compressed {
@@ -70,27 +98,41 @@ impl Scopes {
             let shared = shared_prefix(&scopes);
             for scope in scopes {
                 let (prefix, rest) = scope.path().split_at(shared);
-                let rest = scope.with_path(rest.to_vec());
-                packed
-                    .entry(joined(prefix))
-                    .or_default()
-                    .push(rest.to_string());
+                let rest = match (rest, scope.is_read()) {
+                    ([], false) => "*".to_owned(),
+                    ([], true) => "*:read".to_owned(),
+                    _ => scope.with_path(rest.to_vec()).to_string(),
+                };
+                packed.entry(joined(prefix)).or_default().push(rest);
             }
         }
+        let group = |mut scopes: Vec<String>| match scopes.len() {
+            1 => Group::One(scopes.remove(0)),
+            _ => Group::Many(scopes),
+        };
         packed
+            .into_iter()
+            .map(|(prefix, scopes)| (prefix, group(scopes)))
+            .collect()
     }
 
     /// The scopes [`Self::pack`] packed: each prefix and its scopes joined
-    /// by `.` (an empty prefix: the scopes as they are).
+    /// by `.`, `*` the prefix itself (an empty prefix: the scopes as they
+    /// are).
     ///
     /// # Errors
     ///
     /// When a joined scope does not parse.
-    pub fn unpack(packed: &BTreeMap<String, Vec<String>>) -> Result<Self, ParseError> {
-        let each = packed.iter().flat_map(|(prefix, scopes)| {
-            scopes.iter().map(move |scope| match prefix.as_str() {
-                "" => scope.parse(),
-                prefix => format!("{prefix}.{scope}").parse(),
+    pub fn unpack(packed: &Packed) -> Result<Self, ParseError> {
+        let each = packed.iter().flat_map(|(prefix, group)| {
+            group.iter().map(move |scope| {
+                match (prefix.as_str(), scope.strip_prefix('*')) {
+                    ("", _) => scope.parse(),
+                    (prefix, Some(level)) if level.is_empty() || level.starts_with(':') => {
+                        format!("{prefix}{level}").parse()
+                    }
+                    (prefix, _) => format!("{prefix}.{scope}").parse(),
+                }
             })
         });
         each.collect()
@@ -171,17 +213,16 @@ fn without_covered(scopes: Vec<Scope>) -> Vec<Scope> {
         .collect()
 }
 
-/// How many leading steps of `scopes` are the same plain name in each,
-/// each scope keeping one step at least.
+/// How many leading steps of `scopes` are the same plain name in each.
 fn shared_prefix(scopes: &[&Scope]) -> usize {
     let shortest = scopes
         .iter()
         .map(|scope| scope.path().len())
         .min()
-        .unwrap_or(1);
+        .unwrap_or(0);
     let plain = |step: &Segment| step.id.is_none();
     let first = scopes[0].path();
-    (0..shortest - 1)
+    (0..shortest)
         .take_while(|&at| {
             plain(&first[at]) && scopes.iter().all(|scope| scope.path()[at] == first[at])
         })
@@ -270,33 +311,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pack_groups_by_the_shared_prefix_and_unpacks() {
-        let held = scopes(
-            "com.hashinbox.wallets[x]:read com.hashinbox.wallets[y]:read \
-             com.hashinbox.wallets[x].tags com.hashinbox.triggers other.thing",
-        );
-        let packed = held.pack();
-        let json: Vec<String> = packed
-            .iter()
-            .map(|(prefix, scopes)| format!("{prefix}: {}", scopes.join(" ")))
-            .collect();
-        assert_eq!(
-            json,
-            [
-                "com.hashinbox: triggers wallets[x]:read wallets[x].tags wallets[y]:read",
-                "other: thing",
-            ]
-        );
-        assert_eq!(Scopes::unpack(&packed).unwrap(), held.compress());
+    fn packed(text: &str) -> String {
+        serde_json::to_string(&scopes(text).pack()).unwrap()
     }
 
     #[test]
-    fn pack_keeps_one_step_per_scope() {
-        let held = scopes("a.b.c:read a.b:read");
-        let packed = held.pack();
-        assert_eq!(packed["a"], ["b:read"]);
-        assert_eq!(Scopes::unpack(&packed).unwrap(), held.compress());
+    fn pack_groups_by_the_shared_prefix_and_unpacks() {
+        let cases = [
+            ("com.hashinbox", r#"{"com.hashinbox":"*"}"#),
+            ("com.hashinbox:read", r#"{"com.hashinbox":"*:read"}"#),
+            (
+                "com.hashinbox:read com.hashinbox.wallets",
+                r#"{"com.hashinbox":["*:read","wallets"]}"#,
+            ),
+            (
+                "com.hashinbox.wallets[x]:read com.hashinbox.triggers other.thing",
+                r#"{"com.hashinbox":["triggers","wallets[x]:read"],"other.thing":"*"}"#,
+            ),
+            ("a.b.c:read a.b:read", r#"{"a.b":"*:read"}"#),
+            ("x[a]:read y[b]", r#"{"":["x[a]:read","y[b]"]}"#),
+            ("", "{}"),
+        ];
+        for (text, json) in cases {
+            assert_eq!(packed(text), json, "{text}");
+            let back: super::Packed = serde_json::from_str(json).unwrap();
+            assert_eq!(Scopes::unpack(&back).unwrap(), scopes(text).compress());
+        }
+    }
+
+    #[test]
+    fn unpack_takes_lists_and_texts() {
+        let old: super::Packed = serde_json::from_str(r#"{"com":["hashinbox"]}"#).unwrap();
+        assert_eq!(Scopes::unpack(&old).unwrap(), scopes("com.hashinbox"));
+        for bad in [r#"{"":"*"}"#, r#"{"a":"*b"}"#, r#"{"a":"*:write"}"#] {
+            let bad: super::Packed = serde_json::from_str(bad).unwrap();
+            assert!(Scopes::unpack(&bad).is_err());
+        }
     }
 
     /// The test dependencies.

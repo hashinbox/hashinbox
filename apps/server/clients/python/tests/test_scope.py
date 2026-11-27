@@ -48,6 +48,15 @@ def test_sets(case: dict[str, Any]) -> None:
     assert Scopes.parse(case["packed"]) == scopes.compress()
 
 
+@pytest.mark.parametrize("case", VECTORS["unpack"])
+def test_unpack(case: dict[str, Any]) -> None:
+    if case["scopes"] is None:
+        with pytest.raises(ScopeError):
+            Scopes.parse(case["packed"])
+    else:
+        assert str(Scopes.parse(case["packed"])) == case["scopes"]
+
+
 @pytest.mark.parametrize("case", VECTORS["expand"]["cases"])
 def test_expand(case: dict[str, str]) -> None:
     expanded = Scopes.parse(case["scopes"]).expand(VECTORS["expand"]["depends"])

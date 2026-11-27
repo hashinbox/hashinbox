@@ -14,7 +14,6 @@ mod network_endpoint_routes;
 mod network_endpoints;
 mod network_transactions;
 mod networks;
-mod networks_tip;
 mod openapi;
 mod recovery;
 mod session;
@@ -54,7 +53,6 @@ pub(super) fn all() -> OpenApiRouter<Arc<AppState>> {
         .merge(network_endpoint_routes::routes())
         .merge(network_block_transactions::routes())
         .merge(network_transactions::routes())
-        .merge(networks_tip::routes())
         .merge(stats::routes())
         .merge(triggers::routes())
         .merge(wallet_tags::routes())

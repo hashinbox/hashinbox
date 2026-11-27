@@ -195,9 +195,7 @@ impl base::ServiceFactory for Scripted {
             }]),
             storage: storage.clone(),
             client,
-            dated: self
-                .max_depth
-                .map(|_| -> Arc<dyn base::Dated> { Arc::new(days()) }),
+            dated: None,
             balances: self.script.balances.clone(),
             confirmer: None,
             confirmations: 0,

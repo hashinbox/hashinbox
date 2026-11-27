@@ -91,7 +91,6 @@ impl App {
             candles: Default::default(),
             chains: Default::default(),
             root_exists: Default::default(),
-            searches: Default::default(),
             stream_window: http_server::sse::SSE_WINDOW,
         });
         let (container, queue, actions) = (&state.container, &state.queue, &state.actions);

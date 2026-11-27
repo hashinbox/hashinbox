@@ -18,7 +18,7 @@ anyhow.workspace = true
 # Session JWTs (`models::session`); passwords, TOTP and mnemonics are `crypto`'s.
 jsonwebtoken.workspace = true
 # The scopes a user, key or session holds, and each endpoint's check.
-scope = { path = "../../packages/scope" }
+scope = { path = "../../packages/scope", features = ["utoipa"] }
 clap = { workspace = true, features = ["env"] }
 axum = "0.8"
 base = { path = "../../sdk/base" }
@@ -28,13 +28,12 @@ chain-bnb = { path = "../../sdk/chains/bnb" }
 chain-ethereum = { path = "../../sdk/chains/ethereum" }
 chain-solana = { path = "../../sdk/chains/solana" }
 chain-tron = { path = "../../sdk/chains/tron" }
-# The stream of `GET .../tip/search` (axum's SSE takes a `Stream`); the market feeds asked at once (`join_all`).
+# The log stream (axum's SSE takes a `Stream`); the market feeds asked at once (`join_all`).
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 hex.workspace = true
 # The market feeds' public HTTP APIs (`usecase::market`).
 reqwest.workspace = true
 # Parses the RFC 3339 time `GET .../tip?at=` finds a block by.
-jiff = { version = "=0.2.35", default-features = false, features = ["std"] }
 http-server = { path = "../../packages/http-server" }
 rpc = { path = "../../packages/rpc" }
 serde = { version = "1", features = ["derive"] }

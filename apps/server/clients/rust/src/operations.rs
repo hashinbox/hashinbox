@@ -2071,62 +2071,6 @@ pub async fn network_routes_replace<C: Client>(
     call(client, &request).await
 }
 
-/// `GET /v1/networks/{chain}/{network}/tip/search`.
-pub const NETWORK_TIP_SEARCH: Operation = Operation {
-    id: "network_tip_search",
-    method: Method::Get,
-    path: "/v1/networks/{chain}/{network}/tip/search",
-    templates: &["com.hashinbox.networks:read"],
-};
-
-/// The input of [`network_tip_search`].
-#[derive(Clone, Debug)]
-pub struct NetworkTipSearchRequest {
-    /// Chain name, as `GET /v1/networks` lists it.
-    pub chain: String,
-    /// Network name, as `GET /v1/networks` lists it.
-    pub network: String,
-    /// RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last
-    /// block at or before it.
-    pub at: String,
-    /// The last event `id` read (a step's number): the same search's steps
-    /// after it.
-    pub cursor: Option<String>,
-}
-
-impl Request for NetworkTipSearchRequest {
-    type Response = RawEvent;
-
-    fn operation(&self) -> &'static Operation {
-        &NETWORK_TIP_SEARCH
-    }
-
-    fn param(&self, name: &str) -> Option<String> {
-        match name {
-            "chain" => Some(self.chain.to_string()),
-            "network" => Some(self.network.to_string()),
-            _ => None,
-        }
-    }
-
-    fn query(&self, query: &mut Vec<(&'static str, String)>) {
-        query.push(("at", self.at.to_string()));
-        if let Some(cursor) = &self.cursor {
-            query.push(("cursor", cursor.to_string()));
-        }
-    }
-}
-
-/// Find a network's last block at or before a time, streaming the search: `GET /v1/networks/{chain}/{network}/tip/search`.
-///
-/// `text/event-stream`, read from the node: `event: probe` with `{"low":{"position","timestamp"},"high":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{"position","timestamp"}`, or `event: error` with `{"message"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).
-pub async fn network_tip_search<S: Streamer>(
-    streamer: &S,
-    request: NetworkTipSearchRequest,
-) -> Result<Events<'_, RawEvent, S>, Error<S::Error>> {
-    open(streamer, &request).await
-}
-
 /// `GET /v1/networks/{chain}/{network}/transactions`.
 pub const NETWORK_TRANSACTIONS_LIST: Operation = Operation {
     id: "network_transactions_list",

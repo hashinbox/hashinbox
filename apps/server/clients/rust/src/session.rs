@@ -4,7 +4,6 @@
 //! The client never checks a signature: only the server holds what checks
 //! it. It reads the claims to know the scopes, the times and the issuer.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -16,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::Operation;
 use crate::models::Amr;
 use crate::operations::DEPENDS;
-use crate::scope::{Scopes, escape_id, fill};
+use crate::scope::{Packed, Scopes, escape_id, fill};
 
 /// A session: its JWT and what the JWT says.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,7 +73,7 @@ pub(crate) struct Claims {
     pub(crate) exp: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) jti: Option<String>,
-    pub(crate) scopes: BTreeMap<String, Vec<String>>,
+    pub(crate) scopes: Packed,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) amr: Vec<Amr>,
 }

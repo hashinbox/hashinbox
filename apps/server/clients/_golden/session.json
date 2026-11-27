@@ -7,14 +7,14 @@
       "iat": 1700000000,
       "scopes": "com.hashinbox.wallets[ethereum.mainnet.0xabc]:read",
       "sub": null,
-      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDA5MDAsInNjb3BlcyI6eyJjb20uaGFzaGluYm94IjpbIndhbGxldHNbZXRoZXJldW0ubWFpbm5ldC4weGFiY106cmVhZCJdfX0.piTEBFAoyfZEL3EH9Rr5zCZWDsKRIMQ7cQfsriWpi-8"
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwiaWF0IjoxNzAwMDAwMDAwLCJleHAiOjE3MDAwMDA5MDAsInNjb3BlcyI6eyJjb20uaGFzaGluYm94Ijoid2FsbGV0c1tldGhlcmV1bS5tYWlubmV0LjB4YWJjXTpyZWFkIn19.e8zEPY4gFtjWSr6KQfaZfIY6YIuH8Hu5sthfB7JQ3Bk"
     },
     {
       "exp": 1700086400,
       "iat": 1700000000,
       "scopes": "com.hashinbox.wallets[a,b%5D%20c%25d]:read com.hashinbox.triggers com.hashinbox.wallets[é].tags:read other.thing 123.a:read",
       "sub": "customer-1",
-      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwic3ViIjoiY3VzdG9tZXItMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDg2NDAwLCJzY29wZXMiOnsiMTIzIjpbImE6cmVhZCJdLCJjb20uaGFzaGluYm94IjpbInRyaWdnZXJzIiwid2FsbGV0c1thLGIlNUQlMjBjJTI1ZF06cmVhZCIsIndhbGxldHNbw6ldLnRhZ3M6cmVhZCJdLCJvdGhlciI6WyJ0aGluZyJdfX0.Da2pvj-z1alTLOq3MBXqtKcGfe5bIuugoL0txOPuqww"
+      "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6ImhpcC9zTEREU3o0RENkQW4xVzF4ZjM2TjIifQ.eyJpc3MiOiJoaXAvc0xERFN6NERDZEFuMVcxeGYzNk4yIiwic3ViIjoiY3VzdG9tZXItMSIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjoxNzAwMDg2NDAwLCJzY29wZXMiOnsiMTIzLmEiOiIqOnJlYWQiLCJjb20uaGFzaGluYm94IjpbInRyaWdnZXJzIiwid2FsbGV0c1thLGIlNUQlMjBjJTI1ZF06cmVhZCIsIndhbGxldHNbw6ldLnRhZ3M6cmVhZCJdLCJvdGhlci50aGluZyI6IioifX0.Z_5IwQ-WUqVsPvM7zjY12CB0FV56-9FmPQ93LR4Nxzg"
     },
     {
       "exp": 1700000060,
@@ -34,6 +34,6 @@
     "iss": "user/0193a",
     "scopes": "123.a:read com.hashinbox",
     "sub": "0193a",
-    "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6InVzZXIvMDE5M2EifQ.eyJpc3MiOiJ1c2VyLzAxOTNhIiwic3ViIjoiMDE5M2EiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMzYwMCwianRpIjoiMDE5M2IiLCJzY29wZXMiOnsiMTIzIjpbImE6cmVhZCJdLCJjb20iOlsiaGFzaGluYm94Il19LCJhbXIiOlsicHdkIiwib3RwIl19.-gYBJjJbNZfHrbup7Ko-c9em6227wXURcw2lHOnEfIk"
+    "token": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiIsImtpZCI6InVzZXIvMDE5M2EifQ.eyJpc3MiOiJ1c2VyLzAxOTNhIiwic3ViIjoiMDE5M2EiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6MTcwMDAwMzYwMCwianRpIjoiMDE5M2IiLCJzY29wZXMiOnsiMTIzLmEiOiIqOnJlYWQiLCJjb20uaGFzaGluYm94IjoiKiJ9LCJhbXIiOlsicHdkIiwib3RwIl19.txucVIaBmpWUSbuyYHPhq50IWqpNqZRiaEiASN0FP54"
   }
 }

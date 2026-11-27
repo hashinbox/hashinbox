@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hashinbox_client::scope::escape_id;
-use hashinbox_client::{Issue, Scope, Scopes, Secret, Session};
+use hashinbox_client::{Issue, Packed, Scope, Scopes, Secret, Session};
 use serde_json::Value;
 
 fn vectors(name: &str) -> Value {
@@ -57,10 +57,14 @@ fn scope_vectors() {
             text(&case["compressed"]),
             "{case}"
         );
-        let packed: BTreeMap<String, Vec<String>> =
-            serde_json::from_value(case["packed"].clone()).unwrap();
+        let packed: Packed = serde_json::from_value(case["packed"].clone()).unwrap();
         assert_eq!(set.pack(), packed, "{case}");
         assert_eq!(Scopes::unpack(&packed).unwrap(), set.compress(), "{case}");
+    }
+    for case in all["unpack"].as_array().unwrap() {
+        let packed: Packed = serde_json::from_value(case["packed"].clone()).unwrap();
+        let unpacked = Scopes::unpack(&packed).ok().map(|held| held.to_string());
+        assert_eq!(unpacked.as_deref(), case["scopes"].as_str(), "{case}");
     }
     let depends: BTreeMap<String, Vec<String>> =
         serde_json::from_value(all["expand"]["depends"].clone()).unwrap();

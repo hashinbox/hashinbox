@@ -94,7 +94,7 @@ struct CreateRequest {
     /// Its scopes, packed, covered by the creator's; none when absent.
     /// The root user holds every scope.
     #[serde(default)]
-    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, Vec<String>>>)]
+    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, scope::Group>>)]
     scopes: Option<Packed>,
 }
 
@@ -195,7 +195,7 @@ struct UserPath {
 struct UpdateRequest {
     /// Its new scopes, packed, covered by the caller's.
     #[serde(default)]
-    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, Vec<String>>>)]
+    #[schema(nullable = false, value_type = Option<std::collections::BTreeMap<String, scope::Group>>)]
     scopes: Option<Packed>,
     /// Disabled (it, its keys and every session refused), or enabled again.
     #[serde(default)]

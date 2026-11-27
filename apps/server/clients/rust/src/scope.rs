@@ -1,7 +1,18 @@
 //! Hand-written: scopes are `packages/scope`'s own types, plus filling a
 //! template's holes at run time.
 
-pub use ::scope::{ParseError, Scope, Scopes};
+pub use ::scope::{Group, Packed, ParseError, Scope, Scopes};
+
+use crate::models::ScopeGroup;
+
+impl From<ScopeGroup> for Group {
+    fn from(group: ScopeGroup) -> Self {
+        match group {
+            ScopeGroup::String(scope) => Self::One(scope),
+            ScopeGroup::List(scopes) => Self::Many(scopes),
+        }
+    }
+}
 
 /// `id` as written between a scope's brackets: `%`, `[`, `]`,
 /// whitespace and controls as `%XX` (`packages/scope`'s escape).

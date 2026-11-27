@@ -247,9 +247,9 @@ func (s segment) compare(other segment) int {
 // Scopes are what a session holds.
 type Scopes []Scope
 
-// ParseScopes is packed unpacked: each prefix and its scopes joined by `.`
-// (an empty prefix: the scopes as they are).
-func ParseScopes(packed map[string][]string) (Scopes, error) {
+// ParseScopes is packed unpacked: each prefix and its scopes joined by `.`,
+// `*` the prefix itself (an empty prefix: the scopes as they are).
+func ParseScopes(packed map[string]ScopeGroup) (Scopes, error) {
 	prefixes := make([]string, 0, len(packed))
 	for prefix := range packed {
 		prefixes = append(prefixes, prefix)
@@ -257,11 +257,8 @@ func ParseScopes(packed map[string][]string) (Scopes, error) {
 	sort.Strings(prefixes)
 	var scopes Scopes
 	for _, prefix := range prefixes {
-		for _, text := range packed[prefix] {
-			if prefix != "" {
-				text = prefix + "." + text
-			}
-			scope, err := ParseScope(text)
+		for _, text := range packed[prefix].texts() {
+			scope, err := ParseScope(joined(prefix, text))
 			if err != nil {
 				return nil, err
 			}
@@ -269,6 +266,29 @@ func ParseScopes(packed map[string][]string) (Scopes, error) {
 		}
 	}
 	return scopes, nil
+}
+
+// joined is text under prefix: `*` (`*:read`) the prefix itself.
+func joined(prefix, text string) string {
+	level, star := strings.CutPrefix(text, "*")
+	switch {
+	case prefix == "":
+		return text
+	case star && (level == "" || strings.HasPrefix(level, ":")):
+		return prefix + level
+	}
+	return prefix + "." + text
+}
+
+// texts is the group's scopes, one or several.
+func (g ScopeGroup) texts() []string {
+	if g.String != nil {
+		return []string{*g.String}
+	}
+	if g.List != nil {
+		return *g.List
+	}
+	return nil
 }
 
 // MustScopes is texts parsed; it panics on one that does not parse.
@@ -400,11 +420,12 @@ func (s Scopes) compress() Scopes {
 // Pack is them compressed, then grouped by their shared prefix, the
 // shortest text for a JWT claim:
 // `{"com.hashinbox": ["triggers", "wallets[a]:read"]}`. A prefix is the
-// leading plain names every scope starting with the same step shares,
-// each scope keeping one step at least. ParseScopes reverses it.
-func (s Scopes) Pack() map[string][]string {
+// leading plain names every scope starting with the same step shares; a
+// scope that is its prefix is `*` (`*:read`). A group of one scope is its
+// text alone: `{"com.hashinbox": "*"}`. ParseScopes reverses it.
+func (s Scopes) Pack() map[string]ScopeGroup {
 	compressed := s.compress()
-	packed := map[string][]string{}
+	lists := map[string][]string{}
 	for start := 0; start < len(compressed); {
 		end := start + 1
 		for end < len(compressed) && compressed[end].path[0] == compressed[start].path[0] {
@@ -414,16 +435,27 @@ func (s Scopes) Pack() map[string][]string {
 		shared := sharedPrefix(group)
 		for _, scope := range group {
 			prefix := joinSteps(scope.path[:shared])
-			rest := Scope{path: scope.path[shared:], read: scope.read}
-			packed[prefix] = append(packed[prefix], rest.String())
+			rest := Scope{path: scope.path[shared:], read: scope.read}.String()
+			if len(scope.path) == shared {
+				rest = "*" + rest
+			}
+			lists[prefix] = append(lists[prefix], rest)
 		}
 		start = end
+	}
+	packed := map[string]ScopeGroup{}
+	for prefix, list := range lists {
+		if len(list) == 1 {
+			packed[prefix] = ScopeGroup{String: &list[0]}
+		} else {
+			packed[prefix] = ScopeGroup{List: &list}
+		}
 	}
 	return packed
 }
 
 // sharedPrefix is how many leading steps of scopes are the same plain name
-// in each, each scope keeping one step at least.
+// in each.
 func sharedPrefix(scopes Scopes) int {
 	shortest := len(scopes[0].path)
 	for _, scope := range scopes {
@@ -431,7 +463,7 @@ func sharedPrefix(scopes Scopes) int {
 	}
 	first := scopes[0].path
 	at := 0
-	for ; at < shortest-1; at++ {
+	for ; at < shortest; at++ {
 		if first[at].hasID {
 			break
 		}

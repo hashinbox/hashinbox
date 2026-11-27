@@ -116,7 +116,7 @@ func TestDoMapsTheErrorBody(t *testing.T) {
 	_, err := WalletsList(context.Background(), client, WalletsListRequest{})
 	var api *APIError
 	if !errors.As(err, &api) || api.Status != 403 || api.Kind != KindPermissionDenied || api.Message != "no" ||
-		api.Metadata["scope"] != "com.hashinbox.wallets:read" || !errors.Is(err, ErrMissingScope) {
+		api.Metadata["scope"] != "com.hashinbox.wallets:read" || APIErrorFrom(err).Reason != ReasonMissingScope {
 		t.Fatalf("%#v", err)
 	}
 	_, err = WalletsList(context.Background(), client, WalletsListRequest{})
@@ -136,7 +136,7 @@ func TestDoRefusesAMissingScopeLocally(t *testing.T) {
 	if !errors.As(err, &api) || api.Status != 403 || api.Kind != KindPermissionDenied ||
 		api.Reason != ReasonMissingScope || api.Message != "wallet_get needs scope com.hashinbox.wallets[y]:read" ||
 		api.Metadata["scope"] != "com.hashinbox.wallets[y]:read" || api.Metadata["operation"] != "wallet_get" ||
-		!errors.Is(err, ErrMissingScope) {
+		APIErrorFrom(err).Reason != ReasonMissingScope {
 		t.Fatalf("%#v", err)
 	}
 	if _, err := WalletGet(context.Background(), client, WalletGetRequest{ID: "x"}); err != nil {
@@ -227,7 +227,7 @@ func TestWithSecretRenewsOnceAfterSessionExpired(t *testing.T) {
 	if _, err := WalletsList(ctx, client, WalletsListRequest{}); err != nil {
 		t.Fatal("not retried:", err)
 	}
-	if _, err := WalletsList(ctx, client, WalletsListRequest{}); !errors.Is(err, ErrSessionExpired) {
+	if _, err := WalletsList(ctx, client, WalletsListRequest{}); APIErrorFrom(err).Reason != ReasonSessionExpired {
 		t.Fatal("retried more than once, or hid the error:", err)
 	}
 	want := "[GET /v1/wallets GET /v1/wallets GET /v1/wallets GET /v1/wallets]"
@@ -255,11 +255,11 @@ func TestLoginSurfacesItsReasonsAndKeepsTheSession(t *testing.T) {
 	client := NewClient(server.URL)
 	ctx := context.Background()
 	login := LoginRequest{Email: "a@b.c", Password: "pw"}
-	if _, err := client.Login(ctx, login); !errors.Is(err, ErrTOTPRequired) {
+	if _, err := client.Login(ctx, login); APIErrorFrom(err).Reason != ReasonTOTPRequired {
 		t.Fatal(err)
 	}
 	login.TOTP = "123456"
-	if _, err := client.Login(ctx, login); !errors.Is(err, ErrWrongCredentials) {
+	if _, err := client.Login(ctx, login); APIErrorFrom(err).Reason != ReasonWrongCredentials {
 		t.Fatal(err)
 	}
 	session, err := client.Login(ctx, login)
@@ -446,7 +446,7 @@ func TestAPIErrorFrom(t *testing.T) {
 	if APIErrorFrom(api) != api || APIErrorFrom(fmt.Errorf("login: %w", api)) != api {
 		t.Fatal("not as is")
 	}
-	if APIErrorFrom(api).Reason != ReasonTOTPRequired || !errors.Is(api, ErrTOTPRequired) {
+	if APIErrorFrom(api).Reason != ReasonTOTPRequired {
 		t.Fatal(api)
 	}
 	transport := &url.Error{Op: "Get", URL: "http://x", Err: errors.New("refused")}
@@ -488,7 +488,7 @@ func TestAPIErrorFromAnAnswerReadsOnlyAnErrorBody(t *testing.T) {
 	raw := `{"kind":"unauthenticated","message":"code","reason":"totp_required","metadata":{"a":"b"}}`
 	got := APIErrorFrom(httpAnswer{401, []byte(raw)})
 	if got.Status != 401 || got.Kind != KindUnauthenticated || got.Message != "code" || got.Reason != ReasonTOTPRequired ||
-		got.Metadata["a"] != "b" || !errors.Is(got, ErrTOTPRequired) {
+		got.Metadata["a"] != "b" {
 		t.Fatalf("%#v", got)
 	}
 }

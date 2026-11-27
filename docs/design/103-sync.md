@@ -135,7 +135,6 @@ from its cursor. Clients reconnect constantly, by design.
 | `GET /v1/events/stream`, `/v1/wallets/{id}/events/stream` (097) | the last sent event's, or the start position when none was sent | replay from the DB after it, then live |
 | `GET /v1/wallet_groups/{id}/deposits/stream` (104) | null: each message is a whole snapshot | a fresh snapshot |
 | `GET /v1/logs/stream` | null: a tail, not a feed | live from now; the gap (≈ 0.5 s) may drop entries, as `missed` already does. A reader that needs every entry lists `GET /v1/logs?since=` |
-| `GET /v1/networks/{chain}/{network}/tip/search` | `"{low}-{high}"`: the last probe's positions | the search resumes between them; `found` or `error` still ends it for good |
 
 **Why:**
 
@@ -409,8 +408,7 @@ app.post("/hooks/hashinbox", express.raw({ type: "application/json" }), async (r
   repeat; a clock stepped back keeps `at` monotone; a writer that commits after a reader's
   snapshot is read after the reader's cursor; `since` maps; below `pruned_before` is 410.
 - Windows: every stream ends at 15 s ± 2 s with `reconnect`; `Last-Event-ID` and `?cursor=`
-  resume; a revoked key's stream gets 401 on the next re-open; the tip search resumes from
-  `low-high`; the deposits stream sends a snapshot per window.
+  resume; a revoked key's stream gets 401 on the next re-open; the deposits stream sends a snapshot per window.
 - `GET /v1/events?group=` lists the members' events and `paid`; `kinds` filters.
 - Subscribe, per language: as listed above.
 - Trigger: `events` holds once per new event, never twice across rounds; a group's `paid` fires
@@ -426,7 +424,7 @@ app.post("/hooks/hashinbox", express.raw({ type: "application/json" }), async (r
 | Phase | Scope | Effort |
 |---|---|---|
 | 0 | 097 built with the changes above (table, `(at, id)` cursor, writers, list, stream, hub) | 5–6 days |
-| 1 | `api/sse.rs` and the 15 s windows on the four routes (tip search resume); `stream()` reconnect in the five clients | 2–3 days |
+| 1 | `api/sse.rs` and the 15 s windows on the four routes; `stream()` reconnect in the five clients | 2–3 days |
 | 2 | `subscribe` + `ack()` in TS and Go, tests | 3–4 days |
 | 3 | `subscribe` in Rust, Python, PHP (with `poll()`) | 3 days |
 | 4 | `events` term (package change), `webhook` action and job, signing, redaction, TS and Go `verify`, dashboard form | 4–5 days |

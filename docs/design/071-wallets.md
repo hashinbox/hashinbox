@@ -83,26 +83,11 @@ Seed phrases and derivation paths are not part of this: a raw key only.
 Derivation needs key derivation in `packages/crypto`/`sdk/wallets` and its own
 approval.
 
-## Finding the start block, with progress
-
-- `GET /v1/networks/{chain}/{network}/tip/search?at=…` answers
-  `text/event-stream`:
-  - `event: probe` `{"low":{"position","timestamp"},"high":{"position","timestamp"}}`
-    after each step of the binary search (the range narrows);
-  - `event: found` `{"position","timestamp"}` at the end;
-  - `event: error` `{"message"}` on failure (not served, not supported).
-- `base::Dated` gets the search with a progress callback (the existing
-  `position_at` calls it with a no-op).
-- `GET …/tip?at=` stays for clients that want one answer.
-
 ## UI: "Add wallet", two steps
 
 1. **Wallet** — network; then one of *Generate*, *Private key*, *Address*.
-2. **Indexing** — assets; start *From now* or *From block* (number field with
-   a search icon). For a generated wallet the start is *From now* only.
-   The search icon opens a dialog: date and time, *Search*; the dialog shows
-   the probes as they stream (the range narrowing, how far off) and the found
-   block; *Use* fills the field.
+2. **Indexing** — assets; start *From now* or *From block* (number field).
+   For a generated wallet the start is *From now* only.
 
 "Watch more assets" on an existing wallet is step 2 alone.
 

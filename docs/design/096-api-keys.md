@@ -66,7 +66,7 @@ reads (`/v1/assets`, `/v1/markets`, `/v1/markets/{name}/candles`) need only a se
 | `wallets[id].tags` | tag and untag it | `PUT`/`DELETE /v1/wallets/{id}/tags/{tag}` |
 | `wallets.tags:read` | list every tag in use | `GET /v1/wallets/tags` |
 | `wallets[id].transactions` | send from it | `POST /v1/wallets/{id}/transactions` |
-| `networks` | create networks; `:read`: list them, their blocks and tip | `POST /v1/networks`; `GET /v1/networks`, `GET /v1/networks/{chain}/{network}/blocks`, `…/blocks/{position}`, `POST …/tip/search` (`:read`) |
+| `networks` | create networks; `:read`: list them, their blocks and tip | `POST /v1/networks`; `GET /v1/networks`, `GET /v1/networks/{chain}/{network}/blocks`, `…/blocks/{position}` |
 | `networks.transactions:read` | a network's and a block's transactions | `GET /v1/networks/{chain}/{network}/transactions`, `…/blocks/{position}/transactions` |
 | `networks.endpoints` | RPC nodes (their URLs carry API keys): add, replace, test, remove, switch; `:read`: list them, their failures | `POST`/`PUT /v1/networks/{chain}/{network}/endpoints`, `POST …/endpoints/test`, `POST /v1/networks/endpoints`, `DELETE …/endpoints/{id}`, `PUT …/endpoints/{id}/state`; `GET …/endpoints`, `GET …/endpoints/{id}/failures` (`:read`) |
 | `networks.routes` | which node serves which call; `:read` reads it | `PUT`; `GET /v1/networks/{chain}/{network}/routes` |
@@ -561,7 +561,7 @@ src/api/state.rs        AppState (unchanged; gains root_exists)
 src/api/middleware.rs   the one middleware, token_of, the Session and Caller extractors
 src/api/routes.rs       declares the route modules; one router merging them all
 src/api/routes/*.rs     one file per resource, as today:
-    assets, health, jobs, logs, markets, networks, networks_tip,
+    assets, health, jobs, logs, markets, networks,
     network_blocks, network_block_transactions, network_endpoints,
     network_endpoint_routes, network_transactions, openapi, session, stats,
     triggers, user, users, keys, wallets, wallet_indexes, wallet_index_legs,

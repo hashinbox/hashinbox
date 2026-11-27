@@ -48,7 +48,6 @@ async fn app() -> (Router, crate::db::Db, tempfile::TempDir) {
         candles: Default::default(),
         chains: Default::default(),
         root_exists: Default::default(),
-        searches: Default::default(),
         stream_window: http_server::sse::SSE_WINDOW,
     });
     let config = http_server::Config::new(

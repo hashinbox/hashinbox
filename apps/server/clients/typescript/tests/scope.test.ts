@@ -3,7 +3,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { escapeId, fill, Scope, ScopeError, Scopes } from "../src/index";
+import {
+  escapeId,
+  fill,
+  Scope,
+  ScopeError,
+  Scopes,
+  type Packed,
+} from "../src/index";
 
 interface Vectors {
   parse: { text: string; display: string }[];
@@ -13,8 +20,9 @@ interface Vectors {
     scopes: string;
     display: string;
     compressed: string;
-    packed: Record<string, string[]>;
+    packed: Packed;
   }[];
+  unpack: { packed: Packed; scopes: string | null }[];
   first_uncovered: {
     granted: string;
     asked: string;
@@ -57,6 +65,13 @@ test("compress, pack, unpack", () => {
     assert.equal(held.compress().toString(), set.compressed);
     assert.deepEqual(held.pack(), set.packed);
     assert.equal(Scopes.parse(set.packed).toString(), set.compressed);
+  }
+});
+
+test("unpack", () => {
+  for (const { packed, scopes } of vectors.unpack) {
+    if (scopes === null) assert.throws(() => Scopes.parse(packed), ScopeError);
+    else assert.equal(Scopes.parse(packed).toString(), scopes);
   }
 });
 

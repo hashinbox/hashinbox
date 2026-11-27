@@ -2580,113 +2580,6 @@
         ]
       }
     },
-    "/v1/networks/{chain}/{network}/tip/search": {
-      "get": {
-        "tags": [
-          "networks"
-        ],
-        "summary": "Find a network's last block at or before a time, streaming the search",
-        "description": "`text/event-stream`, read from the node: `event: probe` with `{\"low\":{\"position\",\"timestamp\"},\"high\":{…}}` after each step of the binary search (the range narrows: the block is at or after `low`, before `high`); then `event: found` with `{\"position\",\"timestamp\"}`, or `event: error` with `{\"message\"}` (cannot find blocks by time, before the first block, the node failed). The stream then ends. Each event's `id` is its step's number; a search longer than the stream window (15 s) ends its answer with `event: close`: the same search, asked again with the last `id` as `cursor`, goes on from the step after (it runs on meanwhile, and is kept a minute after it ends).",
-        "operationId": "network_tip_search",
-        "parameters": [
-          {
-            "name": "chain",
-            "in": "path",
-            "description": "Chain name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "network",
-            "in": "path",
-            "description": "Network name, as `GET /v1/networks` lists it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "at",
-            "in": "query",
-            "description": "RFC 3339 time (`2026-10-01T00:00:00Z`) or Unix seconds: find the last\nblock at or before it.",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "cursor",
-            "in": "query",
-            "description": "The last event `id` read (a step's number): the same search's steps\nafter it.",
-            "required": false,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The search's events",
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Malformed `at` or `cursor`",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Missing or invalid bearer token",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Missing scope",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "The network is not configured",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "bearer": [
-              "com.hashinbox.networks:read"
-            ]
-          }
-        ]
-      }
-    },
     "/v1/networks/{chain}/{network}/transactions": {
       "get": {
         "tags": [
@@ -6333,10 +6226,7 @@
             "type": "object",
             "description": "Its scopes, packed, covered by the caller's; the caller's when\nabsent.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -6365,10 +6255,7 @@
             "type": "object",
             "description": "Fewer scopes than the issuer's, packed\n(`{\"com.hashinbox\": [\"wallets[x]:read\"]}`); the issuer's when\nabsent.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -6417,10 +6304,7 @@
             "type": "object",
             "description": "Its scopes, packed, covered by the creator's; none when absent.\nThe root user holds every scope.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -6590,10 +6474,7 @@
             "type": "object",
             "description": "What it may do, packed.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -8140,6 +8021,22 @@
           "mixed"
         ]
       },
+      "ScopeGroup": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "One scope."
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Several."
+          }
+        ],
+        "description": "A prefix's packed scopes: one as text, several as a list; `*` is the\nprefix itself (`*:read` read only)."
+      },
       "SecretSetting": {
         "type": "object",
         "description": "A secret setting as listed: never its value or default.",
@@ -8280,10 +8177,7 @@
             "type": "object",
             "description": "What it may do, packed.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -9062,10 +8956,7 @@
             "type": "object",
             "description": "Its new scopes, packed, covered by the caller's.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -9141,10 +9032,7 @@
             "type": "object",
             "description": "The widest scopes it may issue, packed in JSON\n(`{\"com.hashinbox\": [\"wallets:read\"]}`).",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"
@@ -9212,10 +9100,7 @@
             "type": "object",
             "description": "What it may do, covered by its user's; packed in JSON.",
             "additionalProperties": {
-              "type": "array",
-              "items": {
-                "type": "string"
-              }
+              "$ref": "#/components/schemas/ScopeGroup"
             },
             "propertyNames": {
               "type": "string"

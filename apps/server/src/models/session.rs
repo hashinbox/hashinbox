@@ -5,7 +5,7 @@
 //! checks its times; only its issuer holds what checks its signature
 //! ([`Session::is_signed_by`]). `jsonwebtoken` encodes and decodes it.
 
-use std::{collections::BTreeMap, fmt};
+use std::fmt;
 
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use scope::Scopes;
@@ -111,7 +111,7 @@ struct Claims {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     jti: Option<String>,
     /// What it may do, packed (`Scopes::pack`).
-    scopes: BTreeMap<String, Vec<String>>,
+    scopes: scope::Packed,
     /// How its login proved who it is; none for a key's.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     amr: Vec<Amr>,

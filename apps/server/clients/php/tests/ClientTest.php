@@ -10,7 +10,6 @@ use Hashinbox\CreateWalletRequest;
 use Hashinbox\Json;
 use Hashinbox\Kind;
 use Hashinbox\LogsStreamRequest;
-use Hashinbox\NetworkTipSearchRequest;
 use Hashinbox\Reason;
 use Hashinbox\Scopes;
 use Hashinbox\Secret;
@@ -22,7 +21,6 @@ use PHPUnit\Framework\TestCase;
 use RuntimeException;
 
 use function Hashinbox\logsStream;
-use function Hashinbox\networkTipSearch;
 use function Hashinbox\walletGet;
 use function Hashinbox\walletsCreate;
 
@@ -281,11 +279,11 @@ final class ClientTest extends TestCase
         [$api, $fake] = self::streaming([
             [503, $error],
             new RuntimeException('curl: reset'),
-            [200, "id: 7\nevent: probe\ndata: {}\n\nevent: close\ndata: {}\n\n"],
+            [200, "id: 7\nevent: entry\ndata: {}\n\nevent: close\ndata: {}\n\n"],
             [401, '{"kind": "unauthenticated", "message": "refused", "reason": "session_revoked"}'],
         ]);
         $started = microtime(true);
-        $handle = networkTipSearch($api, new NetworkTipSearchRequest(chain: 'bitcoin', network: 'regtest', at: '1', cursor: '5'));
+        $handle = logsStream($api, new LogsStreamRequest(cursor: '5'));
         $read = [];
         try {
             foreach ($handle as $event) {
@@ -295,7 +293,7 @@ final class ClientTest extends TestCase
         } catch (ApiError $refused) {
             self::assertSame(401, $refused->status);
         }
-        self::assertSame(['probe'], $read);
+        self::assertSame(['entry'], $read);
         self::assertGreaterThanOrEqual(0.03, microtime(true) - $started, 'waited 0.01 s, then 0.02 s');
         self::assertCount(4, $fake->sent);
         self::assertSame(['5', '5', '5', '7'], self::cursors($fake), "the caller's cursor first, then the last id");

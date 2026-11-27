@@ -13,7 +13,7 @@ use std::fmt;
 pub use schema::Schema;
 pub use scope::{Scope, Segment};
 pub use scope_macros::{require, utoipa};
-pub use scopes::Scopes;
+pub use scopes::{Group, Packed, Scopes};
 
 /// What a caller was granted: the scopes [`require!`] checks against. A session, a key or plain [`Scopes`].
 pub trait Granted {

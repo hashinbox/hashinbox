@@ -54,7 +54,7 @@ pub(crate) struct User {
     /// (`{"com.hashinbox": ["wallets:read"]}`).
     #[diesel(deserialize_as = PackedScopes)]
     #[serde(serialize_with = "serialize_packed")]
-    #[schema(value_type = std::collections::BTreeMap<String, Vec<String>>)]
+    #[schema(value_type = std::collections::BTreeMap<String, scope::Group>)]
     pub(crate) scopes: Scopes,
     /// 32 random bytes signing its sessions (HS256); never shown.
     #[serde(skip)]

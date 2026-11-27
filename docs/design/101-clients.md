@@ -275,7 +275,7 @@ generated operations take the `Client` interface, so the default transport is `*
 | `Session` | `{Token, Issuer, Subject, Scopes, IssuedAt, ExpiresAt, Amr}`; `ParseSession(jwt)` (decoded, **not verified**); `.Expired(now)`; `.Can(op, params)` |
 | `Secret` | `ParseSecret("hip/…", "his/…")` (base 58, CRC32 checked); `secret.Issue(WithScopes(s), WithSubject(sub), WithTTL(d))`: HS256, the `his/…` text the key, header `{typ, alg, kid}` and claims `{iss, sub?, iat, exp, scopes}` in the server's order, no HTML escaping (byte-identical to its `jsonwebtoken`); TTL 10 min unless set, 1 s to `MaxTTL` (24 h); `String()` prints the id only |
 | `HTTPClient` | `NewClient(baseURL, WithSession(s) \| WithSecret(s), WithSecretScopes(s), WithSessionTTL(d), WithHTTPClient(c), WithTimeout(d), WithUserAgent(ua), WithoutScopeCheck())`; `Do` (`Client`), `Open` (`Streamer`); `Login(ctx, LoginRequest{Email, Password \| Passphrase, TOTP})`, `Logout(ctx, all)`, `Session()` |
-| Errors | `*APIError{Status, Kind, Message, Reason, Metadata, Cause}`, a struct literal; `APIErrorFrom(x any)` (never nil; the `*APIError` an error wraps, as is); `ReasonWrongCredentials`, `ReasonTOTPRequired`, `ReasonSessionExpired`, `ReasonMissingScope`; `errors.Is` with `ErrMissingScope`, `ErrTOTPRequired`, `ErrWrongCredentials`, `ErrSessionExpired` matches its `Reason`; a local missing scope is the server's 403 `*APIError`, unsent |
+| Errors | `*APIError{Status, Kind, Message, Reason, Metadata, Cause}`, a struct literal; `APIErrorFrom(x any)` (never nil; the `*APIError` an error wraps, as is); `ReasonWrongCredentials`, `ReasonTOTPRequired`, `ReasonSessionExpired`, `ReasonMissingScope`; match on `APIErrorFrom(err).Reason`; a local missing scope is the server's 403 `*APIError`, unsent |
 
 - **A session is always a JWT; a secret never goes over the wire.** `WithSecret` makes the
   client sign its own sessions (`secret.Issue`) and send them; there is no `Bearer his/…` path.
@@ -807,7 +807,6 @@ The server adds one vendor extension on that media type:
 ```
 
 - `stream_logs`: `message` → `LogEntry`, `missed` → `{missed: n}` (a new `LogsMissed` schema).
-- `search_tip`: `probe`, `found`, `error` (new `TipProbe`, `TipFound`, `TipError` schemas).
 - 097's `/v1/wallets/{id}/events/stream`: one entry per kind, each the envelope.
 - Written by a `utoipa::Modify` beside `Bearer` in `api.rs`, from a `const EVENTS` next to each
   stream handler, so the names sit with the code that sends them.
@@ -820,7 +819,7 @@ The server adds one vendor extension on that media type:
   `http_server::sse::windowed(events, window)`: it lasts the window (`http_server::sse::
   SSE_WINDOW`, 15 s; the server's `AppState.stream_window`, shorter in tests), kept alive by
   comments, then sends `event: close` (data `{}`, `retry: 0`) and ends. A stream that ends
-  before (a tip search found) sends no `close`: it is done. Each reconnect is a new request, its
+  before sends no `close`: it is done. Each reconnect is a new request, its
   token checked again (401 when it no longer holds).
 - **Resuming.** Each event carries an `id:`; the reader reconnects with the last as
   the query parameter `cursor` (each stream route has it; no `Last-Event-ID` header).
@@ -828,12 +827,6 @@ The server adds one vendor extension on that media type:
     the last, the stored row's too). The feed holds its newest 1 000; a resume sends those
     after the id, and the stored ones before them when the feed no longer holds every one
     (a restart), then the live ones: none missed, none twice.
-  - `network_tip_search`: the id is the step's number. The search runs on its own task, held
-    by network and time (`usecase::networks::Searches`) while it runs and a minute after: the
-    same search asked again with `cursor=n` reads on from step n + 1, no node read
-    repeated. A search is about `log2(tip)` node reads (20–30), mostly well inside 15 s, but a
-    slow node can take longer; resuming from the last probe instead would need `Dated::search`
-    to take a start range (a `sdk/base` change, not made).
 - **Clients: a handle, not a one-shot stream.** Every language's stream helper and generated
   stream op return a handle that:
   - reconnects at once on `close` (not handed to the caller), the last id as `cursor` (the
@@ -845,9 +838,8 @@ The server adds one vendor extension on that media type:
     cancel, Rust `stop()` or drop, Python `await handle.stop()` / `async with`, PHP
     `$handle->stop()` (checked between events and windows);
   - exposes the last event id (`cursor`). Without a stop it reconnects every window, forever.
-- **Dashboard.** The logs drawer and page (`api/logs.ts`) and the tip search dialog
-  (`wallets/_components/search.tsx`) read the TS handle; closing the drawer, the dialog or
-  leaving the page calls `stop()`.
+- **Dashboard.** The logs drawer and page (`api/logs.ts`) read the TS handle; closing the
+  drawer or leaving the page calls `stop()`.
 
 ## Regenerating: `apps/server/build.rs`
 
@@ -910,7 +902,7 @@ apps/server/clients/
   (replaces `whenUnauthorized` and its `ASKS` list: the reason decides now);
   `call(client.GET('/v1/networks'))` becomes `networksList(api)`; the login page's
   `error.code === 'totp_required'` becomes `api.login(…)` and `error.reason`; `events()`
-  becomes `logsStream(api, query)` / `networkTipSearch(…)`, each an `EventStream` stopped
+  becomes `logsStream(api, query)`, an `EventStream` stopped
   with `stop()` when its view closes.
 - Kept hand-written: `exchange()` (the docs console sends arbitrary requests) and `openapi()`.
 - `npm run api`, `schema.d.ts`, `openapi-fetch` and `openapi-typescript` are gone; types are

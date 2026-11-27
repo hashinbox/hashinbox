@@ -73,14 +73,6 @@ type RawEvent struct {
 	ID    string
 }
 
-// The reasons an error answers with, as errors.Is targets of an *APIError.
-var (
-	ErrMissingScope     = errors.New("hashinbox: missing scope")
-	ErrTOTPRequired     = errors.New("hashinbox: two-factor code required")
-	ErrWrongCredentials = errors.New("hashinbox: wrong credentials")
-	ErrSessionExpired   = errors.New("hashinbox: session expired")
-)
-
 // The reasons an error answers with: what a client acts on, as
 // APIError.Reason.
 const (
@@ -172,21 +164,6 @@ func (e *APIError) Error() string {
 		text += ": " + e.Message
 	}
 	return text
-}
-
-// Is reports whether target is the Err… of its reason.
-func (e *APIError) Is(target error) bool {
-	switch target {
-	case ErrMissingScope:
-		return e.Reason == ReasonMissingScope
-	case ErrTOTPRequired:
-		return e.Reason == ReasonTOTPRequired
-	case ErrWrongCredentials:
-		return e.Reason == ReasonWrongCredentials
-	case ErrSessionExpired:
-		return e.Reason == ReasonSessionExpired
-	}
-	return false
 }
 
 // missingScope is the server's 403 for a call operation lacking scope,
@@ -375,8 +352,8 @@ type LoginRequest struct {
 }
 
 // Login logs in and sends the user's session from now on, in place of any
-// session or secret. A wrong login is ErrWrongCredentials; a right one
-// without its code, ErrTOTPRequired (errors.Is).
+// session or secret. A wrong login is ReasonWrongCredentials; a right one
+// without its code, ReasonTOTPRequired.
 func (c *HTTPClient) Login(ctx context.Context, login LoginRequest) (Session, error) {
 	optional := func(text string) *string {
 		if text == "" {
@@ -432,7 +409,7 @@ func (c *HTTPClient) exchange(ctx context.Context, request Request, accept, curs
 		return nil, err
 	}
 	answer, err := c.attempt(ctx, session, request, accept, cursor)
-	if session == nil || !c.signs() || !errors.Is(err, ErrSessionExpired) {
+	if session == nil || !c.signs() || APIErrorFrom(err).Reason != ReasonSessionExpired {
 		return answer, err
 	}
 	session, err = c.bearer(ctx, session.Token)
